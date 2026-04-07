@@ -1,0 +1,32 @@
+# ==================== Excel / Office Dateien ====================
+*.xlsx
+*.xls
+*.xlsm
+*.xlsb
+*.xltx
+*.xltm
+
+# Generierte Ausgaben / Reports
+#/output/
+reports/
+*.csv   # falls du nur bestimmte CSVs ignorieren willst
+
+#alle Environment Dateien
+.env*
+
+# alle Caching Dateien
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Log Dateien
+*.log
+
+# CSV Dateien, die möglicherweise sensible Informationen enthalten
+*.csv
+*.png
+*.json
+
+BAK/
+
