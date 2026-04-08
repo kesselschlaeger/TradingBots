@@ -113,7 +113,10 @@ ORB_DEFAULT_CONFIG: dict = {
         "mega_cap_tech": ["AAPL", "MSFT", "META", "AMZN", "GOOGL"],
         "high_beta_growth": ["TSLA", "PLTR", "NFLX"],
     },
-
+    # ── Time-Decay Filter ───────────────────────────────────────────────
+    # ORB-Breakouts in den ersten 30 Min nach ORB (10:00-10:30) haben empirisch
+    # höhere Completion-Rates. Der Faktor skaliert die Signal-Strength.
+    "use_time_decay_filter": True,
     # ── Data Freshness – Fix #4 ───────────────────────────────────────────
     "max_bar_delay_minutes": 20,
 
@@ -426,6 +429,31 @@ def check_gap_filter(
     return gap <= max_gap_pct
 
 
+def time_decay_factor(bar_time_et: time) -> float:
+    """
+    Gewichtungsfaktor basierend auf Tageszeit (ET).
+
+    ORB-Breakouts kurz nach der Opening Range (10:00-10:30) haben empirisch
+    höhere Completion-Rates, da institutionelle Flows zum Opening-Print noch
+    aktiv sind. Spätere Breakouts können Noise/Rotation sein.
+
+    Bracket (minutes_since_orb):
+      ≤  30 min  (10:00–10:30): 1.00  – Prime-Time, volles Gewicht
+      ≤  90 min  (10:30–11:30): 0.85  – Gut, aber abnehmend
+      ≤ 180 min  (11:30–12:30): 0.65  – Mid-Session, erhöhter Rauschanteil
+      >  180 min (12:30+):      0.40  – Late-Session, schwache Breakouts
+    """
+    minutes_since_orb = (bar_time_et.hour * 60 + bar_time_et.minute) - 600
+    if minutes_since_orb <= 30:
+        return 1.0
+    elif minutes_since_orb <= 90:
+        return 0.85
+    elif minutes_since_orb <= 180:
+        return 0.65
+    else:
+        return 0.40
+
+
 def compute_orb_volume_ratio(
     day_df: pd.DataFrame,
     historical_dfs: Optional[List[pd.DataFrame]] = None,
@@ -561,6 +589,14 @@ def generate_signal(
         multiplier, volume_confirmed,
     )
 
+    # Time-Decay Filter: Strength-Gewichtung nach Tageszeit
+    if cfg.get("use_time_decay_filter", True):
+        decay = time_decay_factor(et_time)
+        strength *= decay
+        ctx["time_decay_factor"] = decay
+    else:
+        ctx["time_decay_factor"] = 1.0
+
     min_strength = float(cfg.get("min_signal_strength", 0.3))
 
     if side == "long" and strength >= min_strength:
@@ -622,6 +658,7 @@ def compute_orb_signals(
     min_strength = float(cfg.get("min_signal_strength", 0.3))
     allow_shorts = bool(cfg.get("allow_shorts", True))
     breakout_mult = float(cfg.get("orb_breakout_multiplier", 1.0))
+    use_time_decay = bool(cfg.get("use_time_decay_filter", True))
 
     # Volume check
     if "Volume_Ratio" in day_df.columns:
@@ -633,6 +670,17 @@ def compute_orb_signals(
 
     out["volume_ok"] = vol_ok.values
 
+    # Time-Decay: vektorisierter Decay-Faktor pro Bar (Backtest)
+    if use_time_decay:
+        minutes_since_orb = np.array(idx_et.hour * 60 + idx_et.minute) - 600
+        decay_factors = np.where(
+            minutes_since_orb <= 30, 1.00,
+            np.where(minutes_since_orb <= 90, 0.85,
+            np.where(minutes_since_orb <= 180, 0.65, 0.40))
+        )
+    else:
+        decay_factors = np.ones(len(day_df))
+
     # Fix #1: Breakout-Level mit multiplier
     breakout_level  = orb_high + (breakout_mult - 1.0) * orb_range
     breakdown_level = orb_low  - (breakout_mult - 1.0) * orb_range
@@ -641,6 +689,7 @@ def compute_orb_signals(
     long_break    = (close > breakout_level) & post_orb
     long_strength = ((close - orb_high) / orb_range).clip(0.0, 1.0)
     long_strength = np.where(vol_ok, np.minimum(long_strength * 1.2, 1.0), long_strength)
+    long_strength = long_strength * decay_factors
     long_valid    = long_break & (long_strength >= min_strength)
 
     out.loc[long_valid, "entry_long"] = True
@@ -653,6 +702,7 @@ def compute_orb_signals(
         short_strength = ((orb_low - close) / orb_range).clip(0.0, 1.0)
         short_strength = np.where(vol_ok, np.minimum(short_strength * 1.2, 1.0),
                                   short_strength)
+        short_strength = short_strength * decay_factors
         short_valid    = short_break & (short_strength >= min_strength)
 
         out.loc[short_valid, "entry_short"] = True
