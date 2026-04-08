@@ -137,6 +137,16 @@ ORB_CONFIG.update({
     # Sicherheitsparameter für Live-Trading
     "buying_power_safety_factor": 0.95,  # Cap Qty wenn Buying Power < 95% erforderlich
 
+    # Stale-Data-Blocker:
+    # IEX liefert Daten mit ~15 Min. Verzögerung. Threshold auf 20 Min. gesetzt,
+    # damit normale IEX-Latenz akzeptiert wird, aber echte Staleness (Verbindungsprobleme,
+    # API-Ausfall, >20 Min. alt) den Trade blockt.
+    # Für SIP-Feed empfehlenswert: max_bar_delay_minutes auf 5-6 Min. senken.
+    "max_bar_delay_minutes": 20,
+    # True  → Symbol wird übersprungen wenn Daten zu alt (empfohlen für Live-Trading)
+    # False → nur Warnung, Trade geht trotzdem durch (altes Verhalten)
+    "block_trades_on_stale_data": True,
+
     # EOD-Close: Minuten vor Handelsschluss (16:00 ET) alle Positionen schließen
     "eod_close_minutes_before": 33,
 
@@ -251,8 +261,20 @@ class AlpacaClient:
     def check_bar_freshness(self, df: pd.DataFrame,
                              max_delay_minutes: int = 20) -> bool:
         """
-        Fix #4: Prüfe ob der letzte Bar aktuell genug ist.
-        Gibt True zurück wenn frisch genug, False bei Verzögerung.
+        Prüft ob der letzte Bar aktuell genug ist.
+
+        Rückgabe:
+            True  → Daten frisch genug, Trade kann fortgesetzt werden.
+            False → Daten zu alt (> max_delay_minutes), Trade sollte geblockt werden.
+
+        Threshold-Empfehlung:
+            IEX-Feed:  20 Min. (akzeptiert normale ~15 Min. IEX-Verzögerung,
+                       blockt bei echten Verbindungsproblemen / API-Ausfall)
+            SIP-Feed:   5-6 Min. (Echtzeit-Feed, strengere Freshness-Anforderung)
+
+        Der Rückgabewert MUSS vom Aufrufer ausgewertet werden!
+        Wird er ignoriert, handelt der Bot still auf stalen Daten.
+        Siehe: run_orb_scan() → block_trades_on_stale_data Config-Key.
         """
         if df.empty:
             return False
@@ -1018,6 +1040,7 @@ class ORB_Bot:
         max_delay = int(self.cfg.get("max_bar_delay_minutes", 20))
         max_concurrent = int(self.cfg.get("max_concurrent_positions", 3))
         new_entries_this_scan = 0  # Zählt neue Entries in diesem Scan-Durchlauf
+        block_on_stale = bool(self.cfg.get("block_trades_on_stale_data", True))
 
         for sym in self.cfg["symbols"]:
             # Concurrent-Positions-Guard: open_positions + neue Entries in diesem Scan
@@ -1040,6 +1063,17 @@ class ORB_Bot:
                 self._log_event("STALE_DATA", "Bar zu alt – Trade blockiert", sym,
                                 {"max_delay_min": max_delay})
                 continue
+            # Freshness-Check: Daten zu alt → Symbol überspringen wenn block_on_stale=True
+            if self.alpaca:
+                data_fresh = self.alpaca.check_bar_freshness(df, max_delay)
+                if not data_fresh:
+                    msg = (f"  {sym}: Daten zu alt (>{max_delay} Min.) – "
+                           f"Trade übersprungen. "
+                           f"{'(block_trades_on_stale_data=False zum Deaktivieren)' if block_on_stale else 'WARNUNG: Trade wird trotzdem ausgeführt!'}")
+                    print(msg)
+                    send_telegram(f"⚠️ {sym}: stale Daten (>{max_delay} Min.) – kein Trade")
+                    if block_on_stale:
+                        continue
 
             df = compute_indicators(df)
 
