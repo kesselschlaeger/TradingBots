@@ -58,11 +58,14 @@ from orb_strategy import (
 )
 
 ## für eine lokale Ausführung ohne OpenClaw-Umgebung können die
+## .env-Dateien genutzt werden. Das Laden erfolgt in main() nach dem
+## Parsen der CLI-Argumente, damit die richtige Datei gewählt wird.
 try:
-    from dotenv import load_dotenv
-    load_dotenv()
+    from dotenv import load_dotenv as _load_dotenv
+    _DOTENV_AVAILABLE = True
 except ImportError:
-    pass
+    _load_dotenv = None
+    _DOTENV_AVAILABLE = False
 
 # ── Alpaca-py (pip install alpaca-py) ──────────────────────────────────────
 try:
@@ -1705,6 +1708,28 @@ def main():
                            help="MIT probabilistic overlay deaktivieren")
     parser.set_defaults(mit_overlay=None)
     args = parser.parse_args()
+
+    # ── .env-Datei wählen und laden ──────────────────────────────────────────
+    # --mit-overlay gesetzt  → .env_ORB_MIT
+    # sonst (kein Flag oder --no-mit-overlay) → .env_ORB
+    # Fallback-Kette: gewünschte Datei → .env (Kompatibilität mit bisheriger Konfiguration)
+    if _DOTENV_AVAILABLE:
+        _env_name = ".env_ORB_MIT" if args.mit_overlay is True else ".env_ORB"
+        _base = Path(__file__).parent
+        _candidates = [_base / _env_name, _base / ".env"]
+        _loaded = False
+        for _candidate in _candidates:
+            if _candidate.exists():
+                _load_dotenv(_candidate, override=True)
+                _label = _candidate.name
+                if _label != _env_name:
+                    _label = f".env (Fallback – {_env_name} nicht gefunden)"
+                print(f"[Config] Umgebung geladen: {_label}")
+                _loaded = True
+                break
+        if not _loaded:
+            print(f"[WARN] Keine .env-Datei gefunden ({_env_name} oder .env) – "
+                  f"Umgebungsvariablen müssen extern gesetzt sein")
 
     cfg = dict(ORB_CONFIG)
     if args.shorts:
