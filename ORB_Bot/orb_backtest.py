@@ -65,107 +65,10 @@ from orb_strategy import (
     compute_indicators,
     compute_orb_signals,
     compute_orb_volume_ratio,
+    mit_apply_overlay as _mit_apply_overlay,
+    mit_group_for_symbol as _mit_group_for_symbol,
     to_et,
 )
-
-
-def _mit_clip_prob(value: float) -> float:
-    return float(np.clip(value, 0.20, 0.80))
-
-
-def _mit_estimate_win_probability(
-    signal: str,
-    strength: float,
-    ctx: dict,
-    df: pd.DataFrame,
-) -> float:
-    last = df.iloc[-1] if not df.empty else pd.Series(dtype=float)
-    volume_ratio = float(ctx.get("volume_ratio", last.get("Volume_Ratio", 1.0) or 1.0))
-    orb_range_pct = float(ctx.get("orb_range_pct", 0.0) or 0.0)
-    close = float(last.get("Close", 0.0) or 0.0)
-    atr_val = float(last.get("ATR", 0.0) or 0.0)
-    atr_pct = (atr_val / close * 100.0) if close > 0 and atr_val > 0 else 0.0
-    trend = ctx.get("trend", {"bullish": True, "bearish": True})
-    trend_aligned = (
-        signal == "BUY" and trend.get("bullish", True)
-    ) or (
-        signal == "SHORT" and trend.get("bearish", True)
-    )
-
-    win_prob = 0.40
-    win_prob += 0.25 * float(np.clip(strength, 0.0, 1.0))
-    win_prob += 0.04 * float(np.clip(volume_ratio - 1.0, 0.0, 1.5))
-    if ctx.get("volume_confirmed", False):
-        win_prob += 0.03
-    if 0.25 <= orb_range_pct <= 1.20:
-        win_prob += 0.03
-    elif orb_range_pct > 2.00:
-        win_prob -= 0.04
-    if atr_pct > 0 and orb_range_pct > 0:
-        range_vs_atr = orb_range_pct / max(atr_pct, 1e-9)
-        if 0.35 <= range_vs_atr <= 1.25:
-            win_prob += 0.03
-        elif range_vs_atr > 1.75:
-            win_prob -= 0.05
-    if trend_aligned:
-        win_prob += 0.03
-    else:
-        win_prob -= 0.05
-    return _mit_clip_prob(win_prob)
-
-
-def _mit_compute_ev_r(win_prob: float, reward_r: float, risk_r: float = 1.0) -> float:
-    loss_prob = 1.0 - win_prob
-    return (win_prob * reward_r) - (loss_prob * risk_r)
-
-
-def _mit_kelly_fraction_from_edge(
-    win_prob: float,
-    reward_r: float,
-    risk_r: float = 1.0,
-) -> float:
-    if reward_r <= 0 or risk_r <= 0:
-        return 0.0
-    b = reward_r / risk_r
-    q = 1.0 - win_prob
-    return max(0.0, ((b * win_prob) - q) / b)
-
-
-def _mit_group_for_symbol(symbol: str, cfg: dict) -> str:
-    groups = cfg.get("mit_correlation_groups", {})
-    for group_name, members in groups.items():
-        if symbol in members:
-            return group_name
-    return ""
-
-
-def _mit_apply_overlay(
-    signal: str,
-    strength: float,
-    ctx: dict,
-    df: pd.DataFrame,
-    cfg: dict,
-) -> Tuple[bool, float, str]:
-    if not cfg.get("use_mit_probabilistic_overlay", False):
-        return True, 1.0, "MIT Overlay deaktiviert"
-    if signal not in ("BUY", "SHORT"):
-        return False, 0.0, "Kein ORB-Signal"
-
-    min_strength = float(cfg.get("mit_min_strength", 0.15))
-    if strength < min_strength:
-        return False, 0.0, f"MIT Overlay reject: Strength {strength:.2f} < {min_strength:.2f}"
-
-    reward_r = float(cfg.get("profit_target_r", 2.0))
-    win_prob = _mit_estimate_win_probability(signal, strength, ctx, df)
-    ev_r = _mit_compute_ev_r(win_prob, reward_r, 1.0)
-    ev_threshold = float(cfg.get("mit_ev_threshold_r", 0.08))
-    if ev_r <= ev_threshold:
-        return False, 0.0, f"MIT Overlay reject: P={win_prob:.2f} EV={ev_r:+.2f}R"
-
-    raw_kelly = _mit_kelly_fraction_from_edge(win_prob, reward_r, 1.0)
-    fractional_kelly = raw_kelly * float(cfg.get("mit_kelly_fraction", 0.50))
-    qty_factor = float(np.clip(0.25 + fractional_kelly, 0.25, 1.0))
-    return True, qty_factor, f"MIT Overlay: P={win_prob:.2f} EV={ev_r:+.2f}R Kelly={qty_factor:.2f}x"
 
 
 # ---------------------------------------------------------------------------

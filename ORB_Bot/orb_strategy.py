@@ -25,6 +25,15 @@ import numpy as np
 import pandas as pd
 import pytz
 
+# NYSE-Feiertagskalender – erkennt MLK Day, Presidents Day, Good Friday etc.
+try:
+    import exchange_calendars as xcals
+    _NYSE_CAL = xcals.get_calendar("XNYS")
+    _XCALS_AVAILABLE = True
+except ImportError:
+    _NYSE_CAL = None
+    _XCALS_AVAILABLE = False
+
 
 ET = pytz.timezone("America/New_York")
 
@@ -153,12 +162,28 @@ def is_market_hours(dt_obj: datetime) -> bool:
         et_time = to_et_time(dt_obj)
         return time(9, 30) <= et_time < time(16, 0)
     except Exception:
-        return True
+        # Bei Fehler konservativ: kein Trading statt blindes Handeln
+        return False
 
 
 def is_trading_day(dt_obj: datetime = None) -> bool:
-    """Prüfe ob Werktag (Mo–Fr)."""
-    return (dt_obj or datetime.now(pytz.UTC)).weekday() < 5
+    """
+    Prüfe ob Handelstag an der NYSE.
+
+    Nutzt exchange_calendars wenn verfügbar (erkennt alle US-Feiertage:
+    MLK Day, Presidents Day, Good Friday, Memorial Day, Juneteenth,
+    Independence Day, Labor Day, Thanksgiving, Christmas).
+    Fallback: einfache Werktags-Prüfung (Mo–Fr).
+    """
+    d = (dt_obj or datetime.now(pytz.UTC))
+    if d.weekday() >= 5:
+        return False
+    if _XCALS_AVAILABLE:
+        try:
+            return _NYSE_CAL.is_session(pd.Timestamp(d.date()))
+        except Exception:
+            pass
+    return True
 
 
 def is_orb_period(dt_obj: datetime, orb_minutes: int = 30) -> bool:
@@ -663,3 +688,121 @@ def prepare_orb_day(
         "orb_range":  orb_range,
         "signals_df": signals,
     }
+
+
+# ============================= MIT Probabilistic Overlay ======================
+# Single Source of Truth – wird von Live-Bot und Backtest gleichermaßen genutzt.
+
+def mit_estimate_win_probability(
+    signal: str,
+    strength: float,
+    ctx: dict,
+    df: pd.DataFrame,
+) -> float:
+    """
+    Heuristische Schätzung der Win-Probability basierend auf Signalqualität.
+
+    Inputs über ctx:
+      - volume_ratio, volume_confirmed, orb_range_pct, trend
+    Inputs über df (letzter Bar):
+      - Close, ATR, Volume_Ratio
+
+    Returns: geclippte Probability [0.20, 0.80]
+    """
+    last = df.iloc[-1] if not df.empty else pd.Series(dtype=float)
+    volume_ratio = float(ctx.get("volume_ratio", last.get("Volume_Ratio", 1.0) or 1.0))
+    orb_range_pct = float(ctx.get("orb_range_pct", 0.0) or 0.0)
+    close = float(last.get("Close", 0.0) or 0.0)
+    atr_val = float(last.get("ATR", 0.0) or 0.0)
+    atr_pct = (atr_val / close * 100.0) if close > 0 and atr_val > 0 else 0.0
+    trend = ctx.get("trend", {"bullish": True, "bearish": True})
+    trend_aligned = (
+        signal == "BUY" and trend.get("bullish", True)
+    ) or (
+        signal == "SHORT" and trend.get("bearish", True)
+    )
+
+    win_prob = 0.40
+    win_prob += 0.25 * float(np.clip(strength, 0.0, 1.0))
+    win_prob += 0.04 * float(np.clip(volume_ratio - 1.0, 0.0, 1.5))
+    if ctx.get("volume_confirmed", False):
+        win_prob += 0.03
+    if 0.25 <= orb_range_pct <= 1.20:
+        win_prob += 0.03
+    elif orb_range_pct > 2.00:
+        win_prob -= 0.04
+    if atr_pct > 0 and orb_range_pct > 0:
+        range_vs_atr = orb_range_pct / max(atr_pct, 1e-9)
+        if 0.35 <= range_vs_atr <= 1.25:
+            win_prob += 0.03
+        elif range_vs_atr > 1.75:
+            win_prob -= 0.05
+    if trend_aligned:
+        win_prob += 0.03
+    else:
+        win_prob -= 0.05
+    return float(np.clip(win_prob, 0.20, 0.80))
+
+
+def mit_compute_ev_r(win_prob: float, reward_r: float, risk_r: float = 1.0) -> float:
+    """Expected Value in R-Multiples."""
+    return (win_prob * reward_r) - ((1.0 - win_prob) * risk_r)
+
+
+def mit_kelly_fraction(
+    win_prob: float,
+    reward_r: float,
+    risk_r: float = 1.0,
+) -> float:
+    """Kelly-Fraction für gegebene Win-Probability und Payoff-Ratio."""
+    if reward_r <= 0 or risk_r <= 0:
+        return 0.0
+    b = reward_r / risk_r
+    q = 1.0 - win_prob
+    return max(0.0, ((b * win_prob) - q) / b)
+
+
+def mit_group_for_symbol(symbol: str, cfg: dict) -> str:
+    """Finde die MIT-Korrelationsgruppe für ein Symbol."""
+    groups = cfg.get("mit_correlation_groups", {})
+    for group_name, members in groups.items():
+        if symbol in members:
+            return group_name
+    return ""
+
+
+def mit_apply_overlay(
+    signal: str,
+    strength: float,
+    ctx: dict,
+    df: pd.DataFrame,
+    cfg: dict,
+) -> Tuple[bool, float, str]:
+    """
+    MIT Probabilistic Overlay – Gate für Trade-Ausführung.
+
+    Prüft ob ein Signal positiven Expected Value hat und berechnet
+    die Kelly-basierte Positionsgrößen-Skalierung.
+
+    Returns: (should_trade, qty_factor, reason_string)
+    """
+    if not cfg.get("use_mit_probabilistic_overlay", False):
+        return True, 1.0, "MIT Overlay deaktiviert"
+    if signal not in ("BUY", "SHORT"):
+        return False, 0.0, "Kein ORB-Signal"
+
+    min_strength = float(cfg.get("mit_min_strength", 0.15))
+    if strength < min_strength:
+        return False, 0.0, f"MIT Overlay reject: Strength {strength:.2f} < {min_strength:.2f}"
+
+    reward_r = float(cfg.get("profit_target_r", 2.0))
+    win_prob = mit_estimate_win_probability(signal, strength, ctx, df)
+    ev_r = mit_compute_ev_r(win_prob, reward_r, 1.0)
+    ev_threshold = float(cfg.get("mit_ev_threshold_r", 0.08))
+    if ev_r <= ev_threshold:
+        return False, 0.0, f"MIT Overlay reject: P={win_prob:.2f} EV={ev_r:+.2f}R"
+
+    raw_kelly = mit_kelly_fraction(win_prob, reward_r, 1.0)
+    fractional_kelly = raw_kelly * float(cfg.get("mit_kelly_fraction", 0.50))
+    qty_factor = float(np.clip(0.25 + fractional_kelly, 0.25, 1.0))
+    return True, qty_factor, f"MIT Overlay: P={win_prob:.2f} EV={ev_r:+.2f}R Kelly={qty_factor:.2f}x"

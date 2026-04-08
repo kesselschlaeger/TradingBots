@@ -55,6 +55,9 @@ from orb_strategy import (
     check_trend_filter,
     check_gap_filter,
     generate_signal as _strategy_generate_signal,
+    # MIT Overlay – Single Source of Truth (nicht mehr lokal dupliziert)
+    mit_apply_overlay as _mit_apply_overlay,
+    mit_group_for_symbol as _mit_group_for_symbol,
 )
 
 ## für eine lokale Ausführung ohne OpenClaw-Umgebung können die
@@ -763,72 +766,9 @@ class ORBStrategy:
         """Delegiert an orb_strategy.generate_signal()."""
         return _strategy_generate_signal(df, self.cfg, spy_df=spy_df)
 
-    def _clip_prob(self, value: float) -> float:
-        return float(np.clip(value, 0.20, 0.80))
-
-    def _estimate_win_probability(
-        self,
-        signal: str,
-        strength: float,
-        ctx: dict,
-        df: pd.DataFrame,
-    ) -> float:
-        last = df.iloc[-1] if not df.empty else pd.Series(dtype=float)
-        volume_ratio = float(ctx.get("volume_ratio", last.get("Volume_Ratio", 1.0) or 1.0))
-        orb_range_pct = float(ctx.get("orb_range_pct", 0.0) or 0.0)
-        close = float(last.get("Close", 0.0) or 0.0)
-        atr_val = float(last.get("ATR", 0.0) or 0.0)
-        atr_pct = (atr_val / close * 100.0) if close > 0 and atr_val > 0 else 0.0
-        trend = ctx.get("trend", {"bullish": True, "bearish": True})
-        trend_aligned = (
-            signal == "BUY" and trend.get("bullish", True)
-        ) or (
-            signal == "SHORT" and trend.get("bearish", True)
-        )
-
-        win_prob = 0.40
-        win_prob += 0.25 * float(np.clip(strength, 0.0, 1.0))
-        win_prob += 0.04 * float(np.clip(volume_ratio - 1.0, 0.0, 1.5))
-        if ctx.get("volume_confirmed", False):
-            win_prob += 0.03
-        if 0.25 <= orb_range_pct <= 1.20:
-            win_prob += 0.03
-        elif orb_range_pct > 2.00:
-            win_prob -= 0.04
-        if atr_pct > 0 and orb_range_pct > 0:
-            range_vs_atr = orb_range_pct / max(atr_pct, 1e-9)
-            if 0.35 <= range_vs_atr <= 1.25:
-                win_prob += 0.03
-            elif range_vs_atr > 1.75:
-                win_prob -= 0.05
-        if trend_aligned:
-            win_prob += 0.03
-        else:
-            win_prob -= 0.05
-        return self._clip_prob(win_prob)
-
-    def _compute_ev_r(self, win_prob: float, reward_r: float, risk_r: float = 1.0) -> float:
-        loss_prob = 1.0 - win_prob
-        return (win_prob * reward_r) - (loss_prob * risk_r)
-
-    def _kelly_fraction_from_edge(
-        self,
-        win_prob: float,
-        reward_r: float,
-        risk_r: float = 1.0,
-    ) -> float:
-        if reward_r <= 0 or risk_r <= 0:
-            return 0.0
-        b = reward_r / risk_r
-        q = 1.0 - win_prob
-        return max(0.0, ((b * win_prob) - q) / b)
-
     def mit_group_for_symbol(self, symbol: str) -> str:
-        groups = self.cfg.get("mit_correlation_groups", {})
-        for group_name, members in groups.items():
-            if symbol in members:
-                return group_name
-        return ""
+        """Delegiert an orb_strategy.mit_group_for_symbol (SSoT)."""
+        return _mit_group_for_symbol(symbol, self.cfg)
 
     def apply_mit_overlay(
         self,
@@ -837,28 +777,8 @@ class ORBStrategy:
         ctx: dict,
         df: pd.DataFrame,
     ) -> Tuple[bool, float, str]:
-        if not self.cfg.get("use_mit_probabilistic_overlay", False):
-            return True, 1.0, "MIT Overlay deaktiviert"
-        if signal not in ("BUY", "SHORT"):
-            return False, 0.0, "Kein ORB-Signal"
-
-        min_strength = float(self.cfg.get("mit_min_strength", 0.15))
-        if strength < min_strength:
-            return False, 0.0, f"MIT Overlay reject: Strength {strength:.2f} < {min_strength:.2f}"
-
-        reward_r = float(self.cfg.get("profit_target_r", 2.0))
-        win_prob = self._estimate_win_probability(signal, strength, ctx, df)
-        ev_r = self._compute_ev_r(win_prob, reward_r, 1.0)
-        ev_threshold = float(self.cfg.get("mit_ev_threshold_r", 0.08))
-        if ev_r <= ev_threshold:
-            return False, 0.0, f"MIT Overlay reject: P={win_prob:.2f} EV={ev_r:+.2f}R"
-
-        raw_kelly = self._kelly_fraction_from_edge(win_prob, reward_r, 1.0)
-        fractional_kelly = raw_kelly * float(self.cfg.get("mit_kelly_fraction", 0.50))
-        qty_factor = float(np.clip(0.25 + fractional_kelly, 0.25, 1.0))
-        return True, qty_factor, (
-            f"MIT Overlay: P={win_prob:.2f} EV={ev_r:+.2f}R Kelly={qty_factor:.2f}x"
-        )
+        """Delegiert an orb_strategy.mit_apply_overlay (SSoT)."""
+        return _mit_apply_overlay(signal, strength, ctx, df, self.cfg)
 
 
 # ============================= ORB_Bot (Live) ================================
@@ -1096,8 +1016,15 @@ class ORB_Bot:
                 spy_df = compute_indicators(spy_df)
 
         max_delay = int(self.cfg.get("max_bar_delay_minutes", 20))
+        max_concurrent = int(self.cfg.get("max_concurrent_positions", 3))
+        new_entries_this_scan = 0  # Zählt neue Entries in diesem Scan-Durchlauf
 
         for sym in self.cfg["symbols"]:
+            # Concurrent-Positions-Guard: open_positions + neue Entries in diesem Scan
+            if len(open_positions) + new_entries_this_scan >= max_concurrent:
+                print(f"  {sym}: max_concurrent_positions ({max_concurrent}) erreicht – übersprungen")
+                continue
+
             df = (self.alpaca.fetch_bars(sym, days=2) if self.alpaca
                   else pd.DataFrame())
             if df.empty:
@@ -1107,9 +1034,12 @@ class ORB_Bot:
                 print(f"  {sym}: zu wenig Historie ({len(df)} Bars)")
                 continue
 
-            # Fix #4: Freshness-Check
-            if self.alpaca:
-                self.alpaca.check_bar_freshness(df, max_delay)
+            # Fix #4: Freshness-Check – bei stale data Trade blocken, nicht nur warnen
+            if self.alpaca and not self.alpaca.check_bar_freshness(df, max_delay):
+                print(f"  {sym}: STALE DATA – übersprungen")
+                self._log_event("STALE_DATA", "Bar zu alt – Trade blockiert", sym,
+                                {"max_delay_min": max_delay})
+                continue
 
             df = compute_indicators(df)
 
@@ -1187,6 +1117,7 @@ class ORB_Bot:
                 sig = self._execute_long(sym, df, equity, reason, strength, qty_factor=qty_factor, overlay_reason=overlay_reason)
                 if sig:
                     signals.append(sig)
+                    new_entries_this_scan += 1
                     if self.cfg.get("use_mit_probabilistic_overlay", False):
                         group = self.strategy.mit_group_for_symbol(sym)
                         if group:
@@ -1201,6 +1132,7 @@ class ORB_Bot:
                 sig = self._execute_short(sym, df, equity, reason, strength, qty_factor=qty_factor, overlay_reason=overlay_reason)
                 if sig:
                     signals.append(sig)
+                    new_entries_this_scan += 1
                     if self.cfg.get("use_mit_probabilistic_overlay", False):
                         group = self.strategy.mit_group_for_symbol(sym)
                         if group:
@@ -1392,255 +1324,34 @@ class ORB_Bot:
                 "open": [], "trades_today": 0}
 
 
-# ============================= Backtester ===================================
-# Nutzt Alpaca für historische Daten, virtuelle Execution (kein echtes Geld).
+# ============================= Backtester (delegiert an orb_backtest) =========
+# Der Legacy-Backtester wurde entfernt. Stattdessen wird der kanonische
+# Backtester aus orb_backtest.py verwendet, der Long+Short, alle Guards,
+# MIT-Overlay und vollständige Metriken unterstützt.
 
-class ORB_Backtester:
-    def __init__(self, config: dict = None, alpaca: AlpacaClient = None):
-        self.cfg       = config or ORB_CONFIG
-        self.alpaca    = alpaca
-        self.portfolio = ORBPortfolio(self.cfg, persist_files=False)
-        self.strategy  = ORBStrategy(self.cfg)
-        self.commission = 0.00005
-        self.slippage   = 0.0002
+def _run_canonical_backtest(cfg: dict, alpaca: "AlpacaClient",
+                            start_date: str, end_date: str) -> None:
+    """Wrapper für den kanonischen Backtester aus orb_backtest.py."""
+    from orb_backtest import load_orb_data, run_orb_backtest, print_orb_report
 
-    def run_backtest(self, start_date: str = "2024-01-01", end_date: str = None):
-        if end_date is None:
-            end_date = datetime.now().strftime("%Y-%m-%d")
-        print(f"\n=== ORB Backtest {start_date} → {end_date} ===")
+    if end_date is None:
+        end_date = datetime.now().strftime("%Y-%m-%d")
 
-        # ── Daten laden ──────────────────────────────────────────────────────
-        # Nur Stocks (keine Futures – Alpaca liefert keine)
-        tradeable = self.cfg["symbols"]
-        if self.alpaca:
-            print("Lade Daten via Alpaca...")
-            raw = self.alpaca.fetch_bars_bulk(tradeable, start_date, end_date)
-        else:
-            print("[WARN] Kein Alpaca-Client – kein Datenabruf möglich")
-            return []
+    print(f"\n{'=' * 60}")
+    print(f"  ORB BOT – BACKTEST (kanonisch via orb_backtest.py)")
+    print(f"  Zeitraum: {start_date} → {end_date}")
+    print(f"  Symbole: {len(cfg['symbols'])} | Kapital: {cfg['initial_capital']:,.0f}")
+    print(f"  Shorts: {'AN' if cfg.get('allow_shorts') else 'AUS'}")
+    print(f"{'=' * 60}")
 
-        data_cache = {s: compute_indicators(df)
-                      for s, df in raw.items() if len(df) > 100}
-        if not data_cache:
-            print("Keine Daten – Abbruch")
-            return []
+    data, vix = load_orb_data(cfg["symbols"], start_date, end_date, alpaca=alpaca)
+    if not data:
+        print("[ERROR] Keine Daten geladen.")
+        return
 
-        # Trendfilter im Backtest soll identisch zum Live-Bot funktionieren.
-        # Falls SPY nicht im Universum ist, separat als Markt-Proxy nachladen.
-        spy_symbol = self.cfg.get("benchmark", "SPY")
-        if self.cfg.get("use_trend_filter", True) and spy_symbol not in data_cache and self.alpaca:
-            spy_raw = self.alpaca.fetch_bars_bulk([spy_symbol], start_date, end_date)
-            spy_df = spy_raw.get(spy_symbol)
-            if spy_df is not None and len(spy_df) > 100:
-                data_cache[spy_symbol] = compute_indicators(spy_df)
-
-        # Performance: Tagesdaten einmalig vorbereiten statt in jeder Schleife
-        # erneut das komplette Multi-Day-DataFrame nach Datum zu filtern.
-        day_cache: Dict[str, Dict[str, pd.DataFrame]] = {}
-        for sym, df_full in data_cache.items():
-            idx_et = (df_full.index.tz_localize("UTC") if df_full.index.tz is None
-                      else df_full.index).tz_convert("America/New_York")
-            day_keys = idx_et.normalize().strftime("%Y-%m-%d")
-            sym_days: Dict[str, pd.DataFrame] = {}
-            for day_key in pd.Index(day_keys).unique():
-                mask = np.asarray(day_keys == day_key, dtype=bool)
-                day_df = df_full[mask].sort_index()
-                if not day_df.empty:
-                    sym_days[str(day_key)] = day_df
-            day_cache[sym] = sym_days
-
-        # ── Portfolio zurücksetzen ───────────────────────────────────────────
-        self.portfolio.data.update({
-            "cash": self.cfg.get("initial_capital", 10000.0),
-            "positions": {}, "short_positions": {},
-            "trades": [], "equity_curve": [],
-        })
-
-        # ── Bar-by-Bar-Simulation ────────────────────────────────────────────
-        business_days = pd.date_range(start_date, end_date, freq="B")
-        total_days = len(business_days)
-        for day_index, current_date in enumerate(business_days, start=1):
-            if self.cfg.get("avoid_fridays") and current_date.weekday() == 4:
-                continue
-            if self.cfg.get("avoid_mondays") and current_date.weekday() == 0:
-                continue
-
-            if day_index == 1 or day_index % 20 == 0 or day_index == total_days:
-                print(f"[Backtest] Fortschritt {day_index}/{total_days} Tage ({current_date.strftime('%Y-%m-%d')})")
-
-            trades_today = 0
-            price_dict: Dict[str, float] = {}
-            current_day_key = current_date.strftime("%Y-%m-%d")
-            spy_day_df = day_cache.get(spy_symbol, {}).get(current_day_key)
-            reserved_mit_groups = set()
-
-            for sym, df_full in data_cache.items():
-                if sym == spy_symbol and spy_symbol not in self.cfg.get("symbols", []):
-                    # Separat nachgeladener Markt-Proxy dient nur dem Trendfilter.
-                    continue
-                if len(self.portfolio.data["positions"]) >= self.cfg.get("max_concurrent_positions", 3):
-                    continue
-                day_df = day_cache.get(sym, {}).get(current_day_key)
-                if day_df is None or day_df.empty or len(day_df) < 8:
-                    continue
-
-                idx_et = (day_df.index.tz_localize("UTC") if day_df.index.tz is None
-                          else day_df.index).tz_convert("America/New_York")
-                hhmm   = idx_et.hour * 100 + idx_et.minute
-
-                # Fix #3: Series-Ambiguity behoben
-                orb_mask = (hhmm >= 930) & (hhmm < 1000)
-                if orb_mask.sum() < 2:
-                    continue
-
-                post_orb = day_df[hhmm >= 1000]
-                if post_orb.empty:
-                    continue
-
-                entered = False
-
-                for bar_idx, bar in post_orb.iterrows():
-                    current_price       = bar["Close"]
-                    price_dict[sym]     = current_price
-
-                    if self.portfolio.has_pos(sym):
-                        closed = self._manage_bar(sym, self.portfolio.get_pos(sym), bar)
-                        if closed:
-                            break
-                        continue
-
-                    if entered or trades_today >= self.cfg.get("max_daily_trades", 3):
-                        continue
-
-                    bars_so_far = day_df.loc[:bar_idx]
-                    spy_bars_so_far = None
-                    if spy_day_df is not None and not spy_day_df.empty:
-                        spy_bars_so_far = spy_day_df.loc[:bar_idx]
-                    orb_high, orb_low, orb_range, _ = self.strategy.calculate_orb_levels(bars_so_far)
-                    if orb_range <= 0:
-                        continue
-
-                    signal, strength, reason, ctx = self.strategy.generate_signal(
-                        bars_so_far,
-                        spy_df=spy_bars_so_far,
-                    )
-                    qty_factor = 1.0
-                    overlay_reason = ""
-                    if signal in ("BUY", "SHORT") and self.cfg.get("use_mit_probabilistic_overlay", False):
-                        should_trade, qty_factor, overlay_reason = self.strategy.apply_mit_overlay(
-                            signal, strength, ctx, bars_so_far
-                        )
-                        if not should_trade:
-                            continue
-                        if self.cfg.get("use_mit_independence_guard", True):
-                            group = self.strategy.mit_group_for_symbol(sym)
-                            if group:
-                                open_groups = {
-                                    self.strategy.mit_group_for_symbol(open_sym)
-                                    for open_sym in self.portfolio.data["positions"].keys()
-                                }
-                                if group in open_groups or group in reserved_mit_groups:
-                                    continue
-                    if signal == "BUY":
-                        entry = current_price * (1 + self.slippage)
-                        # Fix #9: Stop an ORB-Range
-                        stop  = calculate_stop("long", entry, orb_high, orb_low, orb_range,
-                                               self.cfg.get("stop_loss_r", 1.0))
-                        qty   = calculate_position_size(
-                                    entry, stop,
-                                    self.portfolio.equity(price_dict),
-                                    self.cfg.get("risk_per_trade", 0.005),
-                                    self.cfg.get("max_equity_at_risk", 0.05),
-                                    self.cfg.get("max_position_value_pct", 0.25))
-                        qty = max(0, int(qty * max(qty_factor, 0.0)))
-                        if qty > 0:
-                            cost = entry * qty * (1 + self.commission)
-                            if cost <= self.portfolio.data["cash"]:
-                                final_reason = f"{reason} | {overlay_reason}" if overlay_reason else reason
-                                self.portfolio.buy(sym, entry, qty, stop, final_reason)
-                                entered = True
-                                trades_today += 1
-                                if self.cfg.get("use_mit_probabilistic_overlay", False):
-                                    group = self.strategy.mit_group_for_symbol(sym)
-                                    if group:
-                                        reserved_mit_groups.add(group)
-                        # Nur nach erfolgreichem Entry den Bar-Loop verlassen.
-                        # Sonst weiter prüfen, ob später am Tag ein valider Entry möglich ist.
-                        if entered:
-                            break
-
-            self.portfolio.data["equity_curve"].append({
-                "date": current_date.strftime("%Y-%m-%d"),
-                "equity": self.portfolio.equity(price_dict),
-            })
-
-        self._print_results()
-        return self.portfolio.data["trades"]
-
-    def _manage_bar(self, sym: str, pos: dict, bar: pd.Series) -> bool:
-        """Bar-by-Bar Exit-Logik für Backtester."""
-        entry = pos["entry"]
-        stop  = pos["stop_loss"]
-        risk  = entry - stop
-        if risk <= 0:
-            self.portfolio.sell(sym, bar["Close"], pos["shares"], "Invalid risk")
-            return True
-
-        target = entry + self.cfg["profit_target_r"] * risk
-
-        if bar["Low"] <= stop:
-            ep = stop * (1 - self.slippage)
-            self.portfolio.sell(sym, ep, pos["shares"], "Stop Loss")
-            return True
-        if bar["High"] >= target:
-            ep = target * (1 - self.slippage)
-            self.portfolio.sell(sym, ep, pos["shares"], "Profit Target")
-            return True
-
-        # Trailing Stop
-        r_mult = (bar["Close"] - entry) / risk
-        if r_mult >= self.cfg["trail_after_r"]:
-            trail = bar["Close"] - self.cfg["trail_distance_r"] * risk
-            if trail > (pos.get("trail_stop") or stop):
-                pos["trail_stop"] = trail
-        if pos.get("trail_stop") and bar["Low"] <= pos["trail_stop"]:
-            ep = pos["trail_stop"] * (1 - self.slippage)
-            self.portfolio.sell(sym, ep, pos["shares"], "Trailing Stop")
-            return True
-
-        pos["price"] = bar["Close"]
-        return False
-
-    def _print_results(self):
-        trades = self.portfolio.data["trades"]
-        if not trades:
-            print("Keine Trades.")
-            return
-        df   = pd.DataFrame(trades)
-        wins = df[df["pnl"] > 0]
-        init = self.cfg.get("initial_capital", 10000.0)
-        eq   = self.portfolio.equity()
-        ret  = (eq / init - 1) * 100
-        wr   = len(wins) / len(df) * 100
-        gp   = wins["pnl"].sum()
-        gl   = df[df["pnl"] < 0]["pnl"].sum()
-        pf   = abs(gp / gl) if gl != 0 else float("inf")
-        ec   = pd.DataFrame(self.portfolio.data["equity_curve"])
-        ec["date"] = pd.to_datetime(ec["date"])
-        ec.set_index("date", inplace=True)
-        mdd  = ((ec["equity"] / ec["equity"].cummax()) - 1).min() * 100
-        print("\n" + "="*60)
-        print("BACKTEST ERGEBNIS")
-        print("="*60)
-        print(f"Startkapital  : {init:,.0f}")
-        print(f"Endkapital    : {eq:,.0f}")
-        print(f"Rendite       : {ret:+.2f} %")
-        print(f"Trades        : {len(df)}")
-        print(f"Win-Rate      : {wr:.1f} %")
-        print(f"Profit-Faktor : {pf:.2f}")
-        print(f"Max. Drawdown : {mdd:.2f} %")
-        print(f"Ø Trade       : {df['pnl'].mean():+.2f}")
-        print("="*60)
+    _, report = run_orb_backtest(data, vix, cfg)
+    output_dir = cfg.get("data_dir", Path(__file__).parent / "orb_trading_data")
+    print_orb_report(report, output_dir=output_dir)
 
 
 # ============================= CLI / OpenClaw-Einstieg ======================
@@ -1666,12 +1377,14 @@ def _build_alpaca_client(cfg: dict) -> Optional["AlpacaClient"]:
               file=sys.stderr)
         return None
 
-    # APCA_PAPER=false → Live; alles andere → Paper
-    paper_env = os.getenv("APCA_PAPER", "true").lower()
-    paper     = paper_env != "false"
-
-    # cfg-Wert als Fallback, aber Env-Var hat Vorrang
-    paper     = paper and cfg.get("alpaca_paper", True)
+    # Env-Var hat IMMER Vorrang über Config. Nur wenn nicht gesetzt → cfg-Fallback.
+    paper_env = os.getenv("APCA_PAPER", "").lower()
+    if paper_env == "false":
+        paper = False
+    elif paper_env == "true":
+        paper = True
+    else:
+        paper = cfg.get("alpaca_paper", True)
 
     feed = os.getenv("APCA_DATA_FEED", cfg.get("alpaca_data_feed", "iex"))
 
@@ -1765,8 +1478,8 @@ def main():
 
     elif args.mode == "backtest":
         cfg["initial_capital"] = 10000.0
-        tester = ORB_Backtester(config=cfg, alpaca=alpaca)
-        tester.run_backtest(start_date=args.start, end_date=args.end)
+        _run_canonical_backtest(cfg, alpaca,
+                                start_date=args.start, end_date=args.end)
 
 
 if __name__ == "__main__":

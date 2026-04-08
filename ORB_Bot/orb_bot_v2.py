@@ -249,8 +249,14 @@ def _build_alpaca_client(cfg: dict):
         print("[ERROR] APCA_API_KEY_ID / APCA_API_SECRET_KEY nicht gesetzt.")
         return None
 
-    paper_env = os.getenv("APCA_PAPER", "true").lower()
-    paper = paper_env != "false"
+    # Env-Var hat IMMER Vorrang über Config. Nur wenn nicht gesetzt → cfg-Fallback.
+    paper_env = os.getenv("APCA_PAPER", "").lower()
+    if paper_env == "false":
+        paper = False
+    elif paper_env == "true":
+        paper = True
+    else:
+        paper = cfg.get("alpaca_paper", True)
     feed = os.getenv("APCA_DATA_FEED", cfg.get("alpaca_data_feed", "iex"))
 
     return AlpacaClient(api_key=key, secret_key=secret, paper=paper, data_feed=feed)
