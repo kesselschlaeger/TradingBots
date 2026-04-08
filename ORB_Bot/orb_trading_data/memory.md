@@ -26,3 +26,9 @@
 
 **2026-04-07 17:40** AMZN BUY 34 @ 212.92 | SL 211.02 | TP 216.72 | OrderID fb1dade5-f5f2-4f4f-817c-419ab41fd6dd (ORB Breakout: 212.92 > 212.50 +Vol 2.3x)
 
+**2026-04-07 19:28** IWM BUY 29 @ 252.00 | SL 250.45 | TP 255.11 | OrderID aba08479-3cc8-4267-8be1-211cf9df827a (ORB Breakout: 252.00 > 251.73 +Vol 1.7x)
+
+**2026-04-07 19:33** IWM BUY 29 @ 251.90 | SL 250.34 | TP 255.00 | OrderID f53be2c1-a721-4e2f-a844-f1db466d55ee (ORB Breakout: 251.90 > 251.73 +Vol 1.6x)
+
+**2026-04-07 19:33** PLTR BUY 49 @ 149.50 | SL 147.69 | TP 153.11 | OrderID ce10d871-c0d7-4e72-95f4-658c50c56000 (ORB Breakout: 149.50 > 147.81)
+

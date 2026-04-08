@@ -38,6 +38,7 @@ try:
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    from matplotlib.dates import DateFormatter, AutoDateLocator
     MPL_AVAILABLE = True
 except ImportError:
     MPL_AVAILABLE = False
@@ -66,6 +67,105 @@ from orb_strategy import (
     compute_orb_volume_ratio,
     to_et,
 )
+
+
+def _mit_clip_prob(value: float) -> float:
+    return float(np.clip(value, 0.20, 0.80))
+
+
+def _mit_estimate_win_probability(
+    signal: str,
+    strength: float,
+    ctx: dict,
+    df: pd.DataFrame,
+) -> float:
+    last = df.iloc[-1] if not df.empty else pd.Series(dtype=float)
+    volume_ratio = float(ctx.get("volume_ratio", last.get("Volume_Ratio", 1.0) or 1.0))
+    orb_range_pct = float(ctx.get("orb_range_pct", 0.0) or 0.0)
+    close = float(last.get("Close", 0.0) or 0.0)
+    atr_val = float(last.get("ATR", 0.0) or 0.0)
+    atr_pct = (atr_val / close * 100.0) if close > 0 and atr_val > 0 else 0.0
+    trend = ctx.get("trend", {"bullish": True, "bearish": True})
+    trend_aligned = (
+        signal == "BUY" and trend.get("bullish", True)
+    ) or (
+        signal == "SHORT" and trend.get("bearish", True)
+    )
+
+    win_prob = 0.40
+    win_prob += 0.25 * float(np.clip(strength, 0.0, 1.0))
+    win_prob += 0.04 * float(np.clip(volume_ratio - 1.0, 0.0, 1.5))
+    if ctx.get("volume_confirmed", False):
+        win_prob += 0.03
+    if 0.25 <= orb_range_pct <= 1.20:
+        win_prob += 0.03
+    elif orb_range_pct > 2.00:
+        win_prob -= 0.04
+    if atr_pct > 0 and orb_range_pct > 0:
+        range_vs_atr = orb_range_pct / max(atr_pct, 1e-9)
+        if 0.35 <= range_vs_atr <= 1.25:
+            win_prob += 0.03
+        elif range_vs_atr > 1.75:
+            win_prob -= 0.05
+    if trend_aligned:
+        win_prob += 0.03
+    else:
+        win_prob -= 0.05
+    return _mit_clip_prob(win_prob)
+
+
+def _mit_compute_ev_r(win_prob: float, reward_r: float, risk_r: float = 1.0) -> float:
+    loss_prob = 1.0 - win_prob
+    return (win_prob * reward_r) - (loss_prob * risk_r)
+
+
+def _mit_kelly_fraction_from_edge(
+    win_prob: float,
+    reward_r: float,
+    risk_r: float = 1.0,
+) -> float:
+    if reward_r <= 0 or risk_r <= 0:
+        return 0.0
+    b = reward_r / risk_r
+    q = 1.0 - win_prob
+    return max(0.0, ((b * win_prob) - q) / b)
+
+
+def _mit_group_for_symbol(symbol: str, cfg: dict) -> str:
+    groups = cfg.get("mit_correlation_groups", {})
+    for group_name, members in groups.items():
+        if symbol in members:
+            return group_name
+    return ""
+
+
+def _mit_apply_overlay(
+    signal: str,
+    strength: float,
+    ctx: dict,
+    df: pd.DataFrame,
+    cfg: dict,
+) -> Tuple[bool, float, str]:
+    if not cfg.get("use_mit_probabilistic_overlay", False):
+        return True, 1.0, "MIT Overlay deaktiviert"
+    if signal not in ("BUY", "SHORT"):
+        return False, 0.0, "Kein ORB-Signal"
+
+    min_strength = float(cfg.get("mit_min_strength", 0.15))
+    if strength < min_strength:
+        return False, 0.0, f"MIT Overlay reject: Strength {strength:.2f} < {min_strength:.2f}"
+
+    reward_r = float(cfg.get("profit_target_r", 2.0))
+    win_prob = _mit_estimate_win_probability(signal, strength, ctx, df)
+    ev_r = _mit_compute_ev_r(win_prob, reward_r, 1.0)
+    ev_threshold = float(cfg.get("mit_ev_threshold_r", 0.08))
+    if ev_r <= ev_threshold:
+        return False, 0.0, f"MIT Overlay reject: P={win_prob:.2f} EV={ev_r:+.2f}R"
+
+    raw_kelly = _mit_kelly_fraction_from_edge(win_prob, reward_r, 1.0)
+    fractional_kelly = raw_kelly * float(cfg.get("mit_kelly_fraction", 0.50))
+    qty_factor = float(np.clip(0.25 + fractional_kelly, 0.25, 1.0))
+    return True, qty_factor, f"MIT Overlay: P={win_prob:.2f} EV={ev_r:+.2f}R Kelly={qty_factor:.2f}x"
 
 
 # ---------------------------------------------------------------------------
@@ -217,7 +317,7 @@ def run_orb_backtest(
     cash = capital
     positions: Dict[str, dict] = {}       # sym → position-dict
     trades_list: List[dict] = []
-    equity_daily: List[Tuple] = []        # (date, equity)
+    equity_daily: List[dict] = []         # [{"date": timestamp, "equity": float}, ...]
     peak_equity = capital
     dd_pause_until = None
     r_multiples: List[float] = []
@@ -235,6 +335,7 @@ def run_orb_backtest(
             continue
 
         trades_today = 0
+        reserved_mit_groups = set()
 
         # VIX für heute (ffill: nächstliegenden Wert nehmen)
         vix_val = vix_dict.get(day, 20.0)
@@ -321,6 +422,7 @@ def run_orb_backtest(
 
             entered_today = False
             bar_count = 0
+            last_bar_ts = None
 
             for i, (bar_ts, bar) in enumerate(day_df.iterrows()):
                 if not post_orb_mask[i]:
@@ -330,6 +432,7 @@ def run_orb_backtest(
                 high = float(bar["High"])
                 low = float(bar["Low"])
                 bar_count += 1
+                last_bar_ts = bar_ts  # Speichere letzten Timestamp des Tages
 
                 # ── Bestehende Position managen ───────────────────────────
                 if sym in positions:
@@ -380,6 +483,35 @@ def run_orb_backtest(
                 if is_short and use_trend and not trend["bearish"]:
                     continue
 
+                signal = "BUY" if is_long else "SHORT"
+                qty_factor = 1.0
+                overlay_reason = ""
+                if cfg.get("use_mit_probabilistic_overlay", False):
+                    bars_so_far = day_df.iloc[: i + 1]
+                    volume_ratio = float(bar.get("Volume_Ratio", 1.0) or 1.0)
+                    orb_range_pct = (orb_range / orb_low * 100.0) if orb_low > 0 else 0.0
+                    ctx = {
+                        "volume_ratio": volume_ratio,
+                        "volume_confirmed": volume_ratio >= float(cfg.get("volume_multiplier", 1.3)),
+                        "orb_range_pct": orb_range_pct,
+                        "trend": trend,
+                    }
+                    should_trade, qty_factor, overlay_reason = _mit_apply_overlay(
+                        signal, strength, ctx, bars_so_far, cfg
+                    )
+                    if not should_trade:
+                        continue
+
+                    if cfg.get("use_mit_independence_guard", True):
+                        group = _mit_group_for_symbol(sym, cfg)
+                        if group:
+                            open_groups = {
+                                _mit_group_for_symbol(open_sym, cfg)
+                                for open_sym in positions.keys()
+                            }
+                            if group in open_groups or group in reserved_mit_groups:
+                                continue
+
                 # Volume guard
                 vol_ma = float(bar.get("Volume_MA", 0))
                 vol = float(bar.get("Volume", 0))
@@ -409,6 +541,7 @@ def run_orb_backtest(
                 risk_amount = equity * risk_pt * size_mult
                 shares = int(risk_amount / risk_per_share)
                 shares = min(shares, max_shares_vol)
+                shares = max(0, int(shares * max(qty_factor, 0.0)))
 
                 if shares <= 0:
                     continue
@@ -440,8 +573,10 @@ def run_orb_backtest(
                     "bars_held": 0,
                     "entry_date": day,
                     "entry_ts": bar_ts,
-                    "reason": f"ORB {'Breakout' if side == 'long' else 'Breakdown'} "
-                              f"[{strength:.2f}]",
+                    "reason": (
+                        f"ORB {'Breakout' if side == 'long' else 'Breakdown'} [{strength:.2f}]"
+                        + (f" | {overlay_reason}" if overlay_reason else "")
+                    ),
                 }
 
                 trades_list.append({
@@ -455,6 +590,10 @@ def run_orb_backtest(
 
                 entered_today = True
                 trades_today += 1
+                if cfg.get("use_mit_probabilistic_overlay", False):
+                    group = _mit_group_for_symbol(sym, cfg)
+                    if group:
+                        reserved_mit_groups.add(group)
 
         # ── EOD: offene Positionen NICHT schließen (Overnight möglich) ────
         # Equity Snapshot
@@ -466,7 +605,13 @@ def run_orb_backtest(
                     eod_unrealized += pos["shares"] * lp
                 else:
                     eod_unrealized -= pos["shares"] * lp
-        equity_daily.append((day, cash + eod_unrealized))
+        # Verwende letzten Bar-Timestamp des Tages für equity_curve
+        # Fallback auf EOD-Timestamp (16:00 ET), falls kein Trade stattfand
+        eod_ts = last_bar_ts if last_bar_ts is not None else pd.Timestamp(day, tz=ET).replace(hour=16, minute=0, second=0)
+        equity_daily.append({
+            "date": eod_ts,
+            "equity": cash + eod_unrealized,
+        })
 
     # ── Offene Positionen am Ende schließen ───────────────────────────────
     for sym, pos in list(positions.items()):
@@ -496,7 +641,7 @@ def run_orb_backtest(
     trades_df = pd.DataFrame(trades_list)
 
     if equity_daily:
-        eq_df = pd.DataFrame(equity_daily, columns=["date", "equity"])
+        eq_df = pd.DataFrame(equity_daily)
         eq_df["date"] = pd.to_datetime(eq_df["date"])
         eq_series = eq_df.set_index("date")["equity"]
     else:
@@ -505,6 +650,7 @@ def run_orb_backtest(
     report = _compute_metrics(eq_series, trades_df, capital)
 
     report["equity_curve"] = eq_series
+    report["equity_curve_df"] = eq_df  # Speichere auch DataFrame für Excel-Export
     report["trades"] = trades_df
 
     # ORB-spezifische Extras
@@ -800,8 +946,10 @@ def print_orb_report(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Excel (bevorzugt) oder CSV Fallback
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    
+    # Trade-Liste (mit Timestamps)
     if not trades.empty:
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         if XLSX_AVAILABLE:
             xlsx_path = output_dir / f"orb_v2_trades_{ts}.xlsx"
             trades_xlsx = trades.copy()
@@ -820,27 +968,27 @@ def print_orb_report(
                     )
             try:
                 trades_xlsx.to_excel(xlsx_path, index=False, engine="openpyxl")
-                print(f"\n  Trade-Liste: {xlsx_path}")
+                print(f"  Trade-Liste: {xlsx_path}")
             except PermissionError:
                 alt_xlsx_path = output_dir / f"orb_v2_trades_{ts}_retry.xlsx"
                 try:
                     trades_xlsx.to_excel(alt_xlsx_path, index=False, engine="openpyxl")
-                    print(f"\n  [WARN] {xlsx_path.name} ist gesperrt (z. B. in Excel geöffnet).")
+                    print(f"  [WARN] {xlsx_path.name} ist gesperrt (z. B. in Excel geöffnet).")
                     print(f"  Trade-Liste: {alt_xlsx_path}")
                 except Exception as e:
                     csv_path = output_dir / f"orb_v2_trades_{ts}.csv"
                     trades.to_csv(csv_path, index=False)
-                    print(f"\n  [WARN] Excel-Export fehlgeschlagen: {e}")
+                    print(f"  [WARN] Excel-Export fehlgeschlagen: {e}")
                     print(f"  Trade-Liste (CSV-Fallback): {csv_path}")
             except Exception as e:
                 csv_path = output_dir / f"orb_v2_trades_{ts}.csv"
                 trades.to_csv(csv_path, index=False)
-                print(f"\n  [WARN] Excel-Export fehlgeschlagen: {e}")
+                print(f"  [WARN] Excel-Export fehlgeschlagen: {e}")
                 print(f"  Trade-Liste (CSV-Fallback): {csv_path}")
         else:
             csv_path = output_dir / f"orb_v2_trades_{ts}.csv"
             trades.to_csv(csv_path, index=False)
-            print(f"\n  Trade-Liste: {csv_path}")
+            print(f"  Trade-Liste: {csv_path}")
             print("  (Hinweis: pip install openpyxl für Excel-Export)")
 
     # Equity-Kurve Plot
@@ -848,12 +996,18 @@ def print_orb_report(
         fig, ax = plt.subplots(figsize=(14, 5))
         ax.plot(eq.index, eq.values, label="ORB Bot v2", linewidth=1.5)
         ax.set_title("Equity Curve – ORB Bot v2 Backtest")
-        ax.set_xlabel("Datum")
+        ax.set_xlabel("Datum/Zeit (ET)")
         ax.set_ylabel("Equity ($)")
+        
+        # Zeitstempel-Formatierung auf x-Achse
+        ax.xaxis.set_major_locator(AutoDateLocator())
+        ax.xaxis.set_major_formatter(DateFormatter("%Y-%m-%d %H:%M"))
+        fig.autofmt_xdate(rotation=45, ha='right')
+        
         ax.legend()
         ax.grid(True, alpha=0.3)
         plt.tight_layout()
         plot_path = output_dir / "orb_v2_equity_curve.png"
         fig.savefig(plot_path, dpi=120)
         plt.close(fig)
-        print(f"  Equity-Kurve: {plot_path}")
+        print(f"  Plot:            {plot_path}")

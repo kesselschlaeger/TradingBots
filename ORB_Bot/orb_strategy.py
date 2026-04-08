@@ -92,6 +92,19 @@ ORB_DEFAULT_CONFIG: dict = {
     # ── Volume – Fix #6 ───────────────────────────────────────────────────
     "volume_lookback_days": 10,
 
+    # ── MIT Probabilistic Overlay ─────────────────────────────────────────
+    "use_mit_probabilistic_overlay": False,
+    "mit_ev_threshold_r": 0.08,
+    "mit_kelly_fraction": 0.50,
+    "mit_min_strength": 0.15,
+    "use_mit_independence_guard": True,
+    "mit_correlation_groups": {
+        "index_etfs": ["SPY", "QQQ", "IWM", "DIA"],
+        "semi_ai": ["NVDA", "AMD", "AVGO"],
+        "mega_cap_tech": ["AAPL", "MSFT", "META", "AMZN", "GOOGL"],
+        "high_beta_growth": ["TSLA", "PLTR", "NFLX"],
+    },
+
     # ── Data Freshness – Fix #4 ───────────────────────────────────────────
     "max_bar_delay_minutes": 20,
 

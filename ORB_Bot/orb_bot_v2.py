@@ -277,6 +277,12 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="Symbole überschreiben")
     p.add_argument("--shorts", action="store_true",
                    help="Short-Trades aktivieren")
+    mit_group = p.add_mutually_exclusive_group()
+    mit_group.add_argument("--mit-overlay", dest="mit_overlay", action="store_true",
+                           help="MIT probabilistic overlay aktivieren")
+    mit_group.add_argument("--no-mit-overlay", dest="mit_overlay", action="store_false",
+                           help="MIT probabilistic overlay deaktivieren")
+    p.set_defaults(mit_overlay=None)
     p.add_argument("--is-days", type=int, default=120,
                    help="IS-Tage für WFO (Standard: 120)")
     p.add_argument("--oos-days", type=int, default=30,
@@ -299,6 +305,8 @@ def main() -> None:
     cfg = copy.deepcopy(ORB_CONFIG)
     if args.shorts:
         cfg["allow_shorts"] = True
+    if args.mit_overlay is not None:
+        cfg["use_mit_probabilistic_overlay"] = args.mit_overlay
     symbols = args.symbols or cfg["symbols"]
 
     # data_dir sicherstellen

@@ -134,6 +134,10 @@ ORB_CONFIG.update({
     # EOD-Close: Minuten vor Handelsschluss (16:00 ET) alle Positionen schließen
     "eod_close_minutes_before": 33,
 
+    # Buy-Cutoff: ab dieser Uhrzeit (ET) werden keine neuen BUY/SHORT-Signale
+    # mehr ausgeführt (verhindert späte Intraday-Entries kurz vor Marktschluss)
+    "buy_cutoff_time_et": time(15, 0),
+
     # Kleine Debug-Ausgabe im Scanmodus (z.B. für Volume-/Signal-Validierung)
     "debug_scan_enabled": True,
     "debug_scan_symbols": ["SPY", "QQQ"], ##Verwendung von [] dann wird jedes Symbol ins Debug geschrieben
@@ -155,6 +159,31 @@ def send_telegram(message: str) -> None:
         urllib.request.urlopen(urllib.request.Request(url, data=data), timeout=10).read()
     except Exception as e:
         print(f"[Telegram] {e}")
+
+
+def _build_client_order_id(symbol: str, side: str, overlay_reason: str = "") -> str:
+    """
+    Erzeugt eine lesbare client_order_id ≤ 128 Zeichen für Alpaca.
+
+    Format ohne MIT-Overlay:  "ORB|SPY|BUY|2026-04-08 14:30 ET"
+    Format mit MIT-Overlay:   "ORB|SPY|BUY|2026-04-08 14:30 ET|P=0.82|EV=+0.15R|Kelly=0.75x"
+
+    Bei aktivem MIT-Overlay enthält die ID die komplette Signalbewertung
+    (Win-Probability, Expected-Value in R, Kelly-Faktor) aus apply_mit_overlay().
+    side: "BUY" oder "SHORT"
+    """
+    side_str = "BUY" if side.upper() == "BUY" else "SHORT"
+    now_et = datetime.now(pytz.UTC).astimezone(ET)
+    ts = now_et.strftime("%Y-%m-%d %H:%M ET")
+    base = f"ORB|{symbol}|{side_str}|{ts}"
+    if overlay_reason:
+        # overlay_reason Beispiel: "MIT Overlay: P=0.82 EV=+0.15R Kelly=0.75x"
+        # Präfix entfernen und Leerzeichen als Trennzeichen durch | ersetzen
+        detail = overlay_reason.replace("MIT Overlay: ", "").replace(" ", "|")
+        full = f"{base}|{detail}"
+    else:
+        full = base
+    return full[:128]
 
 
 # ============================= Helper =======================================
@@ -400,15 +429,17 @@ class AlpacaClient:
     # ── Orderausführung ─────────────────────────────────────────────────────
 
     def place_long_bracket(self, symbol: str, qty: int,
-                            stop_loss: float, take_profit: float) -> dict:
+                            stop_loss: float, take_profit: float,
+                            client_order_id: str = None) -> dict:
         """
         Long-Entry als Bracket-Order.
         Alpaca verwaltet Stop-Loss und Take-Profit serverseitig –
         _manage_position() im Bot ist für Live-Trades nicht nötig.
+        client_order_id: optionaler kompakter ID-String (max 64 Zeichen) mit Signalinfos.
         Gibt dict mit {"ok": True, ...} oder {"ok": False, "error": msg} zurück.
         """
         try:
-            order = MarketOrderRequest(
+            req_kwargs = dict(
                 symbol=symbol,
                 qty=qty,
                 side=OrderSide.BUY,
@@ -417,28 +448,33 @@ class AlpacaClient:
                 stop_loss=StopLossRequest(stop_price=round(stop_loss,    2)),
                 take_profit=TakeProfitRequest(limit_price=round(take_profit, 2)),
             )
+            if client_order_id:
+                req_kwargs["client_order_id"] = client_order_id[:128]
+            order = MarketOrderRequest(**req_kwargs)
             r = self.trading.submit_order(order)
             print(f"[Alpaca] LONG  {symbol} {qty} Aktien | SL {stop_loss:.2f} | TP {take_profit:.2f} -> {r.status.value}")
-            return {"ok": True, "id": str(r.id), "symbol": symbol, "qty": qty,
-                    "side": "long", "stop_loss": stop_loss,
-                    "take_profit": take_profit, "status": r.status.value}
+            return {"ok": True, "id": str(r.id), "client_id": client_order_id or "",
+                    "symbol": symbol, "qty": qty, "side": "long",
+                    "stop_loss": stop_loss, "take_profit": take_profit, "status": r.status.value}
         except Exception as e:
             print(f"[Alpaca] Long-Order {symbol} fehlgeschlagen: {e}")
             return {"ok": False, "error": str(e)}
 
     def place_short_bracket(self, symbol: str, qty: int,
-                             stop_loss: float, take_profit: float) -> dict:
+                             stop_loss: float, take_profit: float,
+                             client_order_id: str = None) -> dict:
         """
         Short-Entry als Bracket-Order.
         stop_loss liegt ÜBER dem Entry, take_profit DARUNTER.
         Erfordert Margin-Konto + Shortability-Check.
+        client_order_id: optionaler kompakter ID-String (max 64 Zeichen) mit Signalinfos.
         Gibt dict mit {"ok": True, ...} oder {"ok": False, "error": msg} zurück.
         """
         if not self.is_shortable(symbol):
             print(f"[Alpaca] {symbol} nicht shortbar - Order abgebrochen")
             return {"ok": False, "error": f"{symbol} nicht shortbar"}
         try:
-            order = MarketOrderRequest(
+            req_kwargs = dict(
                 symbol=symbol,
                 qty=qty,
                 side=OrderSide.SELL,          # Sell-to-Open = Short
@@ -447,11 +483,14 @@ class AlpacaClient:
                 stop_loss=StopLossRequest(stop_price=round(stop_loss,    2)),
                 take_profit=TakeProfitRequest(limit_price=round(take_profit, 2)),
             )
+            if client_order_id:
+                req_kwargs["client_order_id"] = client_order_id[:128]
+            order = MarketOrderRequest(**req_kwargs)
             r = self.trading.submit_order(order)
             print(f"[Alpaca] SHORT {symbol} {qty} Aktien | SL {stop_loss:.2f} | TP {take_profit:.2f} -> {r.status.value}")
-            return {"ok": True, "id": str(r.id), "symbol": symbol, "qty": qty,
-                    "side": "short", "stop_loss": stop_loss,
-                    "take_profit": take_profit, "status": r.status.value}
+            return {"ok": True, "id": str(r.id), "client_id": client_order_id or "",
+                    "symbol": symbol, "qty": qty, "side": "short",
+                    "stop_loss": stop_loss, "take_profit": take_profit, "status": r.status.value}
         except Exception as e:
             print(f"[Alpaca] Short-Order {symbol} fehlgeschlagen: {e}")
             return {"ok": False, "error": str(e)}
@@ -721,6 +760,103 @@ class ORBStrategy:
         """Delegiert an orb_strategy.generate_signal()."""
         return _strategy_generate_signal(df, self.cfg, spy_df=spy_df)
 
+    def _clip_prob(self, value: float) -> float:
+        return float(np.clip(value, 0.20, 0.80))
+
+    def _estimate_win_probability(
+        self,
+        signal: str,
+        strength: float,
+        ctx: dict,
+        df: pd.DataFrame,
+    ) -> float:
+        last = df.iloc[-1] if not df.empty else pd.Series(dtype=float)
+        volume_ratio = float(ctx.get("volume_ratio", last.get("Volume_Ratio", 1.0) or 1.0))
+        orb_range_pct = float(ctx.get("orb_range_pct", 0.0) or 0.0)
+        close = float(last.get("Close", 0.0) or 0.0)
+        atr_val = float(last.get("ATR", 0.0) or 0.0)
+        atr_pct = (atr_val / close * 100.0) if close > 0 and atr_val > 0 else 0.0
+        trend = ctx.get("trend", {"bullish": True, "bearish": True})
+        trend_aligned = (
+            signal == "BUY" and trend.get("bullish", True)
+        ) or (
+            signal == "SHORT" and trend.get("bearish", True)
+        )
+
+        win_prob = 0.40
+        win_prob += 0.25 * float(np.clip(strength, 0.0, 1.0))
+        win_prob += 0.04 * float(np.clip(volume_ratio - 1.0, 0.0, 1.5))
+        if ctx.get("volume_confirmed", False):
+            win_prob += 0.03
+        if 0.25 <= orb_range_pct <= 1.20:
+            win_prob += 0.03
+        elif orb_range_pct > 2.00:
+            win_prob -= 0.04
+        if atr_pct > 0 and orb_range_pct > 0:
+            range_vs_atr = orb_range_pct / max(atr_pct, 1e-9)
+            if 0.35 <= range_vs_atr <= 1.25:
+                win_prob += 0.03
+            elif range_vs_atr > 1.75:
+                win_prob -= 0.05
+        if trend_aligned:
+            win_prob += 0.03
+        else:
+            win_prob -= 0.05
+        return self._clip_prob(win_prob)
+
+    def _compute_ev_r(self, win_prob: float, reward_r: float, risk_r: float = 1.0) -> float:
+        loss_prob = 1.0 - win_prob
+        return (win_prob * reward_r) - (loss_prob * risk_r)
+
+    def _kelly_fraction_from_edge(
+        self,
+        win_prob: float,
+        reward_r: float,
+        risk_r: float = 1.0,
+    ) -> float:
+        if reward_r <= 0 or risk_r <= 0:
+            return 0.0
+        b = reward_r / risk_r
+        q = 1.0 - win_prob
+        return max(0.0, ((b * win_prob) - q) / b)
+
+    def mit_group_for_symbol(self, symbol: str) -> str:
+        groups = self.cfg.get("mit_correlation_groups", {})
+        for group_name, members in groups.items():
+            if symbol in members:
+                return group_name
+        return ""
+
+    def apply_mit_overlay(
+        self,
+        signal: str,
+        strength: float,
+        ctx: dict,
+        df: pd.DataFrame,
+    ) -> Tuple[bool, float, str]:
+        if not self.cfg.get("use_mit_probabilistic_overlay", False):
+            return True, 1.0, "MIT Overlay deaktiviert"
+        if signal not in ("BUY", "SHORT"):
+            return False, 0.0, "Kein ORB-Signal"
+
+        min_strength = float(self.cfg.get("mit_min_strength", 0.15))
+        if strength < min_strength:
+            return False, 0.0, f"MIT Overlay reject: Strength {strength:.2f} < {min_strength:.2f}"
+
+        reward_r = float(self.cfg.get("profit_target_r", 2.0))
+        win_prob = self._estimate_win_probability(signal, strength, ctx, df)
+        ev_r = self._compute_ev_r(win_prob, reward_r, 1.0)
+        ev_threshold = float(self.cfg.get("mit_ev_threshold_r", 0.08))
+        if ev_r <= ev_threshold:
+            return False, 0.0, f"MIT Overlay reject: P={win_prob:.2f} EV={ev_r:+.2f}R"
+
+        raw_kelly = self._kelly_fraction_from_edge(win_prob, reward_r, 1.0)
+        fractional_kelly = raw_kelly * float(self.cfg.get("mit_kelly_fraction", 0.50))
+        qty_factor = float(np.clip(0.25 + fractional_kelly, 0.25, 1.0))
+        return True, qty_factor, (
+            f"MIT Overlay: P={win_prob:.2f} EV={ev_r:+.2f}R Kelly={qty_factor:.2f}x"
+        )
+
 
 # ============================= ORB_Bot (Live) ================================
 
@@ -847,6 +983,28 @@ class ORB_Bot:
         
         return qty, detail
 
+    def _mit_group_blocked(
+        self,
+        symbol: str,
+        open_positions: Dict[str, dict],
+        reserved_groups: set,
+    ) -> Tuple[bool, str]:
+        if not self.cfg.get("use_mit_probabilistic_overlay", False):
+            return False, ""
+        if not self.cfg.get("use_mit_independence_guard", True):
+            return False, ""
+
+        group = self.strategy.mit_group_for_symbol(symbol)
+        if not group:
+            return False, ""
+
+        for open_sym in open_positions.keys():
+            if self.strategy.mit_group_for_symbol(open_sym) == group:
+                return True, f"MIT Independence: Gruppe {group} bereits offen"
+        if group in reserved_groups:
+            return True, f"MIT Independence: Gruppe {group} heute bereits genutzt"
+        return False, ""
+
     def _perform_eod_close(self) -> dict:
         """
         Zuverlässiger EOD-Close mit Verifikation, Fallback und Benachrichtigung.
@@ -892,6 +1050,11 @@ class ORB_Bot:
         today = now.strftime("%Y-%m-%d")
         print(f"\n=== ORB Scan – {today} ===")
 
+        # EOD-Close bereits durchgeführt → keine neuen Trades mehr heute
+        if self._eod_done_date == today:
+            print("  EOD-Close für heute bereits durchgeführt – keine neuen Trades möglich.")
+            return self._empty_result(today)
+
         if not is_trading_day(now):
             print("  Wochenende – kein Scan.")
             return self._empty_result(today)
@@ -913,6 +1076,14 @@ class ORB_Bot:
         open_positions = self.alpaca.sync_positions() if self.alpaca else {}
         equity         = self.alpaca.get_equity()     if self.alpaca else 0.0
         signals        = []
+        reserved_mit_groups = set()
+
+        # Buy-Cutoff: nach dieser Uhrzeit werden keine neuen Entries mehr ausgeführt
+        buy_cutoff = self.cfg.get("buy_cutoff_time_et", time(15, 0))
+        current_et_time = now.astimezone(ET).time()
+        no_more_buys = current_et_time >= buy_cutoff
+        if no_more_buys:
+            print(f"  Buy-Cutoff ({buy_cutoff.strftime('%H:%M')} ET) erreicht – keine neuen Entries.")
 
         # Fix #5: SPY-Daten für Trendfilter vorladen
         spy_df = None
@@ -951,6 +1122,8 @@ class ORB_Bot:
                 continue
 
             signal, strength, reason, ctx = self.strategy.generate_signal(df, spy_df=spy_df)
+            qty_factor = 1.0
+            overlay_reason = ""
 
             # Kompakte Debug-Ausgabe für ausgewählte Symbole.
             if self.cfg.get("debug_scan_enabled", False):
@@ -969,16 +1142,66 @@ class ORB_Bot:
                         f"vol={vol:.0f} vma={vol_ma_s} vRatio={vol_ratio_s} orbVRatio={orb_vol_ratio_s}"
                     )
 
+            if signal in ("BUY", "SHORT") and self.cfg.get("use_mit_probabilistic_overlay", False):
+                should_trade, qty_factor, overlay_reason = self.strategy.apply_mit_overlay(
+                    signal, strength, ctx, df
+                )
+                if not should_trade:
+                    print(f"  {sym}: HOLD – {overlay_reason}")
+                    self._log_event(
+                        "MIT_OVERLAY_REJECTED",
+                        "MIT Overlay abgelehnt",
+                        sym,
+                        {"signal": signal, "strength": round(strength, 2), "reason": overlay_reason},
+                    )
+                    continue
+
+                blocked, block_reason = self._mit_group_blocked(sym, open_positions, reserved_mit_groups)
+                if blocked:
+                    print(f"  {sym}: HOLD – {block_reason}")
+                    self._log_event(
+                        "MIT_INDEPENDENCE_BLOCKED",
+                        "MIT Independence Guard blockiert",
+                        sym,
+                        {"signal": signal, "reason": block_reason},
+                    )
+                    continue
+
+                self._log_event(
+                    "MIT_OVERLAY_APPROVED",
+                    "MIT Overlay freigegeben",
+                    sym,
+                    {"signal": signal, "strength": round(strength, 2), "qty_factor": round(qty_factor, 2), "reason": overlay_reason},
+                )
+
             # strength-Gating erfolgt zentral in orb_strategy via min_signal_strength.
             if signal == "BUY":
-                sig = self._execute_long(sym, df, equity, reason, strength)
+                if no_more_buys:
+                    print(f"  {sym}: BUY_CUTOFF_REJECTED – nach {buy_cutoff.strftime('%H:%M')} ET")
+                    self._log_event("BUY_CUTOFF_REJECTED", "Buy nach Cutoff-Zeit abgelehnt", sym,
+                                    {"signal": signal, "cutoff": buy_cutoff.strftime("%H:%M")})
+                    continue
+                sig = self._execute_long(sym, df, equity, reason, strength, qty_factor=qty_factor, overlay_reason=overlay_reason)
                 if sig:
                     signals.append(sig)
+                    if self.cfg.get("use_mit_probabilistic_overlay", False):
+                        group = self.strategy.mit_group_for_symbol(sym)
+                        if group:
+                            reserved_mit_groups.add(group)
 
             elif signal == "SHORT":
-                sig = self._execute_short(sym, df, equity, reason, strength)
+                if no_more_buys:
+                    print(f"  {sym}: BUY_CUTOFF_REJECTED – nach {buy_cutoff.strftime('%H:%M')} ET")
+                    self._log_event("BUY_CUTOFF_REJECTED", "Short nach Cutoff-Zeit abgelehnt", sym,
+                                    {"signal": signal, "cutoff": buy_cutoff.strftime("%H:%M")})
+                    continue
+                sig = self._execute_short(sym, df, equity, reason, strength, qty_factor=qty_factor, overlay_reason=overlay_reason)
                 if sig:
                     signals.append(sig)
+                    if self.cfg.get("use_mit_probabilistic_overlay", False):
+                        group = self.strategy.mit_group_for_symbol(sym)
+                        if group:
+                            reserved_mit_groups.add(group)
 
             else:
                 label = f"HOLD (Stärke {strength:.2f})" if signal in ("BUY","SHORT") else signal
@@ -1004,7 +1227,9 @@ class ORB_Bot:
     # ── Signal-Ausführung ────────────────────────────────────────────────────
 
     def _execute_long(self, sym: str, df: pd.DataFrame,
-                      equity: float, reason: str, strength: float) -> Optional[dict]:
+                      equity: float, reason: str, strength: float,
+                      qty_factor: float = 1.0,
+                      overlay_reason: str = "") -> Optional[dict]:
         orb_high, orb_low, orb_range, _ = self.strategy.calculate_orb_levels(df)
         current  = df["Close"].iloc[-1]
         # Fix #9: Stop an ORB-Range statt ATR
@@ -1015,9 +1240,11 @@ class ORB_Bot:
                                            self.cfg.get("risk_per_trade", 0.005),
                                            self.cfg.get("max_equity_at_risk", 0.05),
                                            self.cfg.get("max_position_value_pct", 0.25))
+        qty = max(0, int(qty * max(qty_factor, 0.0)))
         if qty <= 0:
             print(f"  {sym}: Positionsgröße = 0 – übersprungen")
             return None
+        final_reason = f"{reason} | {overlay_reason}" if overlay_reason else reason
 
         # Prüfe Buying Power und reduziere Qty bei Bedarf
         qty, bp_detail = self._cap_qty_by_buying_power(sym, "long", qty, current)
@@ -1032,7 +1259,11 @@ class ORB_Bot:
             self._notify_and_log("ORDER_REJECTED", "Insufficient BP", sym, bp_detail, msg)
             return None
 
-        order = self.alpaca.place_long_bracket(sym, qty, stop, target) if self.alpaca else None
+        # Lesbare client_order_id mit Signalinfos für Alpaca-Dashboard (max 128 Zeichen)
+        client_order_id = _build_client_order_id(sym, "BUY", overlay_reason)
+
+        order = self.alpaca.place_long_bracket(sym, qty, stop, target,
+                                               client_order_id=client_order_id) if self.alpaca else {"ok": True, "id": client_order_id}
         if self.alpaca and not order.get("ok"):
             error = order.get("error", "Unknown error")
             cat = self._classify_order_error(error)
@@ -1043,17 +1274,19 @@ class ORB_Bot:
 
         self.portfolio.log_order(sym, "BUY", qty, current, stop, target,
                                   alpaca_order_id=order["id"] if order else "SIM",
-                                  reason=reason)
+                                  reason=final_reason)
         msg = (f"ORB BUY {sym} {qty} @ {current:.2f} | "
-               f"SL {stop:.2f} | TP {target:.2f} [{strength:.2f}] {reason}")
+               f"SL {stop:.2f} | TP {target:.2f} [{strength:.2f}] {final_reason}")
         self._notify_and_log("ORDER_FILLED", "Long order executed", sym,
-                           {"qty": qty, "price": current, "reason": reason}, msg)
+                           {"qty": qty, "price": current, "reason": final_reason, "qty_factor": round(qty_factor, 2)}, msg)
         return {"symbol": sym, "action": "BUY", "qty": qty,
                 "price": current, "stop": stop, "target": target,
-                "strength": strength, "reason": reason}
+                "strength": strength, "reason": final_reason}
 
     def _execute_short(self, sym: str, df: pd.DataFrame,
-                        equity: float, reason: str, strength: float) -> Optional[dict]:
+                        equity: float, reason: str, strength: float,
+                        qty_factor: float = 1.0,
+                        overlay_reason: str = "") -> Optional[dict]:
         orb_high, orb_low, orb_range, _ = self.strategy.calculate_orb_levels(df)
         current  = df["Close"].iloc[-1]
         # Fix #9: Stop an ORB-Range statt ATR
@@ -1064,9 +1297,11 @@ class ORB_Bot:
                                            self.cfg.get("risk_per_trade", 0.005),
                                            self.cfg.get("max_equity_at_risk", 0.05),
                                            self.cfg.get("max_position_value_pct", 0.25))
+        qty = max(0, int(qty * max(qty_factor, 0.0)))
         if qty <= 0:
             print(f"  {sym}: Positionsgröße = 0 – übersprungen")
             return None
+        final_reason = f"{reason} | {overlay_reason}" if overlay_reason else reason
 
         # Prüfe Buying Power und reduziere Qty bei Bedarf (shorting benötigt Margin)
         qty, bp_detail = self._cap_qty_by_buying_power(sym, "short", qty, current)
@@ -1082,7 +1317,11 @@ class ORB_Bot:
                                bp_detail, msg)
             return None
 
-        order = self.alpaca.place_short_bracket(sym, qty, stop, target) if self.alpaca else None
+        # Lesbare client_order_id mit Signalinfos für Alpaca-Dashboard (max 128 Zeichen)
+        client_order_id = _build_client_order_id(sym, "SHORT", overlay_reason)
+
+        order = self.alpaca.place_short_bracket(sym, qty, stop, target,
+                                                client_order_id=client_order_id) if self.alpaca else {"ok": True, "id": client_order_id}
         if self.alpaca and not order.get("ok"):
             error = order.get("error", "Unknown error")
             cat = self._classify_order_error(error)
@@ -1093,14 +1332,14 @@ class ORB_Bot:
 
         self.portfolio.log_order(sym, "SHORT", qty, current, stop, target,
                                   alpaca_order_id=order["id"] if order else "SIM",
-                                  reason=reason)
+                  reason=final_reason)
         msg = (f"ORB SHORT {sym} {qty} @ {current:.2f} | "
-               f"SL {stop:.2f} | TP {target:.2f} [{strength:.2f}] {reason}")
+           f"SL {stop:.2f} | TP {target:.2f} [{strength:.2f}] {final_reason}")
         self._notify_and_log("ORDER_FILLED", "Short order executed", sym,
-                           {"qty": qty, "price": current, "reason": reason}, msg)
+               {"qty": qty, "price": current, "reason": final_reason, "qty_factor": round(qty_factor, 2)}, msg)
         return {"symbol": sym, "action": "SHORT", "qty": qty,
                 "price": current, "stop": stop, "target": target,
-                "strength": strength, "reason": reason}
+        "strength": strength, "reason": final_reason}
 
     # ── Status & Report ──────────────────────────────────────────────────────
 
@@ -1230,6 +1469,7 @@ class ORB_Backtester:
             price_dict: Dict[str, float] = {}
             current_day_key = current_date.strftime("%Y-%m-%d")
             spy_day_df = day_cache.get(spy_symbol, {}).get(current_day_key)
+            reserved_mit_groups = set()
 
             for sym, df_full in data_cache.items():
                 if sym == spy_symbol and spy_symbol not in self.cfg.get("symbols", []):
@@ -1277,10 +1517,27 @@ class ORB_Backtester:
                     if orb_range <= 0:
                         continue
 
-                    signal, strength, reason, _ = self.strategy.generate_signal(
+                    signal, strength, reason, ctx = self.strategy.generate_signal(
                         bars_so_far,
                         spy_df=spy_bars_so_far,
                     )
+                    qty_factor = 1.0
+                    overlay_reason = ""
+                    if signal in ("BUY", "SHORT") and self.cfg.get("use_mit_probabilistic_overlay", False):
+                        should_trade, qty_factor, overlay_reason = self.strategy.apply_mit_overlay(
+                            signal, strength, ctx, bars_so_far
+                        )
+                        if not should_trade:
+                            continue
+                        if self.cfg.get("use_mit_independence_guard", True):
+                            group = self.strategy.mit_group_for_symbol(sym)
+                            if group:
+                                open_groups = {
+                                    self.strategy.mit_group_for_symbol(open_sym)
+                                    for open_sym in self.portfolio.data["positions"].keys()
+                                }
+                                if group in open_groups or group in reserved_mit_groups:
+                                    continue
                     if signal == "BUY":
                         entry = current_price * (1 + self.slippage)
                         # Fix #9: Stop an ORB-Range
@@ -1292,12 +1549,18 @@ class ORB_Backtester:
                                     self.cfg.get("risk_per_trade", 0.005),
                                     self.cfg.get("max_equity_at_risk", 0.05),
                                     self.cfg.get("max_position_value_pct", 0.25))
+                        qty = max(0, int(qty * max(qty_factor, 0.0)))
                         if qty > 0:
                             cost = entry * qty * (1 + self.commission)
                             if cost <= self.portfolio.data["cash"]:
-                                self.portfolio.buy(sym, entry, qty, stop, reason)
+                                final_reason = f"{reason} | {overlay_reason}" if overlay_reason else reason
+                                self.portfolio.buy(sym, entry, qty, stop, final_reason)
                                 entered = True
                                 trades_today += 1
+                                if self.cfg.get("use_mit_probabilistic_overlay", False):
+                                    group = self.strategy.mit_group_for_symbol(sym)
+                                    if group:
+                                        reserved_mit_groups.add(group)
                         # Nur nach erfolgreichem Entry den Bar-Loop verlassen.
                         # Sonst weiter prüfen, ob später am Tag ein valider Entry möglich ist.
                         if entered:
@@ -1435,6 +1698,12 @@ def main():
                         help="Short-Signale aktivieren (Margin-Konto erforderlich)")
     parser.add_argument("--live", action="store_true",
                         help="Live-Modus – überschreibt APCA_PAPER=true")
+    mit_group = parser.add_mutually_exclusive_group()
+    mit_group.add_argument("--mit-overlay", dest="mit_overlay", action="store_true",
+                           help="MIT probabilistic overlay aktivieren")
+    mit_group.add_argument("--no-mit-overlay", dest="mit_overlay", action="store_false",
+                           help="MIT probabilistic overlay deaktivieren")
+    parser.set_defaults(mit_overlay=None)
     args = parser.parse_args()
 
     cfg = dict(ORB_CONFIG)
@@ -1443,6 +1712,8 @@ def main():
     if args.live:
         cfg["alpaca_paper"] = False
         os.environ["APCA_PAPER"] = "false"
+    if args.mit_overlay is not None:
+        cfg["use_mit_probabilistic_overlay"] = args.mit_overlay
 
     alpaca = _build_alpaca_client(cfg)
 
