@@ -84,6 +84,16 @@ ORB_DEFAULT_CONFIG: dict = {
     "use_vix_filter":     True,
     "vix_high_threshold": 30,
     "vix_size_reduction": 0.5,
+    # ── VIX Term Structure Regime – Fix #16 ─────────────────────────────
+    "use_vix_term_structure": True, # aktiviert nach Einbau,  # Aktiviere VIX/VIX3M Regime-Filter
+    "vix_regime_flat_lower":  0.90,   # Contango cutoff
+    "vix_regime_flat_upper":  1.00,   # Flat → Backwardation
+    "vix_regime_backwd_upper": 1.15,  # Extreme Backwardation cutoff
+    # VIX Regime Size-Multiplikatoren (konfigurierbar):
+    #   "contango" (<0.90):           1.00  (100%)
+    #   "flat" (0.90-1.00):           0.75  (75%)
+    #   "backwardation" (1.00-1.15):  0.50  (50%)
+    #   "extreme_backwardation" (>1.15): 0.00 (Shorts only)
     "max_drawdown_pct":   0.15,
     "max_volume_pct":     0.01,
 
@@ -103,7 +113,7 @@ ORB_DEFAULT_CONFIG: dict = {
     "volume_lookback_days": 10,
 
     # ── MIT Probabilistic Overlay ─────────────────────────────────────────
-    "use_mit_probabilistic_overlay": False,
+    "use_mit_probabilistic_overlay": True, ##aktiviert nach Einbau False,
     "mit_ev_threshold_r": 0.08,
     "mit_kelly_fraction": 0.50,
     "mit_min_strength": 0.15,
@@ -464,6 +474,79 @@ def check_entry_cutoff(
 
     et_time = to_et_time(dt_obj)
     return et_time < cutoff
+
+
+def get_vix_term_structure_regime(
+    vix_spot: float,
+    vix_3m: Optional[float] = None,
+    cfg: Optional[dict] = None,
+) -> Tuple[str, float, str]:
+    """
+    Fix #16: VIX Term Structure Regime – Regime-Indikator basierend auf VIX/VIX3M Ratio.
+
+    Die Term Structure erfasst die Änderungsrate der Angst:
+      - Contango (<0.90): Normal, langfristige Risiken höher. → Volle Positionsgrößen
+      - Flach (0.90-1.00): Warnung, kurzfristige≈langfristige Risiken. → 75%
+      - Backwardation (1.00-1.15): Panik, kurzfristige Risiken höher. → 50%
+      - Extreme Backwardation (>1.15): Existenzielle Risiken. → Nur Shorts erlaubt
+
+    Diese Filter verbessert die Trade Independence, weil er korrelierte Drawdowns
+    im gesamten Portfolio reduziert.
+
+    Parameters
+    ----------
+    vix_spot : float
+        Spot VIX Level (z.B. 25.5)
+    vix_3m : Optional[float]
+        3-Monats VIX (z.B. aus Daten oder Fallback zu vix_spot * 1.02)
+    cfg : Optional[dict]
+        Konfiguration mit Schwellen (z.B. cfg["vix_regime_thresholds"])
+
+    Returns
+    -------
+    (regime_name, size_multiplier, reason_string)
+      - regime_name: "contango", "flat", "backwardation", "extreme_backwardation"
+      - size_multiplier: [1.0, 0.75, 0.50, 0.0]  # Sizing-Anpassung
+      - reason_string: Beschreibung für Logs
+    """
+    if vix_spot <= 0:
+        vix_spot = 20.0  # Fallback zu VIX Default
+
+    # VIX3M aus Daten oder gerechtfertiger Fallback
+    if vix_3m is None or vix_3m <= 0:
+        # Typischerweise: VIX3M ≈ 1-2% höher als VIX in normalen Zeiten
+        vix_3m = vix_spot * 1.02
+
+    vix_ratio = vix_spot / vix_3m if vix_3m > 0 else 1.0
+
+    # Schwellen aus Config (oder Defaults)
+    if cfg is not None:
+        flat_lower    = float(cfg.get("vix_regime_flat_lower", 0.90))
+        flat_upper    = float(cfg.get("vix_regime_flat_upper", 1.00))
+        backwd_upper  = float(cfg.get("vix_regime_backwd_upper", 1.15))
+    else:
+        flat_lower    = 0.90
+        flat_upper    = 1.00
+        backwd_upper  = 1.15
+
+    if vix_ratio < flat_lower:
+        regime = "contango"
+        multiplier = 1.00
+        reason = f"Contango ({vix_ratio:.2f}): VIX normal, volle Positionsgrößen"
+    elif vix_ratio < flat_upper:
+        regime = "flat"
+        multiplier = 0.75
+        reason = f"Flat ({vix_ratio:.2f}): Term Structure ausgeflacht, 75% Position"
+    elif vix_ratio < backwd_upper:
+        regime = "backwardation"
+        multiplier = 0.50
+        reason = f"Backwardation ({vix_ratio:.2f}): Panik, 50% Position"
+    else:
+        regime = "extreme_backwardation"
+        multiplier = 0.00
+        reason = f"Extreme Backwardation ({vix_ratio:.2f}): Nur Shorts erlaubt"
+
+    return regime, multiplier, reason
 
 
 def time_decay_factor(bar_time_et: time, cfg: Optional[dict] = None) -> float:
@@ -915,12 +998,15 @@ def mit_apply_overlay(
     df: pd.DataFrame,
     cfg: dict,
     current_drawdown: float = 0.0,
+    vix_spot: Optional[float] = None,
+    vix_3m: Optional[float] = None,
 ) -> Tuple[bool, float, str]:
     """
     MIT Probabilistic Overlay – Gate für Trade-Ausführung.
 
     Prüft ob ein Signal positiven Expected Value hat und berechnet
-    die Kelly-basierte Positionsgrößen-Skalierung.
+    die Kelly-basierte Positionsgrößen-Skalierung mit DD-Scaling (Fix #15)
+    und optional VIX Term Structure Regime-Filtering (Fix #16).
 
     Returns: (should_trade, qty_factor, reason_string)
     """
@@ -957,8 +1043,23 @@ def mit_apply_overlay(
         dd_scaling_reason = f" [DD {current_drawdown:.2%} → Kelly {dd_scaled_kelly:.3f}]"
         fractional_kelly = dd_scaled_kelly
 
+    # Fix #16: VIX Term Structure Regime – Sizing-Anpassung nach Marktstruktur
+    vix_scaling_reason = ""
+    if cfg.get("use_vix_term_structure", False) and vix_spot is not None:
+        regime, vix_multiplier, regime_reason = get_vix_term_structure_regime(vix_spot, vix_3m, cfg)
+        
+        # Extreme Backwardation: Shorts erlauben, Longs verbieten
+        if regime == "extreme_backwardation":
+            if signal == "BUY":
+                return False, 0.0, f"VIX Regime reject: {regime_reason}"
+            # Shorts sind erlaubt, aber mit voller Kelly (nicht skaliert)
+            vix_multiplier = 1.0
+        
+        fractional_kelly *= vix_multiplier
+        vix_scaling_reason = f" [VIX-Regime: {regime} {vix_multiplier:.2f}x]"
+
     qty_factor = float(np.clip(0.25 + fractional_kelly, 0.25, 1.0))
-    return True, qty_factor, f"MIT Overlay: P={win_prob:.2f} EV={ev_r:+.2f}R Kelly={qty_factor:.2f}x{dd_scaling_reason}"
+    return True, qty_factor, f"MIT Overlay: P={win_prob:.2f} EV={ev_r:+.2f}R Kelly={qty_factor:.2f}x{dd_scaling_reason}{vix_scaling_reason}"
 
 
 def calibrate_win_probability(

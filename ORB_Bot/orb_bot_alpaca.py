@@ -799,9 +799,11 @@ class ORBStrategy:
         ctx: dict,
         df: pd.DataFrame,
         current_drawdown: float = 0.0,
+        vix_spot: Optional[float] = None,
+        vix_3m: Optional[float] = None,
     ) -> Tuple[bool, float, str]:
-        """Delegiert an orb_strategy.mit_apply_overlay (SSoT) mit optional DD."""
-        return _mit_apply_overlay(signal, strength, ctx, df, self.cfg, current_drawdown)
+        """Delegiert an orb_strategy.mit_apply_overlay (SSoT) mit DD + VIX."""
+        return _mit_apply_overlay(signal, strength, ctx, df, self.cfg, current_drawdown, vix_spot, vix_3m)
 
 
 # ============================= ORB_Bot (Live) ================================

@@ -435,7 +435,7 @@ def run_orb_backtest(
                         "trend": trend,
                     }
                     should_trade, qty_factor, overlay_reason = _mit_apply_overlay(
-                        signal, strength, ctx, bars_so_far, cfg, current_dd
+                        signal, strength, ctx, bars_so_far, cfg, current_dd, vix_val, None
                     )
                     if not should_trade:
                         continue
