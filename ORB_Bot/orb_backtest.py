@@ -266,12 +266,15 @@ def run_orb_backtest(
             peak_equity = equity
 
         # Drawdown Circuit Breaker mit Cooldown statt permanentem Lockout.
+        # Fix #15: Berechne current_dd für dynamic_kelly DD-Scaling
         dd_active = False
+        current_dd = 0.0
         if dd_pause_until is not None and day <= dd_pause_until:
             dd_active = True
+            current_dd = (peak_equity - equity) / (peak_equity + 1e-9)
         else:
-            dd_ratio = (peak_equity - equity) / (peak_equity + 1e-9)
-            if dd_ratio >= max_dd:
+            current_dd = (peak_equity - equity) / (peak_equity + 1e-9)
+            if current_dd >= max_dd:
                 dd_active = True
                 dd_pause_until = day + timedelta(days=max(dd_cooldown_days, 0))
                 # Nach Trigger den Referenz-Peak auf aktuelle Equity setzen,
@@ -432,7 +435,7 @@ def run_orb_backtest(
                         "trend": trend,
                     }
                     should_trade, qty_factor, overlay_reason = _mit_apply_overlay(
-                        signal, strength, ctx, bars_so_far, cfg
+                        signal, strength, ctx, bars_so_far, cfg, current_dd
                     )
                     if not should_trade:
                         continue

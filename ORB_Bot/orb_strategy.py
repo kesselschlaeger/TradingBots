@@ -107,7 +107,12 @@ ORB_DEFAULT_CONFIG: dict = {
     "mit_ev_threshold_r": 0.08,
     "mit_kelly_fraction": 0.50,
     "mit_min_strength": 0.15,
-    "mit_calibration_offset": 0.0,  # Fix #14: Kalibrierungsoffset (aus calibrate_win_probability)
+    "mit_calibration_offset": 0.0317,# 0.0,  # Fix #14: Kalibrierungsoffset (aus calibrate_win_probability aufgerufen mit: orb_bot_v2.py --mode calibrate)
+    # ── DD-Scaling für dynamic Kelly (Fix #15) ────────────────────────────
+    "use_dynamic_kelly_dd_scaling": True,  # vorher false # Aktiviere DD-basiertes Sizing
+    "dynamic_kelly_max_dd": 0.15,          # Max DD-Schwelle (default 15%)
+    # Bei DD ≥ 15%: kelly_fraction → 0.0
+    # Bei DD < 15%: Exponentielle Skalierung mit Exponent 1.5
     "use_mit_independence_guard": True,
     "mit_correlation_groups": {
         "index_etfs": ["SPY", "QQQ", "IWM", "DIA"],
@@ -849,6 +854,51 @@ def mit_kelly_fraction(
     return max(0.0, ((b * win_prob) - q) / b)
 
 
+def dynamic_kelly(
+    base_kelly: float,
+    current_dd: float,
+    max_dd: float = 0.15,
+) -> float:
+    """
+    Fix #15: Kelly-Fraction skaliert mit aktuellem Drawdown (DD-Scaling).
+
+    Statt eines binären Drawdown-Breakers (alles oder nichts beim max_dd)
+    wird die Kelly-Fraction graduell reduziert, wenn der Drawdown steigt.
+
+    Diese Strategie:
+      1. Reduziert Exposure graduell statt abrupt
+      2. Nutzt nach dem Law of Large Numbers auch in DD-Phasen positive
+         EV-Situationen mit reduzierter Größe
+      3. Ermöglicht Recovery-Opportunitäten während des Drawdown
+
+    Die exponentielle Skalierung (Exponent 1.5) reduziert aggressiver bei
+    tieferen Drawdowns, während flache Drawdowns (~0–5%) minimal impactieren.
+
+    Parameters
+    ----------
+    base_kelly : float
+        Die Basis Kelly-Fraction (z.B. aus mit_kelly_fraction oder
+        fractional Kelly nach Kelly-Fraction).
+    current_dd : float
+        Aktueller Drawdown als Dezimal (z.B. 0.08 für 8%).
+    max_dd : float, default 0.15
+        Maximaler Drawdown-Schwelle (default 15%). Bei current_dd >= max_dd
+        wird base_kelly auf 0.0 gesetzt.
+
+    Returns
+    -------
+    float
+        Skalierte Kelly-Fraction im Bereich [0.0, base_kelly].
+        Bei current_dd >= max_dd: 0.0
+        Bei current_dd < max_dd: base_kelly × scale, wobei
+          scale = max(0.0, 1.0 - (current_dd / max_dd) ** 1.5)
+    """
+    if current_dd >= max_dd:
+        return 0.0
+    scale = max(0.0, 1.0 - (current_dd / max_dd) ** 1.5)
+    return base_kelly * scale
+
+
 def mit_group_for_symbol(symbol: str, cfg: dict) -> str:
     """Finde die MIT-Korrelationsgruppe für ein Symbol."""
     groups = cfg.get("mit_correlation_groups", {})
@@ -864,6 +914,7 @@ def mit_apply_overlay(
     ctx: dict,
     df: pd.DataFrame,
     cfg: dict,
+    current_drawdown: float = 0.0,
 ) -> Tuple[bool, float, str]:
     """
     MIT Probabilistic Overlay – Gate für Trade-Ausführung.
@@ -897,8 +948,17 @@ def mit_apply_overlay(
 
     raw_kelly = mit_kelly_fraction(win_prob, reward_r, 1.0)
     fractional_kelly = raw_kelly * float(cfg.get("mit_kelly_fraction", 0.50))
+
+    # Fix #15: DD-Scaling – graduelles Sizing statt binärem Breaker
+    dd_scaling_reason = ""
+    if cfg.get("use_dynamic_kelly_dd_scaling", False):
+        max_dd = float(cfg.get("dynamic_kelly_max_dd", 0.15))
+        dd_scaled_kelly = dynamic_kelly(fractional_kelly, current_drawdown, max_dd)
+        dd_scaling_reason = f" [DD {current_drawdown:.2%} → Kelly {dd_scaled_kelly:.3f}]"
+        fractional_kelly = dd_scaled_kelly
+
     qty_factor = float(np.clip(0.25 + fractional_kelly, 0.25, 1.0))
-    return True, qty_factor, f"MIT Overlay: P={win_prob:.2f} EV={ev_r:+.2f}R Kelly={qty_factor:.2f}x"
+    return True, qty_factor, f"MIT Overlay: P={win_prob:.2f} EV={ev_r:+.2f}R Kelly={qty_factor:.2f}x{dd_scaling_reason}"
 
 
 def calibrate_win_probability(
