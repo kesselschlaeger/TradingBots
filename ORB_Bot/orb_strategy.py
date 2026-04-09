@@ -115,20 +115,21 @@ ORB_DEFAULT_CONFIG: dict = {
         "mega_cap_tech": ["AAPL", "MSFT", "META", "AMZN", "GOOGL"],
         "high_beta_growth": ["TSLA", "PLTR", "NFLX"],
     },
-    # ── Time-Decay Filter ───────────────────────────────────────────────
-    # ORB-Breakouts in den ersten 30 Min nach ORB (10:00-10:30) haben empirisch
-    # höhere Completion-Rates. Der Faktor skaliert die Signal-Strength.
-    "use_time_decay_filter": True,
     # ── Data Freshness – Fix #4 ───────────────────────────────────────────
     "max_bar_delay_minutes": 20,
 
     # ── Time-Decay-Filter – Fix #13 ───────────────────────────────────────
-    "use_time_decay_filter": False,
-    "time_decay_start_hour": 14,     # Ab 14:00 ET greift Decay
-    "time_decay_start_minute": 0,
-    "time_decay_end_hour": 15,       # Decay endet bei 15:00 ET (volle Kraft)
-    "time_decay_end_minute": 27,
-    "time_decay_min_strength": 0.50, # Mindest-Strength vor Decay
+    "use_time_decay_filter": True,
+    # Konfigurierbare Decay-Brackets (minutes_since_orb → weight)
+    # Default: Prime-Time (≤30) → 1.0, dann abnehmend bis Late-Session → 0.40
+    "time_decay_brackets": [
+        (30,  1.00),  # ≤30 min nach ORB (10:00-10:30): volles Gewicht
+        (90,  0.85),  # ≤90 min (10:30-11:30): gut, aber abnehmend
+        (180, 0.65),  # ≤180 min (11:30-13:00): Mid-Session
+    ],
+    "time_decay_late_factor": 0.40,  # Alles danach (13:00+)
+    # Absolute Entry-Sperre: keine neuen Trades nach dieser ET-Zeit
+    "entry_cutoff_time": None,  # None = kein Cutoff, oder time(14, 30) etc.
 
     # ── Kosten ─────────────────────────────────────────────────────────────
     "commission_pct": 0.00005,
@@ -439,83 +440,55 @@ def check_gap_filter(
     return gap <= max_gap_pct
 
 
-def apply_time_decay_filter(
+def check_entry_cutoff(
     dt_obj: datetime,
-    strength: float,
     cfg: dict,
-) -> Tuple[bool, float]:
+) -> bool:
     """
-    Fix #13: Time-Decay-Filter reduziert Signalstärke gegen Marktschluss.
+    Fix #13: Absoluter Entry-Cutoff – keine neuen Trades nach konfigurierter Zeit.
 
-    Je näher an EOD, desto niedriger muss die Strength sein.
-    Returns: (should_trade, adjusted_strength)
+    Ergänzt time_decay_factor() (Strength-Gewichtung) um eine harte Grenze.
+    Strength-Degradation über die Tageszeit wird bereits durch time_decay_factor()
+    in compute_orb_signals() und generate_signal() angewendet.
+
+    Returns: True wenn Entry erlaubt, False wenn zu spät.
     """
-    if not cfg.get("use_time_decay_filter", False):
-        return True, strength
+    cutoff = cfg.get("entry_cutoff_time")
+    if cutoff is None:
+        return True
 
     et_time = to_et_time(dt_obj)
-    decay_start = time(
-        cfg.get("time_decay_start_hour", 14),
-        cfg.get("time_decay_start_minute", 0),
-    )
-    decay_end = time(
-        cfg.get("time_decay_end_hour", 15),
-        cfg.get("time_decay_end_minute", 27),
-    )
-    min_strength = float(cfg.get("time_decay_min_strength", 0.50))
-
-    # Vor 14:00: kein Decay
-    if et_time < decay_start:
-        return True, strength
-
-    # Nach 15:27: vollständig blockiert
-    if et_time >= decay_end:
-        return False, 0.0
-
-    # Linear interpolieren zwischen decay_start und decay_end
-    total_secs = (
-        decay_end.hour * 3600 + decay_end.minute * 60
-        - (decay_start.hour * 3600 + decay_start.minute * 60)
-    )
-    elapsed_secs = (
-        et_time.hour * 3600 + et_time.minute * 60
-        - (decay_start.hour * 3600 + decay_start.minute * 60)
-    )
-    progress = elapsed_secs / max(total_secs, 1)  # 0.0 to 1.0
-
-    # Multiplier fällt von 1.0 → 0.0 während des Decay-Fensters
-    decay_mult = 1.0 - progress
-
-    adjusted = strength * decay_mult
-    if adjusted < min_strength:
-        return False, 0.0
-
-    return True, adjusted
+    return et_time < cutoff
 
 
-def time_decay_factor(bar_time_et: time) -> float:
+def time_decay_factor(bar_time_et: time, cfg: Optional[dict] = None) -> float:
     """
-    Gewichtungsfaktor basierend auf Tageszeit (ET).
+    Fix #13: Konfigurierbarer Gewichtungsfaktor basierend auf Tageszeit (ET).
 
     ORB-Breakouts kurz nach der Opening Range (10:00-10:30) haben empirisch
     höhere Completion-Rates, da institutionelle Flows zum Opening-Print noch
     aktiv sind. Spätere Breakouts können Noise/Rotation sein.
 
-    Bracket (minutes_since_orb):
-      ≤  30 min  (10:00–10:30): 1.00  – Prime-Time, volles Gewicht
-      ≤  90 min  (10:30–11:30): 0.85  – Gut, aber abnehmend
-      ≤ 180 min  (11:30–12:30): 0.65  – Mid-Session, erhöhter Rauschanteil
-      >  180 min (12:30+):      0.40  – Late-Session, schwache Breakouts
+    Brackets konfigurierbar via cfg["time_decay_brackets"]:
+      Default:
+        ≤  30 min  (10:00–10:30): 1.00  – Prime-Time, volles Gewicht
+        ≤  90 min  (10:30–11:30): 0.85  – Gut, aber abnehmend
+        ≤ 180 min  (11:30–13:00): 0.65  – Mid-Session, erhöhter Rauschanteil
+        >  180 min (13:00+):      0.40  – Late-Session, schwache Breakouts
     """
     minutes_since_orb = (bar_time_et.hour * 60 + bar_time_et.minute) - 600
-    if minutes_since_orb <= 30:
-        return 1.0
-    elif minutes_since_orb <= 90:
-        return 0.85
-    elif minutes_since_orb <= 180:
-        return 0.65
+
+    if cfg is not None:
+        brackets = cfg.get("time_decay_brackets", [(30, 1.0), (90, 0.85), (180, 0.65)])
+        late_factor = float(cfg.get("time_decay_late_factor", 0.40))
     else:
-        return 0.40
+        brackets = [(30, 1.0), (90, 0.85), (180, 0.65)]
+        late_factor = 0.40
+
+    for threshold, weight in brackets:
+        if minutes_since_orb <= threshold:
+            return weight
+    return late_factor
 
 
 def compute_orb_volume_ratio(
@@ -653,9 +626,9 @@ def generate_signal(
         multiplier, volume_confirmed,
     )
 
-    # Time-Decay Filter: Strength-Gewichtung nach Tageszeit
+    # Time-Decay Filter: Strength-Gewichtung nach Tageszeit (Fix #13: konfigurierbar)
     if cfg.get("use_time_decay_filter", True):
-        decay = time_decay_factor(et_time)
+        decay = time_decay_factor(et_time, cfg)
         strength *= decay
         ctx["time_decay_factor"] = decay
     else:
@@ -734,14 +707,14 @@ def compute_orb_signals(
 
     out["volume_ok"] = vol_ok.values
 
-    # Time-Decay: vektorisierter Decay-Faktor pro Bar (Backtest)
+    # Fix #13: Time-Decay (konfigurierbare Brackets, vektorisiert)
     if use_time_decay:
         minutes_since_orb = np.array(idx_et.hour * 60 + idx_et.minute) - 600
-        decay_factors = np.where(
-            minutes_since_orb <= 30, 1.00,
-            np.where(minutes_since_orb <= 90, 0.85,
-            np.where(minutes_since_orb <= 180, 0.65, 0.40))
-        )
+        brackets = cfg.get("time_decay_brackets", [(30, 1.0), (90, 0.85), (180, 0.65)])
+        late_factor = float(cfg.get("time_decay_late_factor", 0.40))
+        decay_factors = np.full(len(day_df), late_factor)
+        for threshold, weight in reversed(brackets):
+            decay_factors = np.where(minutes_since_orb <= threshold, weight, decay_factors)
     else:
         decay_factors = np.ones(len(day_df))
 

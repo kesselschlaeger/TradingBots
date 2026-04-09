@@ -24,7 +24,7 @@ Nutzung:
 from __future__ import annotations
 
 import warnings
-from datetime import datetime, timedelta
+from datetime import datetime, time, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -58,7 +58,7 @@ except ImportError:
 # Shared strategy module – Single Source of Truth
 from orb_strategy import (
     ET,
-    apply_time_decay_filter,
+    check_entry_cutoff,
     calculate_orb_levels,
     calculate_stop,
     check_gap_filter,
@@ -69,6 +69,7 @@ from orb_strategy import (
     mit_apply_overlay as _mit_apply_overlay,
     mit_group_for_symbol as _mit_group_for_symbol,
     to_et,
+    to_et_time,
 )
 
 
@@ -186,6 +187,7 @@ def run_orb_backtest(
     min_strength  = float(cfg.get("min_signal_strength", 0.3))
     avoid_fri     = bool(cfg.get("avoid_fridays", True))
     avoid_mon     = bool(cfg.get("avoid_mondays", False))
+    eod_close     = cfg.get("eod_close_time", time(15, 27))  # Fix #8
 
     print("[orb_backtest] Starte Simulation ...")
 
@@ -338,6 +340,31 @@ def run_orb_backtest(
                 bar_count += 1
                 last_bar_ts = bar_ts  # Speichere letzten Timestamp des Tages
 
+                # ── Fix #8: EOD-Close – Position schließen bei eod_close_time ──
+                bar_et_time = to_et_time(bar_ts)
+                if sym in positions and bar_et_time >= eod_close:
+                    pos = positions[sym]
+                    pos["bars_held"] += 1
+                    exit_p = price * (1 - slippage) if pos["side"] == "long" else price * (1 + slippage)
+                    if pos["side"] == "long":
+                        pnl = (exit_p - pos["entry"]) * pos["shares"]
+                        cash += exit_p * pos["shares"] * (1 - commission)
+                    else:
+                        pnl = (pos["entry"] - exit_p) * pos["shares"]
+                        cash -= exit_p * pos["shares"] * (1 + commission)
+                    r_mult = pnl / (pos["risk_per_share"] * pos["shares"]) if pos["risk_per_share"] > 0 else 0
+                    trades_list.append({
+                        "date": bar_ts, "symbol": sym,
+                        "side": "SELL" if pos["side"] == "long" else "COVER",
+                        "price": exit_p, "shares": pos["shares"],
+                        "pnl": pnl, "reason": f"EOD Close ({eod_close.strftime('%H:%M')})",
+                        "r_mult": round(r_mult, 2),
+                    })
+                    r_multiples.append(r_mult)
+                    holding_bars_list.append(pos["bars_held"])
+                    del positions[sym]
+                    continue
+
                 # ── Bestehende Position managen ───────────────────────────
                 if sym in positions:
                     pos = positions[sym]
@@ -387,11 +414,9 @@ def run_orb_backtest(
                 if is_short and use_trend and not trend["bearish"]:
                     continue
 
-                # Fix #13: Time-Decay-Filter
-                should_trade_td, strength_adjusted = apply_time_decay_filter(bar_ts, strength, cfg)
-                if not should_trade_td:
+                # Fix #13: Entry-Cutoff (Strength-Decay via compute_orb_signals)
+                if not check_entry_cutoff(bar_ts, cfg):
                     continue
-                strength = strength_adjusted
 
                 signal = "BUY" if is_long else "SHORT"
                 qty_factor = 1.0
@@ -496,6 +521,7 @@ def run_orb_backtest(
                     "pnl": 0.0,
                     "reason": positions[sym]["reason"],
                     "r_mult": 0.0,
+                    "strength": strength,  # Fix #14: für Kalibrierung
                 })
 
                 entered_today = True
@@ -505,8 +531,7 @@ def run_orb_backtest(
                     if group:
                         reserved_mit_groups.add(group)
 
-        # ── EOD: offene Positionen NICHT schließen (Overnight möglich) ────
-        # Equity Snapshot
+        # ── Equity Snapshot (Positionen werden via Fix #8 EOD-Close geschlossen) ──
         eod_unrealized = 0.0
         for sym, pos in positions.items():
             lp = _last_price_on_day(data_dict.get(sym), day)
