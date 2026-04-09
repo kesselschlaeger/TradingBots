@@ -16,8 +16,8 @@ Intraday-Backtest auf 5-Minuten-Bars mit:
 Nutzung:
     from orb_backtest import load_orb_data, run_orb_backtest, print_orb_report
 
-    data, vix = load_orb_data(symbols, "2024-01-01", "2025-04-01", alpaca)
-    pf, report = run_orb_backtest(data, vix, ORB_CONFIG)
+    data, vix, vix3m = load_orb_data(symbols, "2024-01-01", "2025-04-01", alpaca)
+    pf, report = run_orb_backtest(data, vix, ORB_CONFIG, vix3m_series=vix3m)
     print_orb_report(report, output_dir=Path("orb_trading_data"))
 """
 
@@ -82,9 +82,9 @@ def load_orb_data(
     start_date: str,
     end_date: str,
     alpaca=None,
-) -> Tuple[Dict[str, pd.DataFrame], pd.Series]:
+) -> Tuple[Dict[str, pd.DataFrame], pd.Series, pd.Series]:
     """
-    Lade 5-Minuten-Bars für alle Symbole + VIX-Tageskurse.
+    Lade 5-Minuten-Bars für alle Symbole + VIX/VIX3M-Tageskurse.
 
     SPY wird automatisch mitgeladen (für Trendfilter),
     auch wenn nicht in der Symbol-Liste.
@@ -98,7 +98,7 @@ def load_orb_data(
 
     Rückgabe
     --------
-    (data_dict, vix_series)
+    (data_dict, vix_series, vix3m_series)
     """
     data_dict: Dict[str, pd.DataFrame] = {}
 
@@ -138,8 +138,25 @@ def load_orb_data(
         except Exception as e:
             print(f"[orb_backtest] VIX-Load Fehler: {e}")
 
+    # Fix #16: VIX3M laden für Term Structure Regime
+    vix3m_series = pd.Series(dtype=float, name="VIX3M")
+    if YF_AVAILABLE:
+        try:
+            days = (datetime.strptime(end_date, "%Y-%m-%d") -
+                    datetime.strptime(start_date, "%Y-%m-%d")).days + 100
+            vix3m_df = yf.Ticker("^VIX3M").history(period=f"{days}d")
+            if not vix3m_df.empty:
+                vix3m_series = vix3m_df["Close"].rename("VIX3M")
+                if vix3m_series.index.tz is not None:
+                    vix3m_series.index = vix3m_series.index.tz_localize(None)
+                print(f"[orb_backtest] VIX3M geladen: {len(vix3m_series)} Tage")
+            else:
+                print("[orb_backtest] VIX3M: keine Daten (Fallback auf VIX×1.02)")
+        except Exception as e:
+            print(f"[orb_backtest] VIX3M-Load Fehler (Fallback aktiv): {e}")
+
     print(f"[orb_backtest] {len(data_dict)} Symbole geladen.")
-    return data_dict, vix_series
+    return data_dict, vix_series, vix3m_series
 
 
 # ---------------------------------------------------------------------------
@@ -150,6 +167,7 @@ def run_orb_backtest(
     data_dict: Dict[str, pd.DataFrame],
     vix_series: pd.Series,
     cfg: dict,
+    vix3m_series: Optional[pd.Series] = None,
 ) -> Tuple[None, dict]:
     """
     Führe den ORB-Backtest aus (Bar-by-Bar auf 5m-Daten).
@@ -209,6 +227,22 @@ def run_orb_backtest(
             d = ts.date() if hasattr(ts, "date") else ts
             vix_dict[d] = float(val)
 
+    # Fix #16: VIX3M als Dict { date → float }
+    vix3m_dict: Dict = {}
+    if vix3m_series is not None and not vix3m_series.empty:
+        for ts, val in vix3m_series.items():
+            d = ts.date() if hasattr(ts, "date") else ts
+            vix3m_dict[d] = float(val)
+
+    # ── Feature-Status ausgeben ───────────────────────────────────────────
+    _dd_scaling = cfg.get('use_dynamic_kelly_dd_scaling', False)
+    _vix_ts = cfg.get('use_vix_term_structure', False)
+    _mit_overlay = cfg.get('use_mit_probabilistic_overlay', False)
+    print(f"[orb_backtest] MIT-Overlay: {'AN' if _mit_overlay else 'AUS'}"
+          f" | DD-Scaling(#15): {'AN' if _dd_scaling else 'AUS'}"
+          f" | VIX-Regime(#16): {'AN' if _vix_ts else 'AUS'}"
+          f" (VIX3M-Daten: {len(vix3m_dict)} Tage)")
+
     # ── Filter-Config ─────────────────────────────────────────────────────
     use_trend  = bool(cfg.get("use_trend_filter", True))
     use_gap    = bool(cfg.get("use_gap_filter", True))
@@ -248,6 +282,9 @@ def run_orb_backtest(
         if vix_val == 0:
             vix_val = 20.0
         size_mult = vix_reduce if vix_val >= vix_thresh else 1.0
+
+        # Fix #16: VIX3M für heute (None wenn nicht verfügbar → Fallback in Funktion)
+        vix3m_val = vix3m_dict.get(day) if vix3m_dict else None
 
         # Equity & DD check
         unrealized = 0.0
@@ -435,7 +472,7 @@ def run_orb_backtest(
                         "trend": trend,
                     }
                     should_trade, qty_factor, overlay_reason = _mit_apply_overlay(
-                        signal, strength, ctx, bars_so_far, cfg, current_dd, vix_val, None
+                        signal, strength, ctx, bars_so_far, cfg, current_dd, vix_val, vix3m_val
                     )
                     if not should_trade:
                         continue

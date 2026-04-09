@@ -1381,12 +1381,12 @@ def _run_canonical_backtest(cfg: dict, alpaca: "AlpacaClient",
     print(f"  Shorts: {'AN' if cfg.get('allow_shorts') else 'AUS'}")
     print(f"{'=' * 60}")
 
-    data, vix = load_orb_data(cfg["symbols"], start_date, end_date, alpaca=alpaca)
+    data, vix, vix3m = load_orb_data(cfg["symbols"], start_date, end_date, alpaca=alpaca)
     if not data:
         print("[ERROR] Keine Daten geladen.")
         return
 
-    _, report = run_orb_backtest(data, vix, cfg)
+    _, report = run_orb_backtest(data, vix, cfg, vix3m_series=vix3m)
     output_dir = cfg.get("data_dir", Path(__file__).parent / "orb_trading_data")
     print_orb_report(report, output_dir=output_dir)
 

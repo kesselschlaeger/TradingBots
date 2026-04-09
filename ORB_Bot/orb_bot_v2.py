@@ -116,12 +116,12 @@ def mode_backtest(
     print(f"  Shorts: {'AN' if cfg.get('allow_shorts') else 'AUS'}")
     print(f"{'=' * 60}")
 
-    data, vix = load_orb_data(symbols, start, end, alpaca=alpaca_client)
+    data, vix, vix3m = load_orb_data(symbols, start, end, alpaca=alpaca_client)
     if not data:
         print("[ERROR] Keine Daten geladen.")
         return {}
 
-    _, report = run_orb_backtest(data, vix, cfg)
+    _, report = run_orb_backtest(data, vix, cfg, vix3m_series=vix3m)
     print_orb_report(report, output_dir=cfg.get("data_dir", Path("orb_trading_data")))
     return report
 
@@ -147,7 +147,7 @@ def mode_wfo(
     print(f"  Zeitraum: {start} → {end}")
     print(f"{'=' * 60}")
 
-    data, vix = load_orb_data(symbols, start, end, alpaca=alpaca_client)
+    data, vix, vix3m = load_orb_data(symbols, start, end, alpaca=alpaca_client)
     if not data:
         print("[ERROR] Keine Daten geladen.")
         return None
