@@ -70,7 +70,7 @@ except ImportError:
     print("[WARN] orb_montecarlo.py nicht gefunden – Monte Carlo nicht verfügbar")
 
 from orb_backtest import load_orb_data, run_orb_backtest, print_orb_report
-from orb_strategy import ORB_DEFAULT_CONFIG
+from orb_strategy import ORB_DEFAULT_CONFIG, calibrate_win_probability
 
 # AlpacaClient aus orb_bot_alpaca importieren
 try:
@@ -181,6 +181,39 @@ def mode_wfo(
     return wfo
 
 
+def mode_calibrate_win_probability(
+    report: dict,
+) -> dict:
+    """Kalibriere Win-Probability gegen echte Backtest-Daten (Fix #14)."""
+    trades = report.get("trades")
+    if trades is None or trades.empty:
+        print("[ERROR] Keine Trades – zuerst Backtest ausführen.")
+        return {}
+
+    print(f"\n{'=' * 60}")
+    print(f"  ORB BOT v2 – WIN-PROBABILITY KALIBRIERUNG")
+    print(f"{'=' * 60}")
+
+    result = calibrate_win_probability(trades)
+    if "error" in result:
+        print(f"[ERROR] {result['error']}")
+        return result
+
+    print(f"\n  Kalibrierungsergebnis:")
+    print(f"  ────────────────────────")
+    print(f"  Echte Win-Rate:       {result['actual_win_rate']*100:>6.2f}%")
+    print(f"  Geschätzte Baseline:  {result['estimated_baseline']*100:>6.2f}%")
+    print(f"  Kalibrierungsoffset:  {result['offset']:+7.4f}")
+    print(f"  Durchschn. Strength:  {result['avg_entry_strength']:>6.3f}")
+    print(f"  Anzahl Trades:        {result['n_trades']:>6d}")
+    print(f"  ────────────────────────")
+    print(f"\n  💡 Setze in deiner Config:")
+    print(f"     'mit_calibration_offset': {result['offset']},")
+    print(f"     'use_mit_probabilistic_overlay': True,")
+
+    return result
+
+
 def mode_montecarlo(
     report: dict,
     cfg: dict,
@@ -271,7 +304,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--mode", "-m",
-        choices=["backtest", "wfo", "montecarlo", "all"],
+        choices=["backtest", "wfo", "montecarlo", "calibrate", "all"],
         default="backtest",
         help="Ausführungsmodus",
     )
@@ -344,6 +377,13 @@ def main() -> None:
             report = mode_backtest(cfg, symbols, start=args.start, end=args.end,
                                    alpaca_client=alpaca)
         mode_montecarlo(report, cfg, n=args.mc_runs)
+
+    if args.mode in ("calibrate",):
+        if not report:
+            print("[v2] Kalibrierung benötigt Backtest → führe Backtest aus …")
+            report = mode_backtest(cfg, symbols, start=args.start, end=args.end,
+                                   alpaca_client=alpaca)
+        mode_calibrate_win_probability(report)
 
 
 # ============================= Jupyter-API ==================================

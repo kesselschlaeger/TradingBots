@@ -58,6 +58,7 @@ except ImportError:
 # Shared strategy module – Single Source of Truth
 from orb_strategy import (
     ET,
+    apply_time_decay_filter,
     calculate_orb_levels,
     calculate_stop,
     check_gap_filter,
@@ -385,6 +386,12 @@ def run_orb_backtest(
                     continue
                 if is_short and use_trend and not trend["bearish"]:
                     continue
+
+                # Fix #13: Time-Decay-Filter
+                should_trade_td, strength_adjusted = apply_time_decay_filter(bar_ts, strength, cfg)
+                if not should_trade_td:
+                    continue
+                strength = strength_adjusted
 
                 signal = "BUY" if is_long else "SHORT"
                 qty_factor = 1.0

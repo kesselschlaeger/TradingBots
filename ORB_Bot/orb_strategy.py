@@ -78,6 +78,7 @@ ORB_DEFAULT_CONFIG: dict = {
     "market_open":  time(9, 30),
     "market_close": time(16, 0),
     "orb_end_time": time(10, 0),
+    "eod_close_time": time(15, 27),  # Fix #8: EOD-Close Zeit konfigurierbar
 
     # ── Guards ─────────────────────────────────────────────────────────────
     "use_vix_filter":     True,
@@ -106,6 +107,7 @@ ORB_DEFAULT_CONFIG: dict = {
     "mit_ev_threshold_r": 0.08,
     "mit_kelly_fraction": 0.50,
     "mit_min_strength": 0.15,
+    "mit_calibration_offset": 0.0,  # Fix #14: Kalibrierungsoffset (aus calibrate_win_probability)
     "use_mit_independence_guard": True,
     "mit_correlation_groups": {
         "index_etfs": ["SPY", "QQQ", "IWM", "DIA"],
@@ -119,6 +121,14 @@ ORB_DEFAULT_CONFIG: dict = {
     "use_time_decay_filter": True,
     # ── Data Freshness – Fix #4 ───────────────────────────────────────────
     "max_bar_delay_minutes": 20,
+
+    # ── Time-Decay-Filter – Fix #13 ───────────────────────────────────────
+    "use_time_decay_filter": False,
+    "time_decay_start_hour": 14,     # Ab 14:00 ET greift Decay
+    "time_decay_start_minute": 0,
+    "time_decay_end_hour": 15,       # Decay endet bei 15:00 ET (volle Kraft)
+    "time_decay_end_minute": 27,
+    "time_decay_min_strength": 0.50, # Mindest-Strength vor Decay
 
     # ── Kosten ─────────────────────────────────────────────────────────────
     "commission_pct": 0.00005,
@@ -427,6 +437,60 @@ def check_gap_filter(
         return True
     gap = abs(today_open - prev_close) / prev_close
     return gap <= max_gap_pct
+
+
+def apply_time_decay_filter(
+    dt_obj: datetime,
+    strength: float,
+    cfg: dict,
+) -> Tuple[bool, float]:
+    """
+    Fix #13: Time-Decay-Filter reduziert Signalstärke gegen Marktschluss.
+
+    Je näher an EOD, desto niedriger muss die Strength sein.
+    Returns: (should_trade, adjusted_strength)
+    """
+    if not cfg.get("use_time_decay_filter", False):
+        return True, strength
+
+    et_time = to_et_time(dt_obj)
+    decay_start = time(
+        cfg.get("time_decay_start_hour", 14),
+        cfg.get("time_decay_start_minute", 0),
+    )
+    decay_end = time(
+        cfg.get("time_decay_end_hour", 15),
+        cfg.get("time_decay_end_minute", 27),
+    )
+    min_strength = float(cfg.get("time_decay_min_strength", 0.50))
+
+    # Vor 14:00: kein Decay
+    if et_time < decay_start:
+        return True, strength
+
+    # Nach 15:27: vollständig blockiert
+    if et_time >= decay_end:
+        return False, 0.0
+
+    # Linear interpolieren zwischen decay_start und decay_end
+    total_secs = (
+        decay_end.hour * 3600 + decay_end.minute * 60
+        - (decay_start.hour * 3600 + decay_start.minute * 60)
+    )
+    elapsed_secs = (
+        et_time.hour * 3600 + et_time.minute * 60
+        - (decay_start.hour * 3600 + decay_start.minute * 60)
+    )
+    progress = elapsed_secs / max(total_secs, 1)  # 0.0 to 1.0
+
+    # Multiplier fällt von 1.0 → 0.0 während des Decay-Fensters
+    decay_mult = 1.0 - progress
+
+    adjusted = strength * decay_mult
+    if adjusted < min_strength:
+        return False, 0.0
+
+    return True, adjusted
 
 
 def time_decay_factor(bar_time_et: time) -> float:
@@ -847,6 +911,12 @@ def mit_apply_overlay(
 
     reward_r = float(cfg.get("profit_target_r", 2.0))
     win_prob = mit_estimate_win_probability(signal, strength, ctx, df)
+
+    # Fix #14: Kalibrierungsoffset anwenden wenn kalibriert
+    if cfg.get("mit_calibration_offset", 0.0) != 0.0:
+        cal_offset = float(cfg.get("mit_calibration_offset", 0.0))
+        win_prob = float(np.clip(win_prob + cal_offset, 0.20, 0.80))
+
     ev_r = mit_compute_ev_r(win_prob, reward_r, 1.0)
     ev_threshold = float(cfg.get("mit_ev_threshold_r", 0.08))
     if ev_r <= ev_threshold:
@@ -856,3 +926,63 @@ def mit_apply_overlay(
     fractional_kelly = raw_kelly * float(cfg.get("mit_kelly_fraction", 0.50))
     qty_factor = float(np.clip(0.25 + fractional_kelly, 0.25, 1.0))
     return True, qty_factor, f"MIT Overlay: P={win_prob:.2f} EV={ev_r:+.2f}R Kelly={qty_factor:.2f}x"
+
+
+def calibrate_win_probability(
+    trades_df: pd.DataFrame,
+    signal_strength_col: str = "strength",
+    cfg: Optional[dict] = None,
+) -> dict:
+    """
+    Fix #14: Kalibriere Win-Probability gegen echte Backtest-Ergebnisse.
+
+    Vergleicht die geschätzte Probability (aus mit_estimate_win_probability)
+    mit der echten Win-Rate aus den Backtest-Trades und berechnet
+    einen Kalibrierungsoffset.
+
+    Parameter
+    ----------
+    trades_df : DataFrame mit Trades (muss 'pnl' und optional 'strength' enthalten)
+    signal_strength_col : Name der Strength-Spalte
+    cfg : Optional – für Kontextt-Info
+
+    Returns
+    -------
+    {"offset": float, "actual_win_rate": float, "estimated_avg": float, "n_trades": int}
+    """
+    if trades_df is None or trades_df.empty:
+        return {"offset": 0.0, "error": "No trades"}
+
+    sells = trades_df[trades_df["side"].isin(["SELL", "COVER"])]
+    if len(sells) < 10:
+        return {"offset": 0.0, "error": f"Not enough trades ({len(sells)} < 10)"}
+
+    # Echte Win-Rate
+    wins = sells[sells["pnl"] > 0]
+    actual_wr = len(wins) / len(sells)
+
+    # Durchschnittliche geschätzte Strength aus den Entry-Trades
+    # (Diese ist eine Proxy für die heuristische Probability)
+    if signal_strength_col in trades_df.columns:
+        entries = trades_df[trades_df["side"].isin(["BUY", "SHORT"])]
+        if not entries.empty:
+            avg_strength = float(entries[signal_strength_col].mean())
+        else:
+            avg_strength = 0.5
+    else:
+        avg_strength = 0.5
+
+    # Heuristische Baseline: mit_estimate_win_probability gibt oft ~0.40–0.65
+    # Je höher die Strength, desto näher an 0.65
+    estimated_baseline = 0.40 + (avg_strength * 0.25)
+
+    # Offset = actual_wr - estimated_baseline
+    offset = actual_wr - estimated_baseline
+
+    return {
+        "offset": round(offset, 4),
+        "actual_win_rate": round(actual_wr, 4),
+        "estimated_baseline": round(estimated_baseline, 4),
+        "avg_entry_strength": round(avg_strength, 4),
+        "n_trades": len(sells),
+    }
