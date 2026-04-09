@@ -78,6 +78,7 @@ ORB_DEFAULT_CONFIG: dict = {
     "market_open":  time(9, 30),
     "market_close": time(16, 0),
     "orb_end_time": time(10, 0),
+    "eod_close_time": time(15, 27),  # Fix #8: EOD-Close Zeit konfigurierbar
 
     # ── Guards ─────────────────────────────────────────────────────────────
     "use_vix_filter":     True,
@@ -106,6 +107,7 @@ ORB_DEFAULT_CONFIG: dict = {
     "mit_ev_threshold_r": 0.08,
     "mit_kelly_fraction": 0.50,
     "mit_min_strength": 0.15,
+    "mit_calibration_offset": 0.0,  # Fix #14: Kalibrierungsoffset (aus calibrate_win_probability)
     "use_mit_independence_guard": True,
     "mit_correlation_groups": {
         "index_etfs": ["SPY", "QQQ", "IWM", "DIA"],
@@ -113,12 +115,21 @@ ORB_DEFAULT_CONFIG: dict = {
         "mega_cap_tech": ["AAPL", "MSFT", "META", "AMZN", "GOOGL"],
         "high_beta_growth": ["TSLA", "PLTR", "NFLX"],
     },
-    # ── Time-Decay Filter ───────────────────────────────────────────────
-    # ORB-Breakouts in den ersten 30 Min nach ORB (10:00-10:30) haben empirisch
-    # höhere Completion-Rates. Der Faktor skaliert die Signal-Strength.
-    "use_time_decay_filter": True,
     # ── Data Freshness – Fix #4 ───────────────────────────────────────────
     "max_bar_delay_minutes": 20,
+
+    # ── Time-Decay-Filter – Fix #13 ───────────────────────────────────────
+    "use_time_decay_filter": True,
+    # Konfigurierbare Decay-Brackets (minutes_since_orb → weight)
+    # Default: Prime-Time (≤30) → 1.0, dann abnehmend bis Late-Session → 0.40
+    "time_decay_brackets": [
+        (30,  1.00),  # ≤30 min nach ORB (10:00-10:30): volles Gewicht
+        (90,  0.85),  # ≤90 min (10:30-11:30): gut, aber abnehmend
+        (180, 0.65),  # ≤180 min (11:30-13:00): Mid-Session
+    ],
+    "time_decay_late_factor": 0.40,  # Alles danach (13:00+)
+    # Absolute Entry-Sperre: keine neuen Trades nach dieser ET-Zeit
+    "entry_cutoff_time": None,  # None = kein Cutoff, oder time(14, 30) etc.
 
     # ── Kosten ─────────────────────────────────────────────────────────────
     "commission_pct": 0.00005,
@@ -429,29 +440,55 @@ def check_gap_filter(
     return gap <= max_gap_pct
 
 
-def time_decay_factor(bar_time_et: time) -> float:
+def check_entry_cutoff(
+    dt_obj: datetime,
+    cfg: dict,
+) -> bool:
     """
-    Gewichtungsfaktor basierend auf Tageszeit (ET).
+    Fix #13: Absoluter Entry-Cutoff – keine neuen Trades nach konfigurierter Zeit.
+
+    Ergänzt time_decay_factor() (Strength-Gewichtung) um eine harte Grenze.
+    Strength-Degradation über die Tageszeit wird bereits durch time_decay_factor()
+    in compute_orb_signals() und generate_signal() angewendet.
+
+    Returns: True wenn Entry erlaubt, False wenn zu spät.
+    """
+    cutoff = cfg.get("entry_cutoff_time")
+    if cutoff is None:
+        return True
+
+    et_time = to_et_time(dt_obj)
+    return et_time < cutoff
+
+
+def time_decay_factor(bar_time_et: time, cfg: Optional[dict] = None) -> float:
+    """
+    Fix #13: Konfigurierbarer Gewichtungsfaktor basierend auf Tageszeit (ET).
 
     ORB-Breakouts kurz nach der Opening Range (10:00-10:30) haben empirisch
     höhere Completion-Rates, da institutionelle Flows zum Opening-Print noch
     aktiv sind. Spätere Breakouts können Noise/Rotation sein.
 
-    Bracket (minutes_since_orb):
-      ≤  30 min  (10:00–10:30): 1.00  – Prime-Time, volles Gewicht
-      ≤  90 min  (10:30–11:30): 0.85  – Gut, aber abnehmend
-      ≤ 180 min  (11:30–12:30): 0.65  – Mid-Session, erhöhter Rauschanteil
-      >  180 min (12:30+):      0.40  – Late-Session, schwache Breakouts
+    Brackets konfigurierbar via cfg["time_decay_brackets"]:
+      Default:
+        ≤  30 min  (10:00–10:30): 1.00  – Prime-Time, volles Gewicht
+        ≤  90 min  (10:30–11:30): 0.85  – Gut, aber abnehmend
+        ≤ 180 min  (11:30–13:00): 0.65  – Mid-Session, erhöhter Rauschanteil
+        >  180 min (13:00+):      0.40  – Late-Session, schwache Breakouts
     """
     minutes_since_orb = (bar_time_et.hour * 60 + bar_time_et.minute) - 600
-    if minutes_since_orb <= 30:
-        return 1.0
-    elif minutes_since_orb <= 90:
-        return 0.85
-    elif minutes_since_orb <= 180:
-        return 0.65
+
+    if cfg is not None:
+        brackets = cfg.get("time_decay_brackets", [(30, 1.0), (90, 0.85), (180, 0.65)])
+        late_factor = float(cfg.get("time_decay_late_factor", 0.40))
     else:
-        return 0.40
+        brackets = [(30, 1.0), (90, 0.85), (180, 0.65)]
+        late_factor = 0.40
+
+    for threshold, weight in brackets:
+        if minutes_since_orb <= threshold:
+            return weight
+    return late_factor
 
 
 def compute_orb_volume_ratio(
@@ -589,9 +626,9 @@ def generate_signal(
         multiplier, volume_confirmed,
     )
 
-    # Time-Decay Filter: Strength-Gewichtung nach Tageszeit
+    # Time-Decay Filter: Strength-Gewichtung nach Tageszeit (Fix #13: konfigurierbar)
     if cfg.get("use_time_decay_filter", True):
-        decay = time_decay_factor(et_time)
+        decay = time_decay_factor(et_time, cfg)
         strength *= decay
         ctx["time_decay_factor"] = decay
     else:
@@ -670,14 +707,14 @@ def compute_orb_signals(
 
     out["volume_ok"] = vol_ok.values
 
-    # Time-Decay: vektorisierter Decay-Faktor pro Bar (Backtest)
+    # Fix #13: Time-Decay (konfigurierbare Brackets, vektorisiert)
     if use_time_decay:
         minutes_since_orb = np.array(idx_et.hour * 60 + idx_et.minute) - 600
-        decay_factors = np.where(
-            minutes_since_orb <= 30, 1.00,
-            np.where(minutes_since_orb <= 90, 0.85,
-            np.where(minutes_since_orb <= 180, 0.65, 0.40))
-        )
+        brackets = cfg.get("time_decay_brackets", [(30, 1.0), (90, 0.85), (180, 0.65)])
+        late_factor = float(cfg.get("time_decay_late_factor", 0.40))
+        decay_factors = np.full(len(day_df), late_factor)
+        for threshold, weight in reversed(brackets):
+            decay_factors = np.where(minutes_since_orb <= threshold, weight, decay_factors)
     else:
         decay_factors = np.ones(len(day_df))
 
@@ -847,6 +884,12 @@ def mit_apply_overlay(
 
     reward_r = float(cfg.get("profit_target_r", 2.0))
     win_prob = mit_estimate_win_probability(signal, strength, ctx, df)
+
+    # Fix #14: Kalibrierungsoffset anwenden wenn kalibriert
+    if cfg.get("mit_calibration_offset", 0.0) != 0.0:
+        cal_offset = float(cfg.get("mit_calibration_offset", 0.0))
+        win_prob = float(np.clip(win_prob + cal_offset, 0.20, 0.80))
+
     ev_r = mit_compute_ev_r(win_prob, reward_r, 1.0)
     ev_threshold = float(cfg.get("mit_ev_threshold_r", 0.08))
     if ev_r <= ev_threshold:
@@ -856,3 +899,63 @@ def mit_apply_overlay(
     fractional_kelly = raw_kelly * float(cfg.get("mit_kelly_fraction", 0.50))
     qty_factor = float(np.clip(0.25 + fractional_kelly, 0.25, 1.0))
     return True, qty_factor, f"MIT Overlay: P={win_prob:.2f} EV={ev_r:+.2f}R Kelly={qty_factor:.2f}x"
+
+
+def calibrate_win_probability(
+    trades_df: pd.DataFrame,
+    signal_strength_col: str = "strength",
+    cfg: Optional[dict] = None,
+) -> dict:
+    """
+    Fix #14: Kalibriere Win-Probability gegen echte Backtest-Ergebnisse.
+
+    Vergleicht die geschätzte Probability (aus mit_estimate_win_probability)
+    mit der echten Win-Rate aus den Backtest-Trades und berechnet
+    einen Kalibrierungsoffset.
+
+    Parameter
+    ----------
+    trades_df : DataFrame mit Trades (muss 'pnl' und optional 'strength' enthalten)
+    signal_strength_col : Name der Strength-Spalte
+    cfg : Optional – für Kontextt-Info
+
+    Returns
+    -------
+    {"offset": float, "actual_win_rate": float, "estimated_avg": float, "n_trades": int}
+    """
+    if trades_df is None or trades_df.empty:
+        return {"offset": 0.0, "error": "No trades"}
+
+    sells = trades_df[trades_df["side"].isin(["SELL", "COVER"])]
+    if len(sells) < 10:
+        return {"offset": 0.0, "error": f"Not enough trades ({len(sells)} < 10)"}
+
+    # Echte Win-Rate
+    wins = sells[sells["pnl"] > 0]
+    actual_wr = len(wins) / len(sells)
+
+    # Durchschnittliche geschätzte Strength aus den Entry-Trades
+    # (Diese ist eine Proxy für die heuristische Probability)
+    if signal_strength_col in trades_df.columns:
+        entries = trades_df[trades_df["side"].isin(["BUY", "SHORT"])]
+        if not entries.empty:
+            avg_strength = float(entries[signal_strength_col].mean())
+        else:
+            avg_strength = 0.5
+    else:
+        avg_strength = 0.5
+
+    # Heuristische Baseline: mit_estimate_win_probability gibt oft ~0.40–0.65
+    # Je höher die Strength, desto näher an 0.65
+    estimated_baseline = 0.40 + (avg_strength * 0.25)
+
+    # Offset = actual_wr - estimated_baseline
+    offset = actual_wr - estimated_baseline
+
+    return {
+        "offset": round(offset, 4),
+        "actual_win_rate": round(actual_wr, 4),
+        "estimated_baseline": round(estimated_baseline, 4),
+        "avg_entry_strength": round(avg_strength, 4),
+        "n_trades": len(sells),
+    }
