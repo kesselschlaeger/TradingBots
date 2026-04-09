@@ -43,6 +43,7 @@ from orb_strategy import (
     mit_apply_overlay,
     mit_compute_ev_r,
     mit_estimate_win_probability,
+    mit_group_for_symbol,
     mit_kelly_fraction,
     time_decay_factor,
     to_et,
@@ -157,6 +158,18 @@ class TestCalculateORBLevels:
         )
         assert calculate_orb_levels(df, 30) == (0.0, 0.0, 0.0)
 
+    def test_narrow_orb(self):
+        """Sehr enge ORB-Range."""
+        df = _make_day_5m(orb_high=100.05, orb_low=99.95)
+        h, l, r = calculate_orb_levels(df, 30)
+        assert abs(r - 0.10) < 0.01
+
+    def test_wide_orb(self):
+        """Breite ORB-Range (volatile Session)."""
+        df = _make_day_5m(orb_high=110.0, orb_low=90.0)
+        h, l, r = calculate_orb_levels(df, 30)
+        assert r == pytest.approx(20.0, abs=0.01)
+
     def test_custom_orb_minutes(self):
         df = _make_day_5m(orb_high=110, orb_low=90, n_bars=78)
         h60, l60, r60 = calculate_orb_levels(df, 60)
@@ -202,6 +215,12 @@ class TestCheckBreakout:
         _, strength = check_breakout(120.0, 100.0, 95.0, 5.0, 1.0, True)
         assert strength <= 1.0
 
+    def test_marginal_breakout(self):
+        """Preis knapp über ORB-High: sehr kleine Strength."""
+        side, strength = check_breakout(100.01, 100.0, 95.0, 5.0, 1.0, False)
+        assert side == "long"
+        assert strength < 0.01
+
 
 # ══════════════════════════ Stop-Loss ════════════════════════════════════════
 
@@ -224,6 +243,21 @@ class TestCalculateStop:
     def test_short_stop_clamp(self):
         stop = calculate_stop("short", 99.5, 100.0, 95.0, 5.0, 1.0)
         assert stop > 99.5
+
+    def test_long_stop_bounded_by_orb_low(self):
+        """Stop darf nicht unter ORB-Low liegen (wenn sl_r=1.0)."""
+        stop = calculate_stop("long", 102.0, 100.0, 95.0, 5.0, sl_r=1.0)
+        assert stop >= 95.0
+
+    def test_short_stop_bounded_by_orb_high(self):
+        stop = calculate_stop("short", 93.0, 100.0, 95.0, 5.0, sl_r=1.0)
+        assert stop <= 100.0
+
+    def test_sl_r_affects_distance(self):
+        """Größerer sl_r → Stop weiter vom Entry entfernt."""
+        stop1 = calculate_stop("long", 102.0, 100.0, 95.0, 5.0, sl_r=0.5)
+        stop2 = calculate_stop("long", 102.0, 100.0, 95.0, 5.0, sl_r=2.0)
+        assert stop2 <= stop1
 
 
 # ══════════════════════════ Position Sizing ══════════════════════════════════
@@ -250,6 +284,14 @@ class TestCalculatePositionSize:
                                          max_equity_at_risk=0.01)
         # max_eq_risk cap: 10000*0.01/1 = 100
         assert shares <= 100
+
+    def test_negative_equity(self):
+        assert calculate_position_size(100.0, 98.0, -1000.0, 0.005) == 0
+
+    def test_exact_sizing(self):
+        """10k Equity, 0.5% Risiko, $2 Risk/Share → 25 Shares."""
+        shares = calculate_position_size(100.0, 98.0, 10_000.0, risk_per_trade=0.005)
+        assert shares == 25
 
 
 # ══════════════════════════ Exit-Management ══════════════════════════════════
@@ -313,6 +355,41 @@ class TestManageLong:
         assert result is None, "Sollte nicht exiten"
         assert pos["highest"] == 105.0  # price, nicht high
 
+    def test_trailing_stop_activates_and_exits(self):
+        """2-stufig: Trail aktiviert, dann Exit."""
+        pos = _make_position("long", entry=100.0, risk_per_share=2.0, profit_r=10.0)
+        # Bar 1: Preis steigt auf 103 → 1.5R → Trail-Stop sollte aktiviert werden
+        _manage_long(
+            "TEST", pos, price=103.0, high=103.0, low=101.0,
+            bar_ts=TS, profit_r=10.0, sl_r=1.0,
+            trail_after_r=1.0, trail_dist_r=0.5,
+            slippage=SL, commission=CM,
+        )
+        assert pos["trail_stop"] is not None
+        trail = pos["trail_stop"]
+        # Bar 2: Preis fällt unter Trail-Stop
+        result = _manage_long(
+            "TEST", pos, price=trail - 0.5, high=trail + 0.5, low=trail - 0.5,
+            bar_ts=TS, profit_r=10.0, sl_r=1.0,
+            trail_after_r=1.0, trail_dist_r=0.5,
+            slippage=SL, commission=CM,
+        )
+        assert result is not None
+        assert result["trade"]["reason"] == "Trailing Stop"
+
+    def test_stop_priority_over_target(self):
+        """Wenn Stop UND Target im selben Bar getroffen: Stop hat Priorität."""
+        pos = _make_position("long", entry=100.0, risk_per_share=2.0)
+        # Low trifft Stop (98), High trifft Target (104)
+        result = _manage_long(
+            "TEST", pos, price=99.0, high=105.0, low=97.0,
+            bar_ts=TS, profit_r=2.0, sl_r=1.0,
+            trail_after_r=1.0, trail_dist_r=0.5,
+            slippage=SL, commission=CM,
+        )
+        assert result is not None
+        assert result["trade"]["reason"] == "Stop Loss"
+
 
 class TestManageShort:
     def test_stop_loss(self):
@@ -361,6 +438,28 @@ class TestManageShort:
         )
         assert result is None
 
+    def test_trailing_stop_activates_and_exits(self):
+        """2-stufig: Trail aktiviert, dann Exit."""
+        pos = _make_position("short", entry=100.0, risk_per_share=2.0, profit_r=10.0)
+        # Bar 1: Preis fällt auf 97 → 1.5R → Trail-Stop aktiviert
+        _manage_short(
+            "TEST", pos, price=97.0, high=99.0, low=96.5,
+            bar_ts=TS, profit_r=10.0, sl_r=1.0,
+            trail_after_r=1.0, trail_dist_r=0.5,
+            slippage=SL, commission=CM,
+        )
+        assert pos["trail_stop"] is not None
+        trail = pos["trail_stop"]
+        # Bar 2: Preis steigt über Trail-Stop
+        result = _manage_short(
+            "TEST", pos, price=trail + 0.5, high=trail + 0.5, low=trail - 0.5,
+            bar_ts=TS, profit_r=10.0, sl_r=1.0,
+            trail_after_r=1.0, trail_dist_r=0.5,
+            slippage=SL, commission=CM,
+        )
+        assert result is not None
+        assert result["trade"]["reason"] == "Trailing Stop"
+
 
 # ══════════════════════════ Time-Decay ══════════════════════════════════════
 
@@ -393,6 +492,13 @@ class TestTimeDecayFactor:
         result = time_decay_factor(time(10, 15), None)
         assert result == pytest.approx(1.0)
 
+    def test_monotonically_decreasing(self):
+        """Decay-Faktor darf nicht steigen über den Tag."""
+        times = [time(10, 0), time(10, 30), time(11, 0), time(12, 0), time(14, 0)]
+        factors = [time_decay_factor(t) for t in times]
+        for i in range(1, len(factors)):
+            assert factors[i] <= factors[i - 1]
+
 
 # ══════════════════════════ Entry Cutoff ════════════════════════════════════
 
@@ -407,6 +513,12 @@ class TestCheckEntryCutoff:
         # 18:00 UTC = 14:00 ET (winter)
         dt = datetime(2025, 3, 10, 18, 0, tzinfo=pytz.UTC)
         assert check_entry_cutoff(dt, cfg) is True
+
+    def test_at_cutoff(self):
+        cfg = _cfg(entry_cutoff_time=time(14, 30))
+        # Exakt 14:30 ET → False (nicht strikt kleiner)
+        dt = ET.localize(datetime(2025, 3, 10, 14, 30))
+        assert check_entry_cutoff(dt, cfg) is False
 
     def test_after_cutoff(self):
         cfg = _cfg(entry_cutoff_time=time(14, 30))
@@ -429,6 +541,10 @@ class TestCheckGapFilter:
 
     def test_negative_gap(self):
         assert check_gap_filter(96.0, 100.0, 0.03) is False
+
+    def test_exact_threshold(self):
+        """Gap exakt = max_gap_pct ist noch erlaubt (<=)."""
+        assert check_gap_filter(103.0, 100.0, 0.03) is True  # 3% == 3%
 
 
 # ══════════════════════════ Trend-Filter ═══════════════════════════════════
@@ -490,6 +606,21 @@ class TestTimezone:
         dt = datetime(2025, 3, 10, 15, 0, tzinfo=pytz.UTC)
         assert is_orb_period(dt, 30) is False
 
+    def test_is_trading_day_weekday(self):
+        # 2025-01-02 = Donnerstag
+        dt = pytz.UTC.localize(datetime(2025, 1, 2, 15, 0))
+        assert is_trading_day(dt) is True
+
+    def test_is_trading_day_weekend(self):
+        # 2025-01-04 = Samstag
+        dt = pytz.UTC.localize(datetime(2025, 1, 4, 15, 0))
+        assert is_trading_day(dt) is False
+
+    def test_to_et_naive_assumes_utc(self):
+        dt = datetime(2025, 1, 2, 15, 0)  # naive, wird als UTC behandelt
+        et = to_et(dt)
+        assert et.tzname() in ("EST", "EDT")
+
 
 # ══════════════════════════ MIT Overlay ═════════════════════════════════════
 
@@ -544,6 +675,49 @@ class TestMITOverlay:
     def test_kelly_negative(self):
         # P=0.2, b=1 → kelly = (1*0.2-0.8)/1 = -0.6 → 0
         assert mit_kelly_fraction(0.2, 1.0, 1.0) == 0.0
+
+    def test_ev_positive(self):
+        # 60% Win, 2R Reward, 1R Risk → EV = 0.6*2 - 0.4*1 = 0.8
+        assert mit_compute_ev_r(0.6, 2.0, 1.0) == pytest.approx(0.8)
+
+    def test_ev_negative(self):
+        # 30% Win, 2R Reward, 1R Risk → EV = 0.3*2 - 0.7*1 = -0.1
+        assert mit_compute_ev_r(0.3, 2.0, 1.0) < 0
+
+    def test_ev_breakeven(self):
+        # 1/3 Win, 2R Reward, 1R Risk → EV ≈ 0
+        assert abs(mit_compute_ev_r(1 / 3, 2.0, 1.0)) < 0.01
+
+    def test_kelly_no_edge(self):
+        assert mit_kelly_fraction(0.3, 2.0, 1.0) == 0.0
+
+    def test_kelly_zero_reward(self):
+        assert mit_kelly_fraction(0.6, 0.0, 1.0) == 0.0
+
+    def test_win_prob_clipped(self):
+        ctx = {"volume_ratio": 1.5, "volume_confirmed": True,
+               "orb_range_pct": 0.5, "trend": {"bullish": True, "bearish": True}}
+        df = pd.DataFrame({"Close": [100.0], "ATR": [2.0], "Volume_Ratio": [1.5]})
+        p = mit_estimate_win_probability("BUY", 1.0, ctx, df)
+        assert 0.20 <= p <= 0.80
+
+    def test_win_prob_low_strength(self):
+        ctx = {"volume_ratio": 0.5, "volume_confirmed": False,
+               "orb_range_pct": 3.0, "trend": {"bullish": False, "bearish": False}}
+        df = pd.DataFrame({"Close": [100.0], "ATR": [2.0], "Volume_Ratio": [0.5]})
+        p = mit_estimate_win_probability("BUY", 0.0, ctx, df)
+        assert p < 0.50
+
+    def test_group_for_symbol(self):
+        assert mit_group_for_symbol("SPY", ORB_DEFAULT_CONFIG) == "index_etfs"
+        assert mit_group_for_symbol("NVDA", ORB_DEFAULT_CONFIG) == "semi_ai"
+        assert mit_group_for_symbol("UNKNOWN", ORB_DEFAULT_CONFIG) == ""
+
+    def test_overlay_rejects_low_ev(self):
+        cfg = _cfg(mit_ev_threshold_r=999.0)  # unmöglich hohe Schwelle
+        ok, _, _ = mit_apply_overlay("BUY", 0.5, self._base_ctx(),
+                                     self._base_df(), cfg)
+        assert ok is False
 
     def test_calibration_offset(self):
         cfg = _cfg(mit_calibration_offset=0.05)
@@ -620,6 +794,19 @@ class TestVIXTermStructure:
 # ══════════════════════════ Calibrate Win Probability ═══════════════════════
 
 class TestCalibrateWinProbability:
+    def _make_trades(self, n: int = 100, win_rate: float = 0.55, seed: int = 42):
+        rng = np.random.RandomState(seed)
+        entries = pd.DataFrame({
+            "date": pd.date_range("2025-01-01", periods=n),
+            "side": "BUY",
+            "pnl": 0.0,
+            "strength": rng.uniform(0.3, 0.9, n),
+        })
+        exits = entries.copy()
+        exits["side"] = "SELL"
+        exits["pnl"] = np.where(rng.rand(n) < win_rate, 100.0, -50.0)
+        return pd.concat([entries, exits]).reset_index(drop=True)
+
     def test_basic(self):
         trades = pd.DataFrame({
             "side": ["BUY"] * 20 + ["SELL"] * 20,
@@ -643,6 +830,29 @@ class TestCalibrateWinProbability:
         })
         result = calibrate_win_probability(trades)
         assert "error" in result
+
+    def test_none_trades(self):
+        result = calibrate_win_probability(None)
+        assert "error" in result
+
+    def test_offset_direction(self):
+        """Bei hoher Win-Rate sollte Offset positiv sein."""
+        trades = self._make_trades(n=200, win_rate=0.75)
+        result = calibrate_win_probability(trades)
+        assert result["offset"] > 0
+
+    def test_offset_negative(self):
+        """Bei niedriger Win-Rate sollte Offset negativ sein."""
+        trades = self._make_trades(n=200, win_rate=0.25)
+        result = calibrate_win_probability(trades)
+        assert result["offset"] < 0
+
+    def test_large_sample_accuracy(self):
+        """Echte Win-Rate ~60% messbar mit großem Sample."""
+        trades = self._make_trades(n=200, win_rate=0.60, seed=1)
+        result = calibrate_win_probability(trades)
+        assert "error" not in result
+        assert abs(result["actual_win_rate"] - 0.60) < 0.06
 
 
 # ══════════════════════════ Compute ORB Signals (Vectorized) ════════════════
@@ -701,6 +911,26 @@ class TestConfig:
         c = _cfg(risk_per_trade=0.01)
         assert c["risk_per_trade"] == 0.01
         assert c["symbols"] == ORB_DEFAULT_CONFIG["symbols"]
+
+    def test_eod_close_before_market_close(self):
+        eod = ORB_DEFAULT_CONFIG["eod_close_time"]
+        assert eod < time(16, 0), "EOD-Close muss vor 16:00 ET sein"
+
+    def test_profit_target_gt_stop(self):
+        assert ORB_DEFAULT_CONFIG["profit_target_r"] > ORB_DEFAULT_CONFIG["stop_loss_r"]
+
+    def test_risk_per_trade_reasonable(self):
+        rpt = ORB_DEFAULT_CONFIG["risk_per_trade"]
+        assert 0.001 <= rpt <= 0.05, f"risk_per_trade={rpt} außerhalb sinnvoller Range"
+
+    def test_no_duplicate_symbols(self):
+        symbols = ORB_DEFAULT_CONFIG["symbols"]
+        assert len(symbols) == len(set(symbols)), "Doppelte Symbole in Config"
+
+    def test_time_decay_brackets_sorted(self):
+        brackets = ORB_DEFAULT_CONFIG["time_decay_brackets"]
+        thresholds = [t for t, _ in brackets]
+        assert thresholds == sorted(thresholds), "Brackets müssen aufsteigend sortiert sein"
 
 
 # ══════════════════════════ Win-Probability Estimation ═══════════════════════
