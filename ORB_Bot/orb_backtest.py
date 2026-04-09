@@ -869,6 +869,7 @@ def print_orb_report(
     report: dict,
     benchmark: Optional[pd.DataFrame] = None,
     output_dir: Optional[Path] = None,
+    show_entry_distribution: bool = False,
 ) -> None:
     """Drucke ORB Backtest Report und speichere Plots + CSV."""
     eq = report.get("equity_curve", pd.Series())
@@ -905,7 +906,7 @@ def print_orb_report(
                     print(f"    {year}: {cnt}")
 
         entries = trades[trades["side"].isin(["BUY", "SHORT"])]
-        if not entries.empty:
+        if show_entry_distribution and not entries.empty:
             print("\n  Entry-Verteilung:")
             for reason, cnt in entries["reason"].value_counts().items():
                 print(f"    {reason:<40} {cnt:>4}")
@@ -982,7 +983,7 @@ def print_orb_report(
         ax.legend()
         ax.grid(True, alpha=0.3)
         plt.tight_layout()
-        plot_path = output_dir / "orb_v2_equity_curve.png"
+        plot_path = output_dir / f"orb_v2_equity_curve_{ts}.png"
         fig.savefig(plot_path, dpi=120)
         plt.close(fig)
         print(f"  Plot:            {plot_path}")
