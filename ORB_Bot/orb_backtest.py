@@ -195,6 +195,8 @@ def run_orb_backtest(
     sl_r          = float(cfg.get("stop_loss_r", 1.0))
     trail_after_r = float(cfg.get("trail_after_r", 1.0))
     trail_dist_r  = float(cfg.get("trail_distance_r", 0.5))
+    use_trailing  = bool(cfg.get("use_trailing_stop", False))
+    max_concurrent = int(cfg.get("max_concurrent_positions", 3))
     max_dd        = float(cfg.get("max_drawdown_pct", 0.15))
     dd_cooldown_days = int(cfg.get("dd_cooldown_days", 10))
     vix_thresh    = float(cfg.get("vix_high_threshold", 30))
@@ -439,18 +441,23 @@ def run_orb_backtest(
                 if sym in positions:
                     pos = positions[sym]
                     pos["bars_held"] += 1
+                    bar_open_price = float(bar["Open"])
 
                     if pos["side"] == "long":
                         closed = _manage_long(
                             sym, pos, price, high, low, bar_ts,
                             profit_r, sl_r, trail_after_r, trail_dist_r,
                             slippage, commission,
+                            use_trailing_stop=use_trailing,
+                            bar_open=bar_open_price,
                         )
                     else:
                         closed = _manage_short(
                             sym, pos, price, high, low, bar_ts,
                             profit_r, sl_r, trail_after_r, trail_dist_r,
                             slippage, commission,
+                            use_trailing_stop=use_trailing,
+                            bar_open=bar_open_price,
                         )
 
                     if closed:
@@ -466,6 +473,9 @@ def run_orb_backtest(
                 if entered_today or trades_today >= max_daily or dd_active:
                     continue
                 if sym in positions:
+                    continue
+                # Fix: max_concurrent_positions durchsetzen (Parität mit Live-Bot)
+                if len(positions) >= max_concurrent:
                     continue
 
                 sig_row = signals.iloc[i]
@@ -687,6 +697,7 @@ def _manage_long(
     sym, pos, price, high, low, bar_ts,
     profit_r, sl_r, trail_after_r, trail_dist_r,
     slippage, commission,
+    use_trailing_stop=False, bar_open=None,
 ) -> Optional[dict]:
     """Prüfe Exit für Long-Position. Gibt dict bei Schließung, sonst None."""
     entry = pos["entry"]
@@ -695,9 +706,10 @@ def _manage_long(
     target = pos["target"]
     shares = pos["shares"]
 
-    # Stop Loss
+    # Stop Loss (mit Gap-Through-Fill: Open statt Stop-Level)
     if low <= stop:
-        exit_p = stop * (1 - slippage)
+        fill_price = min(stop, bar_open) if bar_open is not None else stop
+        exit_p = fill_price * (1 - slippage)
         pnl = (exit_p - entry) * shares
         r_mult = (exit_p - entry) / risk if risk > 0 else 0
         return {
@@ -728,30 +740,31 @@ def _manage_long(
             },
         }
 
-    # Trailing Stop
-    if price > pos["highest"]:
-        pos["highest"] = price
+    # Trailing Stop (nur wenn aktiviert – Alpaca Bracket Orders haben kein Trailing)
+    if use_trailing_stop:
+        if price > pos["highest"]:
+            pos["highest"] = price
 
-    r_mult_now = (price - entry) / risk if risk > 0 else 0
-    if r_mult_now >= trail_after_r:
-        new_trail = pos["highest"] - trail_dist_r * risk
-        if pos["trail_stop"] is None or new_trail > pos["trail_stop"]:
-            pos["trail_stop"] = new_trail
+        r_mult_now = (price - entry) / risk if risk > 0 else 0
+        if r_mult_now >= trail_after_r:
+            new_trail = pos["highest"] - trail_dist_r * risk
+            if pos["trail_stop"] is None or new_trail > pos["trail_stop"]:
+                pos["trail_stop"] = new_trail
 
-    if pos["trail_stop"] is not None and low <= pos["trail_stop"]:
-        exit_p = pos["trail_stop"] * (1 - slippage)
-        pnl = (exit_p - entry) * shares
-        r_mult = (exit_p - entry) / risk if risk > 0 else 0
-        return {
-            "pnl": pnl,
-            "proceeds": exit_p * shares * (1 - commission),
-            "r_mult": round(r_mult, 2),
-            "trade": {
-                "date": bar_ts, "symbol": sym, "side": "SELL",
-                "price": exit_p, "shares": shares, "pnl": pnl,
-                "reason": "Trailing Stop", "r_mult": round(r_mult, 2),
-            },
-        }
+        if pos["trail_stop"] is not None and low <= pos["trail_stop"]:
+            exit_p = pos["trail_stop"] * (1 - slippage)
+            pnl = (exit_p - entry) * shares
+            r_mult = (exit_p - entry) / risk if risk > 0 else 0
+            return {
+                "pnl": pnl,
+                "proceeds": exit_p * shares * (1 - commission),
+                "r_mult": round(r_mult, 2),
+                "trade": {
+                    "date": bar_ts, "symbol": sym, "side": "SELL",
+                    "price": exit_p, "shares": shares, "pnl": pnl,
+                    "reason": "Trailing Stop", "r_mult": round(r_mult, 2),
+                },
+            }
 
     return None
 
@@ -760,6 +773,7 @@ def _manage_short(
     sym, pos, price, high, low, bar_ts,
     profit_r, sl_r, trail_after_r, trail_dist_r,
     slippage, commission,
+    use_trailing_stop=False, bar_open=None,
 ) -> Optional[dict]:
     """Prüfe Exit für Short-Position. Gibt dict bei Schließung, sonst None."""
     entry = pos["entry"]
@@ -768,9 +782,10 @@ def _manage_short(
     target = pos["target"]
     shares = pos["shares"]
 
-    # Stop Loss (über Entry)
+    # Stop Loss (über Entry, mit Gap-Through-Fill)
     if high >= stop:
-        exit_p = stop * (1 + slippage)
+        fill_price = max(stop, bar_open) if bar_open is not None else stop
+        exit_p = fill_price * (1 + slippage)
         pnl = (entry - exit_p) * shares
         r_mult = (entry - exit_p) / risk if risk > 0 else 0
         return {
@@ -801,30 +816,31 @@ def _manage_short(
             },
         }
 
-    # Trailing Stop
-    if price < pos.get("lowest", entry):
-        pos["lowest"] = price
+    # Trailing Stop (nur wenn aktiviert – Alpaca Bracket Orders haben kein Trailing)
+    if use_trailing_stop:
+        if price < pos.get("lowest", entry):
+            pos["lowest"] = price
 
-    r_mult_now = (entry - price) / risk if risk > 0 else 0
-    if r_mult_now >= trail_after_r:
-        new_trail = pos["lowest"] + trail_dist_r * risk
-        if pos["trail_stop"] is None or new_trail < pos["trail_stop"]:
-            pos["trail_stop"] = new_trail
+        r_mult_now = (entry - price) / risk if risk > 0 else 0
+        if r_mult_now >= trail_after_r:
+            new_trail = pos["lowest"] + trail_dist_r * risk
+            if pos["trail_stop"] is None or new_trail < pos["trail_stop"]:
+                pos["trail_stop"] = new_trail
 
-    if pos["trail_stop"] is not None and high >= pos["trail_stop"]:
-        exit_p = pos["trail_stop"] * (1 + slippage)
-        pnl = (entry - exit_p) * shares
-        r_mult = (entry - exit_p) / risk if risk > 0 else 0
-        return {
-            "pnl": pnl,
-            "proceeds": -exit_p * shares * (1 + commission),
-            "r_mult": round(r_mult, 2),
-            "trade": {
-                "date": bar_ts, "symbol": sym, "side": "COVER",
-                "price": exit_p, "shares": shares, "pnl": pnl,
-                "reason": "Trailing Stop", "r_mult": round(r_mult, 2),
-            },
-        }
+        if pos["trail_stop"] is not None and high >= pos["trail_stop"]:
+            exit_p = pos["trail_stop"] * (1 + slippage)
+            pnl = (entry - exit_p) * shares
+            r_mult = (entry - exit_p) / risk if risk > 0 else 0
+            return {
+                "pnl": pnl,
+                "proceeds": -exit_p * shares * (1 + commission),
+                "r_mult": round(r_mult, 2),
+                "trade": {
+                    "date": bar_ts, "symbol": sym, "side": "COVER",
+                    "price": exit_p, "shares": shares, "pnl": pnl,
+                    "reason": "Trailing Stop", "r_mult": round(r_mult, 2),
+                },
+            }
 
     return None
 
