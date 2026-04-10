@@ -91,12 +91,13 @@ ORB_CONFIG.update({
 # ============================= WFO Parameter-Grid ===========================
 
 WFO_PARAM_GRID = {
-    "profit_target_r":   [1.5, 2.0, 3.0],
-    "trail_after_r":     [0.5, 1.0, 1.5],
-    "trail_distance_r":  [0.3, 0.5, 0.75],
-    "volume_multiplier": [1.0, 1.3, 1.5],
+    "profit_target_r":     [1.5, 2.0, 3.0],
+    "stop_loss_r":         [0.75, 1.0, 1.25],
+    "volume_multiplier":   [1.0, 1.3, 1.5],
+    "min_signal_strength": [0.15, 0.20, 0.30],
 }
 # 3 × 3 × 3 × 3 = 81 Kombinationen – überschaubar
+# Nur Parameter die auch im Live-Bot (Alpaca Bracket Orders) wirken.
 
 
 # ============================= Modus-Funktionen =============================
@@ -168,6 +169,7 @@ def mode_wfo(
         verbose=True,
         backtest_func=run_orb_backtest,
         validation_func=_orb_validate_params,
+        vix3m_series=vix3m,
     )
     wfo.run()
     wfo.print_summary()
@@ -257,13 +259,16 @@ def _orb_validate_params(cfg: dict, overrides: dict) -> bool:
     """Validierung für ORB-spezifische Parameterkombinationen."""
     pt = cfg.get("profit_target_r", 2.0)
     sl = cfg.get("stop_loss_r", 1.0)
-    trail = cfg.get("trail_after_r", 1.0)
-    # Profit Target muss größer als Trail-Aktivierung sein
-    if pt <= trail:
+    # Profit Target muss sinnvoll größer als Stop Loss sein
+    if pt <= sl:
         return False
-    # Trail-Aktivierung muss positiv sein
-    if trail <= 0:
-        return False
+    # Trailing Stop nur prüfen wenn aktiviert
+    if cfg.get("use_trailing_stop", False):
+        trail = cfg.get("trail_after_r", 1.0)
+        if pt <= trail:
+            return False
+        if trail <= 0:
+            return False
     return True
 
 
