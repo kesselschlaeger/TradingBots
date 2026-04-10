@@ -67,8 +67,9 @@ def _slice_data(
     start: pd.Timestamp,
     end: pd.Timestamp,
     warmup_calendar_days: int = 40,
-) -> Tuple[Dict[str, pd.DataFrame], pd.Series]:
-    """Schneide data_dict und vix_series auf [start, end] zu.
+    vix3m_series: Optional[pd.Series] = None,
+) -> Tuple[Dict[str, pd.DataFrame], pd.Series, Optional[pd.Series]]:
+    """Schneide data_dict, vix_series und vix3m_series auf [start, end] zu.
 
     Fix #19: Volume_MA / ATR werden für den Slice neu berechnet, um
     Pre-Sample-Kontamination durch die einmalige Voll-Historien-Berechnung zu
@@ -114,7 +115,17 @@ def _slice_data(
         vix_index = vix_index.tz_localize(None)
     vix_days   = vix_index.normalize()
     vix_sliced = vix_series.loc[(vix_days >= start_day) & (vix_days <= end_day)]
-    return sliced, vix_sliced
+
+    # VIX3M slicen (Fix: WFO-Parität mit Full-Backtest)
+    vix3m_sliced = None
+    if vix3m_series is not None and not vix3m_series.empty:
+        v3_index = pd.DatetimeIndex(vix3m_series.index)
+        if v3_index.tz is not None:
+            v3_index = v3_index.tz_localize(None)
+        v3_days = v3_index.normalize()
+        vix3m_sliced = vix3m_series.loc[(v3_days >= start_day) & (v3_days <= end_day)]
+
+    return sliced, vix_sliced, vix3m_sliced
 
 
 def _param_combinations(param_grid: Dict[str, List[Any]]) -> List[Dict[str, Any]]:
@@ -176,11 +187,13 @@ class WalkForwardOptimizer:
         verbose:       bool = True,
         validation_func: Optional[Callable] = None,
         min_trades_is: int = 20,
+        vix3m_series: Optional[pd.Series] = None,
     ):
         if backtest_func is None:
             raise ValueError("backtest_func ist Pflichtparameter.")
         self.data_dict       = data_dict
         self.vix_series      = vix_series
+        self.vix3m_series    = vix3m_series
         self.base_cfg        = base_cfg
         self.param_grid      = param_grid
         self.is_days         = is_days
@@ -253,8 +266,9 @@ class WalkForwardOptimizer:
                 )
 
             # ---- In-Sample Optimierung ------------------------------------
-            is_data, is_vix = _slice_data(
+            is_data, is_vix, is_vix3m = _slice_data(
                 self.data_dict, self.vix_series, is_start, is_end,
+                vix3m_series=self.vix3m_series,
             )
 
             best_metric    = -np.inf
@@ -266,7 +280,7 @@ class WalkForwardOptimizer:
                 if not cfg:
                     continue
                 try:
-                    _, rep = self.backtest_func(is_data, is_vix, cfg)
+                    _, rep = self.backtest_func(is_data, is_vix, cfg, vix3m_series=is_vix3m)
                 except Exception as e:
                     if self.verbose:
                         print(f"    Combo {i+1}/{n_combos} FEHLER: {e}")
@@ -274,7 +288,7 @@ class WalkForwardOptimizer:
 
                 # Minimum-Trades-Gate: Kombos mit zu wenig IS-Trades erzeugen
                 # Sharpe-Artefakte und liefern im OOS reine Zufallsergebnisse.
-                n_trades_is = int(rep.get("n_trades", 0))
+                n_trades_is = int(rep.get("total_trades", rep.get("n_trades", 0)))
                 if n_trades_is < self.min_trades_is:
                     if self.verbose and (i + 1) % max(1, n_combos // 5) == 0:
                         print(f"    {i+1}/{n_combos} combo SKIP (n_trades={n_trades_is} < {self.min_trades_is})")
@@ -301,13 +315,14 @@ class WalkForwardOptimizer:
                 print(f"    Beste Params (IS {self.metric}={best_metric:.3f}): {best_params}")
 
             # ---- Out-of-Sample Validierung --------------------------------
-            oos_data, oos_vix = _slice_data(
+            oos_data, oos_vix, oos_vix3m = _slice_data(
                 self.data_dict, self.vix_series, oos_start, oos_end,
+                vix3m_series=self.vix3m_series,
             )
             oos_cfg = _override_cfg(self.base_cfg, best_params, self.validation_func)
 
             try:
-                _, oos_rep = self.backtest_func(oos_data, oos_vix, oos_cfg)
+                _, oos_rep = self.backtest_func(oos_data, oos_vix, oos_cfg, vix3m_series=oos_vix3m)
             except Exception as e:
                 if self.verbose:
                     print(f"    OOS-Backtest FEHLER: {e}")
