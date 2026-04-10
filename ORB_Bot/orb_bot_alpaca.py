@@ -1045,6 +1045,27 @@ class ORB_Bot:
         new_entries_this_scan = 0  # Zählt neue Entries in diesem Scan-Durchlauf
         block_on_stale = bool(self.cfg.get("block_trades_on_stale_data", True))
 
+        # Fix: VIX/VIX3M und Drawdown für MIT-Overlay berechnen (Backtest-Parität)
+        _vix_spot = None
+        _vix_3m = None
+        _current_dd = 0.0
+        if self.cfg.get("use_mit_probabilistic_overlay", False):
+            try:
+                import yfinance as yf
+                _vix_data = yf.Ticker("^VIX").history(period="5d")
+                if not _vix_data.empty:
+                    _vix_spot = float(_vix_data["Close"].iloc[-1])
+                _vix3m_data = yf.Ticker("^VIX3M").history(period="5d")
+                if not _vix3m_data.empty:
+                    _vix_3m = float(_vix3m_data["Close"].iloc[-1])
+            except Exception:
+                pass  # Fallbacks in mit_apply_overlay greifen
+            # Drawdown aus portfolio.json / Alpaca-Equity berechnen
+            initial_cap = float(self.cfg.get("initial_capital", 10_000.0))
+            if equity > 0 and initial_cap > 0:
+                peak = max(equity, initial_cap)
+                _current_dd = max(0.0, (peak - equity) / peak)
+
         for sym in self.cfg["symbols"]:
             # Concurrent-Positions-Guard: open_positions + neue Entries in diesem Scan
             if len(open_positions) + new_entries_this_scan >= max_concurrent:
@@ -1114,7 +1135,10 @@ class ORB_Bot:
 
             if signal in ("BUY", "SHORT") and self.cfg.get("use_mit_probabilistic_overlay", False):
                 should_trade, qty_factor, overlay_reason = self.strategy.apply_mit_overlay(
-                    signal, strength, ctx, df
+                    signal, strength, ctx, df,
+                    current_drawdown=_current_dd,
+                    vix_spot=_vix_spot,
+                    vix_3m=_vix_3m,
                 )
                 if not should_trade:
                     print(f"  {sym}: HOLD – {overlay_reason}")
