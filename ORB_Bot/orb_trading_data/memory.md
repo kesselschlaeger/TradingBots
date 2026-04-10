@@ -64,3 +64,11 @@
 
 **2026-04-09 18:25** PLTR SHORT 17 @ 128.94 | SL 137.56 | TP 111.70 | OrderID da0ae586-dc0c-46dc-ace2-ec9edebca11b (ORB Breakdown: 128.94 < 130.78 +Vol 1.2x)
 
+**2026-04-10 14:05** AAPL BUY 28 @ 261.23 | SL 259.69 | TP 264.31 | OrderID dbedeaf1-de72-44e1-8322-82f7439813bc (ORB Breakout: 261.23 > 260.66 +Vol 1.1x)
+
+**2026-04-10 14:20** AMZN BUY 31 @ 239.63 | SL 236.08 | TP 246.74 | OrderID c2ec21d9-befd-49c3-afc8-5e6b472e1824 (ORB Breakout: 239.63 > 238.83 +Vol 1.5x)
+
+**2026-04-10 14:35** NVDA BUY 39 @ 188.31 | SL 184.87 | TP 195.19 | OrderID abe7b125-2c60-4b2b-9d50-c650bda0f9d0 (ORB Breakout: 188.31 > 187.91 +Vol 1.4x)
+
+**2026-04-10 17:05** SPY SHORT 11 @ 678.82 | SL 680.53 | TP 675.39 | OrderID 70ad0bd9-76e7-4ef3-9cfd-4265e8d1adfb (ORB Breakdown: 678.82 < 680.20 +Vol 4.0x)
+
