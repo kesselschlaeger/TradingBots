@@ -82,7 +82,7 @@ OBB_DEFAULT_CONFIG: dict = {
 
     # ── Kosten (realistisch für Backtest) ─────────────────────────────────
     "commission_pct": 0.00005,   # 0.5 Basispunkte je Seite
-    "slippage_pct":   0.0003,    # 3 Basispunkte (höher als ORB: Daily Open-Slippage)
+    "slippage_pct":   0.0005,    # Gemini hat hier 5 Basispunkte 3 Basispunkte (höher als ORB: Daily Open-Slippage)
 
     # ── Kapital & Ausgabe ──────────────────────────────────────────────────
     "initial_capital": 10_000.0,

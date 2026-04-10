@@ -56,7 +56,7 @@ ORB_DEFAULT_CONFIG: dict = {
     "volume_multiplier": 1.1, ## vorher 1.3,
     # Reduziert, damit frische Breakouts nicht als zu "schwach" verworfen werden.
     # Qualität kommt primär über Volume-/Trend-/Gap-Filter.
-    "min_signal_strength": 0.08,
+    "min_signal_strength": 0.20, # wurde als viel zu niedrig angesehen (Default auf 0.20–0.30) 0.08, #
 
     # ── Risiko-Management ──────────────────────────────────────────────────
     "risk_per_trade":    0.005,
@@ -114,7 +114,7 @@ ORB_DEFAULT_CONFIG: dict = {
 
     # ── MIT Probabilistic Overlay ─────────────────────────────────────────
     "use_mit_probabilistic_overlay": True, ##aktiviert nach Einbau False,
-    "mit_ev_threshold_r": 0.08,
+    "mit_ev_threshold_r": 0.30, #Empfehlung von Claude  in Config auf etwas wie 0.30R anheben – dann entspricht es wp > 0.44. #0.08,
     "mit_kelly_fraction": 0.50,
     "mit_min_strength": 0.15,
     "mit_calibration_offset": 0.0317,# 0.0,  # Fix #14: Kalibrierungsoffset (aus calibrate_win_probability aufgerufen mit: orb_bot_v2.py --mode calibrate)

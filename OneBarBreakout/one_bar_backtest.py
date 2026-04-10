@@ -223,14 +223,19 @@ def run_obb_backtest(
           f"Position={position_pct*100:.0f}%  Kapital={capital:,.0f}")
 
     # ── Alle Handelstage ──────────────────────────────────────────────────
+    # WICHTIG: UTC verwenden, nicht ET!
+    # Alpaca Daily-Bars haben Timestamps wie 2026-03-27 04:00:00+00:00 (UTC).
+    # Konvertierung nach ET ergibt 2026-03-26 23:00:00 ET → .date() = 26.03.
+    # Das ist einen Tag zu früh → Signale werden nie gefunden.
+    # Lösung: UTC-Datum nehmen, das ist immer korrekt für tägliche Bars.
     all_dates: set = set()
     for df in data_dict.values():
         idx = df.index
-        if idx.tz is not None:
-            idx_et = idx.tz_convert(ET)
+        if idx.tz is None:
+            idx_utc = idx.tz_localize("UTC")
         else:
-            idx_et = idx.tz_localize("UTC").tz_convert(ET)
-        all_dates.update(d.date() for d in idx_et)
+            idx_utc = idx.tz_convert("UTC")
+        all_dates.update(d.date() for d in idx_utc)
 
     trading_days = sorted(d for d in all_dates if d.weekday() < 5)
     if not trading_days:
@@ -312,17 +317,19 @@ def run_obb_backtest(
             r_mult     = round(r_mult, 4)
 
             trade_record = {
-                "date":         pd.Timestamp(day),
-                "symbol":       sym,
-                "side":         "SELL" if side == "long" else "COVER",
-                "price":        round(exit_p, 4),
-                "entry_price":  round(pos["entry"], 4),
-                "shares":       pos["shares"],
-                "pnl":          round(pnl, 4),
-                "reason":       "1-Bar Exit (Open)",
-                "r_mult":       r_mult,
+                "date":        pd.Timestamp(pos["entry_date"]), # Tag D:   Entry (Close/MOC)
+                "exit_date":   pd.Timestamp(day),               # Tag D+1: Exit  (Open/OPG)
+                "symbol":      sym,
+                "side":        "SELL" if side == "long" else "COVER",
+                "entry_price": round(pos["entry"], 4),
+                "exit_price":  round(exit_p, 4),
+                "price":       round(exit_p, 4),  # Kompatibilität
+                "shares":      pos["shares"],
+                "pnl":         round(pnl, 4),
+                "reason":      "1-Bar Exit (Opening Print)",
+                "r_mult":      r_mult,
                 "holding_days": 1,
-                "signal":       pos.get("signal", ""),
+                "signal":      pos.get("signal", ""),
             }
             trades_list.append(trade_record)
             closed_trades.append({"pnl": pnl})
@@ -364,6 +371,11 @@ def run_obb_backtest(
 
             # Signal für heute (Tag D)
             today_sig = _get_signal_on_day(sig_df, day)
+            # ── TEMPORÄRES DEBUG (danach wieder entfernen) ──
+            if day.year == 2026 and day.month >= 3:
+                print(f"  [DEBUG] {day} {sym}: sig={today_sig}")
+            # ── ENDE DEBUG ──
+            
             if today_sig not in ("BUY", "SHORT"):
                 continue
             if today_sig == "SHORT" and not allow_shorts:
@@ -425,7 +437,8 @@ def run_obb_backtest(
                 "side":       side,
                 "entry":      entry_p,
                 "shares":     shares,
-                "entry_date": day,      # Entry = heute (Close/MOC)
+                "entry_date": day,       # Tag D: Entry am Closing Print
+                "exit_date":  next_day,  # Tag D+1: Exit am Opening Print
                 "signal":     today_sig,
             }
 
@@ -440,16 +453,16 @@ def run_obb_backtest(
                 continue
 
             trades_list.append({
-                "date":       pd.Timestamp(day),      # Signal-Tag (Close = Entry)
-                "entry_date": pd.Timestamp(next_day), # Exit am naechsten Open
-                "symbol":     sym,
-                "side":       "BUY" if side == "long" else "SHORT",
-                "price":      round(entry_p, 4),
-                "shares":     shares,
-                "pnl":        0.0,
-                "reason":     f"OBB MOC Entry ({lookback}-Bar {'High' if side == 'long' else 'Low'} Breakout)",
-                "r_mult":     0.0,
-                "signal":     today_sig,
+                "date":      pd.Timestamp(day),      # Tag D: Signal + Entry (Closing Print)
+                "exit_date": pd.Timestamp(next_day), # Tag D+1: Exit (Opening Print)
+                "symbol":    sym,
+                "side":      "BUY" if side == "long" else "SHORT",
+                "price":     round(entry_p, 4),
+                "shares":    shares,
+                "pnl":       0.0,
+                "reason":    f"OBB MOC Entry ({lookback}-Bar {'High' if side == 'long' else 'Low'} Breakout)",
+                "r_mult":    0.0,
+                "signal":    today_sig,
             })
             trades_today += 1
 
@@ -467,14 +480,16 @@ def run_obb_backtest(
             cash -= last_p * pos["shares"] * (1 + commission + slippage)
         r_mult = round(pnl / (pos["entry"] * pos["shares"] * position_pct + 1e-9), 4)
         trades_list.append({
-            "date": pd.Timestamp(trading_days[-1]),
-            "symbol": sym,
-            "side": "SELL" if side == "long" else "COVER",
-            "price": round(last_p, 4),
+            "date":        pd.Timestamp(pos.get("entry_date", trading_days[-1])),
+            "exit_date":   pd.Timestamp(trading_days[-1]),
+            "symbol":      sym,
+            "side":        "SELL" if side == "long" else "COVER",
             "entry_price": round(pos["entry"], 4),
-            "shares": pos["shares"],
-            "pnl": round(pnl, 4),
-            "reason": "End of Test",
+            "exit_price":  round(last_p, 4),
+            "price":       round(last_p, 4),
+            "shares":      pos["shares"],
+            "pnl":         round(pnl, 4),
+            "reason":      "End of Test",
             "r_mult": r_mult,
             "signal": pos.get("signal", ""),
         })
@@ -519,11 +534,13 @@ def _get_open_on_day(df: Optional[pd.DataFrame], day) -> Optional[float]:
     if df is None or df.empty:
         return None
     idx = df.index
-    if idx.tz is not None:
-        idx_et = idx.tz_convert(ET)
+    # UTC verwenden – Alpaca Daily-Bars haben UTC-Timestamps (04:00 UTC)
+    # ET-Konvertierung würde das Datum um einen Tag nach hinten verschieben
+    if idx.tz is None:
+        idx_utc = idx.tz_localize("UTC")
     else:
-        idx_et = idx.tz_localize("UTC").tz_convert(ET)
-    mask = [d.date() == day for d in idx_et]
+        idx_utc = idx.tz_convert("UTC")
+    mask = [d.date() == day for d in idx_utc]
     sub  = df[mask]
     return float(sub["Open"].iloc[0]) if not sub.empty else None
 
@@ -532,11 +549,12 @@ def _get_close_on_day(df: Optional[pd.DataFrame], day) -> Optional[float]:
     if df is None or df.empty:
         return None
     idx = df.index
-    if idx.tz is not None:
-        idx_et = idx.tz_convert(ET)
+    # UTC verwenden – siehe Kommentar in _get_open_on_day
+    if idx.tz is None:
+        idx_utc = idx.tz_localize("UTC")
     else:
-        idx_et = idx.tz_localize("UTC").tz_convert(ET)
-    mask = [d.date() == day for d in idx_et]
+        idx_utc = idx.tz_convert("UTC")
+    mask = [d.date() == day for d in idx_utc]
     sub  = df[mask]
     return float(sub["Close"].iloc[-1]) if not sub.empty else None
 
@@ -549,14 +567,15 @@ def _get_last_close(df: Optional[pd.DataFrame]) -> Optional[float]:
 
 def _get_signal_on_day(sig_df: pd.DataFrame, day) -> str:
     idx = sig_df.index
-    if idx.tz is not None:
-        idx_et = idx.tz_convert(ET)
-    else:
+    # UTC verwenden – siehe Kommentar in _get_open_on_day
+    if idx.tz is None:
         try:
-            idx_et = idx.tz_localize("UTC").tz_convert(ET)
+            idx_utc = idx.tz_localize("UTC")
         except Exception:
-            idx_et = idx
-    mask = [d.date() == day for d in idx_et]
+            idx_utc = idx
+    else:
+        idx_utc = idx.tz_convert("UTC")
+    mask = [d.date() == day for d in idx_utc]
     sub  = sig_df[mask]
     if sub.empty:
         return "HOLD"

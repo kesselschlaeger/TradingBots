@@ -33,6 +33,11 @@ Timing-Hinweis:
              platziert Market-Orders für morgen Open
     morning → vor Market Open (07:00–09:28 ET): schließt gestrige Positionen
               via OPG-Orders (Opening Order, exekutiert am Opening Print)
+
+    python one_bar_breakout_bot.py --mode scan
+    python one_bar_breakout_bot.py --mode morning
+    python one_bar_breakout_bot.py --mode status
+    python one_bar_breakout_bot.py --mode backtest --start 2024-01-01 --end 2026-04-08
 """
 
 import argparse

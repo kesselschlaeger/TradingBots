@@ -6,6 +6,11 @@ Basierend auf dem Video-Konzept: Kauf bei 50-Bar-High-Close, Verkauf am nächste
 Architektur: Variante A (Eigenständiges Skript)
 Warum? Die Time-Exit Logik (Market-on-Open) unterscheidet sich fundamental 
 vom Preis-Exit (Stop/Target) des ORB-Bots.
+
+
+Aufruf Backtest: python OneBarBreakoutGemini.py --mode backtest --start 2024-01-01 --end 2026-04-08
+Aufruf Live Entry: python OneBarBreakoutGemini.py --mode entry
+Aufruf Live Exit:  python OneBarBreakoutGemini.py --mode exit
 """
 
 import os
@@ -40,16 +45,25 @@ ET = pytz.timezone("America/New_York")
 CONFIG = {
     #"symbols": ["SPY", "QQQ", "IWM", "TSLA", "NVDA", "AAPL", "AMD"],
     "symbols": [
-        "SPY", "QQQ", "IWM", "DIA",
-        "NVDA", "TSLA", "AMD", "AVGO",
-        "AAPL", "MSFT", "META", "AMZN",
-        "PLTR", "GOOGL", "NFLX",
-    ],
+        # alte Werte: "SPY", "QQQ", "IWM", "DIA", "NVDA", "TSLA", "AMD", "AVGO", "AAPL", "MSFT", "META", "AMZN", "PLTR", "GOOGL", "NFLX",
+        "SOXL", #winrate 100
+        "SMCI", #winrate 83
+        "RKLB", #winrate 100
+        "TQQQ", ##winrate 96
+        "INTC",
+        "HOOD", #--winrate100
+        "MSTR",
+        "SNDK", #--winrate100
+        "MU",
+        "WBD", #--winrate100
+        "AVGO" #--winrate100
+            ],
     "lookback": 50,
     "allow_shorts": True,
+    "initial_capital": 10_000.0,
     "risk_pct": 0.15,          # 15% Equity pro Trade (da sehr kurze Haltedauer)
     "slippage_bps": 5,         # 5 Basispunkte Slippage
-    "commission": 0.0,         # Alpaca ist i.d.R. kommissionsfrei (außer ECN-Fees)
+    "commission": 0.00005,         # Claude hat etwas angenommen Alpaca ist i.d.R. kommissionsfrei (außer ECN-Fees)
     "alpaca_paper": True,
 }
 
@@ -77,6 +91,8 @@ def run_backtest(symbols, start_date, end_date):
     client = StockHistoricalDataClient(os.getenv("APCA_API_KEY_ID"), os.getenv("APCA_API_SECRET_KEY"))
     
     all_trades = []
+    initial_capital = float(CONFIG.get("initial_capital", 10_000.0))
+    current_equity = initial_capital
     
     for sym in symbols:
         print(f"Lade Daten für {sym}...")
@@ -87,56 +103,80 @@ def run_backtest(symbols, start_date, end_date):
             end=datetime.strptime(end_date, "%Y-%m-%d"),
             feed="iex"
         )
-        bars = client.get_stock_bars(req).df
-        if bars.empty: continue
-        
-        df = bars.reset_index()
-        df = apply_strategy_logic(df, CONFIG["lookback"])
-        
-        # Simulation
-        for i in range(CONFIG["lookback"], len(df) - 1):
-            row = df.iloc[i]
-            next_day = df.iloc[i+1]
+        try:
+            bars = client.get_stock_bars(req).df
+            if bars.empty: continue
             
-            signal = None
-            if row['long_signal']: signal = "LONG"
-            elif row['short_signal'] and CONFIG["allow_shorts"]: signal = "SHORT"
+            df = bars.reset_index()
+            df = apply_strategy_logic(df, CONFIG["lookback"])
             
-            if signal:
-                entry_price = row['close']
-                exit_price = next_day['open']
+            for i in range(CONFIG["lookback"], len(df) - 1):
+                row = df.iloc[i]
+                next_day = df.iloc[i+1]
                 
-                # Slippage Simulation
-                slip = entry_price * (CONFIG["slippage_bps"] / 10000)
-                if signal == "LONG":
-                    pnl_pct = (exit_price - (entry_price + slip)) / (entry_price + slip)
-                else:
-                    pnl_pct = ((entry_price - slip) - exit_price) / (entry_price - slip)
+                signal = None
+                if row['long_signal']: signal = "LONG"
+                elif row['short_signal'] and CONFIG["allow_shorts"]: signal = "SHORT"
                 
-                all_trades.append({
-                    "Symbol": sym,
-                    "Date": row['timestamp'].date(),
-                    "Side": signal,
-                    "Entry": entry_price,
-                    "Exit": exit_price,
-                    "PnL%": round(pnl_pct * 100, 3)
-                })
+                if signal:
+                    entry_price = row['close']
+                    exit_price = next_day['open']
+                    
+                    # Positionsgröße basierend auf Risk %
+                    trade_value = current_equity * CONFIG["risk_pct"]
+                    qty = int(trade_value / entry_price)
+                    if qty == 0: continue
 
-    # Report
+                    # Slippage & PnL Berechnung
+                    slip = entry_price * (CONFIG["slippage_bps"] / 10000)
+                    if signal == "LONG":
+                        net_entry = entry_price + slip
+                        net_exit = exit_price - slip
+                    else:
+                        net_entry = entry_price - slip
+                        net_exit = exit_price + slip
+                    
+                    pnl_pct = (net_exit - net_entry) / net_entry if signal == "LONG" else (net_entry - net_exit) / net_entry
+                    pnl_usd = pnl_pct * (qty * entry_price)
+                    
+                    all_trades.append({
+                        "Trade_Date": row['timestamp'].strftime("%Y-%m-%d"),
+                        "Symbol": sym,
+                        "Side": signal,
+                        "Qty": qty,
+                        "Entry_Price": round(net_entry, 2),
+                        "Exit_Date": next_day['timestamp'].strftime("%Y-%m-%d"),
+                        "Exit_Price": round(net_exit, 2),
+                        "PnL_USD": round(pnl_usd, 2),
+                        "PnL_Percent": round(pnl_pct * 100, 3),
+                        "Duration": "Overnight"
+                    })
+        except Exception as e:
+            print(f"Fehler bei {sym}: {e}")
+
     if not all_trades:
         print("Keine Trades generiert.")
         return
-        
-    tdf = pd.DataFrame(all_trades)
-    win_rate = len(tdf[tdf['PnL%'] > 0]) / len(tdf)
-    avg_trade = tdf['PnL%'].mean()
+
+    # DataFrame erstellen & Sortieren
+    trades_df = pd.DataFrame(all_trades)
+    trades_df = trades_df.sort_values(by="Trade_Date")
+
+    # EXCEL EXPORT MIT ZEITSTEMPEL
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"OneBar_Backtest_{timestamp}.xlsx"
     
-    print("\n--- BACKTEST REPORT: ONE-BAR BREAKOUT ---")
-    print(tabulate(tdf.tail(10), headers='keys', tablefmt='psql'))
-    print(f"\nTotal Trades: {len(tdf)}")
-    print(f"Win Rate:     {win_rate:.2%}")
-    print(f"Avg Trade:    {avg_trade:.3f}%")
-    print(f"Profit Factor: {abs(tdf[tdf['PnL%']>0]['PnL%'].sum() / tdf[tdf['PnL%']<0]['PnL%'].sum()):.2f}")
+    try:
+        # Benötigt openpyxl (pip install openpyxl)
+        trades_df.to_excel(filename, index=False)
+        print(f"\n✅ Excel-Liste erfolgreich erstellt: {filename}")
+    except Exception as e:
+        print(f"\n❌ Excel-Fehler: {e}. Speichere stattdessen als CSV.")
+        trades_df.to_csv(filename.replace(".xlsx", ".csv"), index=False)
+
+    # Zusammenfassung im Terminal
+    win_rate = len(trades_df[trades_df['PnL_USD'] > 0]) / len(trades_df)
+    print(f"Trades gesamt: {len(trades_df)} | Win-Rate: {win_rate:.2%}")
 
 # ==========================================
 # LIVE EXECUTION (ALPACA)
@@ -185,6 +225,9 @@ class OneBarLive:
 
 # ==========================================
 # CLI
+# ==========================================
+# ==========================================
+# KORRIGIERTER CLI ENTRY POINT
 # ==========================================
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="One-Bar Breakout Bot & Backtester")
