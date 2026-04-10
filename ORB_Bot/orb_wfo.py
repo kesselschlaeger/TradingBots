@@ -36,6 +36,8 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
+from orb_strategy import compute_indicators
+
 
 # ---------------------------------------------------------------------------
 # Datenklasse für ein WFO-Fenster
@@ -64,20 +66,49 @@ def _slice_data(
     vix_series: pd.Series,
     start: pd.Timestamp,
     end: pd.Timestamp,
+    warmup_calendar_days: int = 40,
 ) -> Tuple[Dict[str, pd.DataFrame], pd.Series]:
-    """Schneide data_dict und vix_series auf [start, end] zu."""
+    """Schneide data_dict und vix_series auf [start, end] zu.
+
+    Fix #19: Volume_MA / ATR werden für den Slice neu berechnet, um
+    Pre-Sample-Kontamination durch die einmalige Voll-Historien-Berechnung zu
+    vermeiden.  Ein Warmup-Puffer von `warmup_calendar_days` Kalendertagen
+    (Standard 40 ≈ 28 Handelstage) vor `start` stellt sicher, dass der
+    Rolling(20)-Indikator am IS-Start vollständig befüllt ist.
+    """
     sliced: Dict[str, pd.DataFrame] = {}
-    start_day = pd.Timestamp(start).normalize()
-    end_day   = pd.Timestamp(end).normalize()
+    start_day   = pd.Timestamp(start).normalize()
+    end_day     = pd.Timestamp(end).normalize()
+    warmup_start = start_day - pd.Timedelta(days=warmup_calendar_days)
+
     for sym, df in data_dict.items():
         idx = df.index
         if idx.tz is not None:
-            idx = idx.tz_localize(None)
-        idx_days = pd.DatetimeIndex(idx).normalize()
-        mask = (idx_days >= start_day) & (idx_days <= end_day)
-        sub  = df.iloc[np.where(mask)[0]]
+            idx_plain = idx.tz_localize(None)
+        else:
+            idx_plain = idx
+        idx_days = pd.DatetimeIndex(idx_plain).normalize()
+
+        # Warmup-Puffer + eigentliches Slice laden, dann Indikatoren neu berechnen
+        warmup_mask = (idx_days >= warmup_start) & (idx_days <= end_day)
+        df_warmup   = df.iloc[np.where(warmup_mask)[0]].copy()
+        if len(df_warmup) < 30:
+            continue
+
+        # Indikatoren frisch auf dem Warmup-Segment berechnen
+        df_warmup = compute_indicators(df_warmup)
+
+        # Warmup-Puffer wegschneiden → nur [start, end] behalten
+        w_idx = df_warmup.index
+        if w_idx.tz is not None:
+            w_plain = w_idx.tz_localize(None)
+        else:
+            w_plain = w_idx
+        w_days = pd.DatetimeIndex(w_plain).normalize()
+        slice_mask = (w_days >= start_day) & (w_days <= end_day)
+        sub = df_warmup.iloc[np.where(slice_mask)[0]]
         if len(sub) >= 60:
-            sliced[sym] = sub.copy()
+            sliced[sym] = sub
     vix_index = pd.DatetimeIndex(vix_series.index)
     if vix_index.tz is not None:
         vix_index = vix_index.tz_localize(None)
@@ -138,12 +169,13 @@ class WalkForwardOptimizer:
         base_cfg: dict,
         param_grid: Dict[str, List[Any]],
         backtest_func: Callable,
-        is_days:   int = 120,
-        oos_days:  int = 30,
-        step_days: int = 20,
-        metric:    str = "sharpe",
-        verbose:   bool = True,
+        is_days:       int = 120,
+        oos_days:      int = 30,
+        step_days:     int = 20,
+        metric:        str = "sharpe",
+        verbose:       bool = True,
         validation_func: Optional[Callable] = None,
+        min_trades_is: int = 20,
     ):
         if backtest_func is None:
             raise ValueError("backtest_func ist Pflichtparameter.")
@@ -158,6 +190,7 @@ class WalkForwardOptimizer:
         self.verbose         = verbose
         self.backtest_func   = backtest_func
         self.validation_func = validation_func
+        self.min_trades_is   = min_trades_is
         self.windows: List[WFOWindow] = []
 
         # Gemeinsamen Handels-Tagesindex ermitteln.
@@ -237,6 +270,14 @@ class WalkForwardOptimizer:
                 except Exception as e:
                     if self.verbose:
                         print(f"    Combo {i+1}/{n_combos} FEHLER: {e}")
+                    continue
+
+                # Minimum-Trades-Gate: Kombos mit zu wenig IS-Trades erzeugen
+                # Sharpe-Artefakte und liefern im OOS reine Zufallsergebnisse.
+                n_trades_is = int(rep.get("n_trades", 0))
+                if n_trades_is < self.min_trades_is:
+                    if self.verbose and (i + 1) % max(1, n_combos // 5) == 0:
+                        print(f"    {i+1}/{n_combos} combo SKIP (n_trades={n_trades_is} < {self.min_trades_is})")
                     continue
 
                 val = rep.get(self.metric, rep.get("sharpe", -np.inf))

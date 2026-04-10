@@ -258,7 +258,8 @@ def run_orb_backtest(
     positions: Dict[str, dict] = {}       # sym → position-dict
     trades_list: List[dict] = []
     equity_daily: List[dict] = []         # [{"date": timestamp, "equity": float}, ...]
-    peak_equity = capital
+    peak_equity = capital          # wird nach DD-Breaker zurückgesetzt (Circuit-Breaker-Referenz)
+    absolute_peak_equity = capital # wird NIEMALS zurückgesetzt (Kelly DD-Scaling Referenz)
     dd_pause_until = None
     r_multiples: List[float] = []
     holding_bars_list: List[int] = []
@@ -301,16 +302,21 @@ def run_orb_backtest(
         equity = cash + unrealized
         if equity > peak_equity:
             peak_equity = equity
+        if equity > absolute_peak_equity:
+            absolute_peak_equity = equity
 
         # Drawdown Circuit Breaker mit Cooldown statt permanentem Lockout.
         # Fix #15: Berechne current_dd für dynamic_kelly DD-Scaling
+        # Fix #18: Trenne Circuit-Breaker-Peak (peak_equity, wird zurückgesetzt)
+        #          von Kelly-Scaling-Peak (absolute_peak_equity, nie zurückgesetzt).
+        #          So maskiert der Breaker-Reset nicht den tatsächlichen Drawdown
+        #          für das DD-Scaling.
         dd_active = False
-        current_dd = 0.0
+        current_dd = (peak_equity - equity) / (peak_equity + 1e-9)
+        current_dd_kelly = (absolute_peak_equity - equity) / (absolute_peak_equity + 1e-9)
         if dd_pause_until is not None and day <= dd_pause_until:
             dd_active = True
-            current_dd = (peak_equity - equity) / (peak_equity + 1e-9)
         else:
-            current_dd = (peak_equity - equity) / (peak_equity + 1e-9)
             if current_dd >= max_dd:
                 dd_active = True
                 dd_pause_until = day + timedelta(days=max(dd_cooldown_days, 0))
@@ -353,8 +359,32 @@ def run_orb_backtest(
             if orb_range <= 0:
                 continue
 
+            # ORB-kumulatives Volume Ratio (identische Logik wie Live-Bot / compute_orb_volume_ratio).
+            # Summe der ORB-Fenster-Volumina heute vs. Durchschnitt der letzten vol_lb Tage.
+            _orb_start_min = 9 * 60 + 30
+            _orb_end_min   = _orb_start_min + orb_minutes
+            _day_idx_et    = to_et(day_df.index)
+            _day_hhmm      = _day_idx_et.hour * 60 + _day_idx_et.minute
+            _orb_mask      = (_day_hhmm >= _orb_start_min) & (_day_hhmm < _orb_end_min)
+            _today_orb_vol = float(day_df["Volume"][_orb_mask].sum()) if _orb_mask.any() else 0.0
+            _hist_orb_vols: List[float] = []
+            for _pd in [d for d in trading_days if d < day][-(vol_lb):]:
+                _pdf = _extract_day(df_full, _pd)
+                if _pdf is not None and not _pdf.empty:
+                    _pi = to_et(_pdf.index)
+                    _ph = _pi.hour * 60 + _pi.minute
+                    _pm = (_ph >= _orb_start_min) & (_ph < _orb_end_min)
+                    if _pm.any():
+                        _hist_orb_vols.append(float(_pdf["Volume"][_pm].sum()))
+            if _hist_orb_vols:
+                _avg_hist = float(np.mean(_hist_orb_vols))
+                _orb_vol_ratio = _today_orb_vol / _avg_hist if _avg_hist > 0 else 1.0
+            else:
+                _orb_vol_ratio = None  # Fallback auf per-Bar-Logik
+
             # Signals berechnen
-            signals = compute_orb_signals(day_df, orb_high, orb_low, orb_range, cfg)
+            signals = compute_orb_signals(day_df, orb_high, orb_low, orb_range, cfg,
+                                          orb_vol_ratio=_orb_vol_ratio)
 
             # Post-ORB-Bars
             idx_et = day_df.index
@@ -472,7 +502,7 @@ def run_orb_backtest(
                         "trend": trend,
                     }
                     should_trade, qty_factor, overlay_reason = _mit_apply_overlay(
-                        signal, strength, ctx, bars_so_far, cfg, current_dd, vix_val, vix3m_val
+                        signal, strength, ctx, bars_so_far, cfg, current_dd_kelly, vix_val, vix3m_val
                     )
                     if not should_trade:
                         continue
@@ -497,14 +527,24 @@ def run_orb_backtest(
 
                 side = "long" if is_long else "short"
 
+                # Fix #17: Entry-Fill auf Open des nächsten Bars.
+                # Live-Bot scannt erst nach Bar-Close und sendet dann eine Order →
+                # realistischer Fill ist der Open des nachfolgenden Bars, nicht der
+                # Close des Signal-Bars.  Letzter Bar des Tages wird übersprungen.
+                if i + 1 >= len(day_df):
+                    continue
+                next_bar     = day_df.iloc[i + 1]
+                next_open    = float(next_bar["Open"])
+                next_bar_ts  = day_df.index[i + 1]
+
                 # Fix #9: Stop-Loss an ORB-Range statt ATR
                 if side == "long":
-                    entry_p = price * (1 + slippage)
+                    entry_p = next_open * (1 + slippage)
                     stop = calculate_stop("long", entry_p, orb_high, orb_low,
                                          orb_range, sl_r)
                     risk_per_share = entry_p - stop
                 else:
-                    entry_p = price * (1 - slippage)
+                    entry_p = next_open * (1 - slippage)
                     stop = calculate_stop("short", entry_p, orb_high, orb_low,
                                          orb_range, sl_r)
                     risk_per_share = stop - entry_p
@@ -547,7 +587,7 @@ def run_orb_backtest(
                     "lowest": entry_p if side == "short" else entry_p,
                     "bars_held": 0,
                     "entry_date": day,
-                    "entry_ts": bar_ts,
+                    "entry_ts": next_bar_ts,
                     "reason": (
                         f"ORB {'Breakout' if side == 'long' else 'Breakdown'} [{strength:.2f}]"
                         + (f" | {overlay_reason}" if overlay_reason else "")
@@ -555,7 +595,7 @@ def run_orb_backtest(
                 }
 
                 trades_list.append({
-                    "date": bar_ts, "symbol": sym,
+                    "date": next_bar_ts, "symbol": sym,
                     "side": "BUY" if side == "long" else "SHORT",
                     "price": entry_p, "shares": shares,
                     "pnl": 0.0,

@@ -753,6 +753,7 @@ def compute_orb_signals(
     orb_low: float,
     orb_range: float,
     cfg: dict,
+    orb_vol_ratio: Optional[float] = None,
 ) -> pd.DataFrame:
     """
     Signale für alle Bars eines Handelstages (Backtest).
@@ -786,7 +787,12 @@ def compute_orb_signals(
     use_time_decay = bool(cfg.get("use_time_decay_filter", True))
 
     # Volume check
-    if "Volume_Ratio" in day_df.columns:
+    # orb_vol_ratio: ORB-kumulatives Tages-Ratio (Live-Logik, identisch zu compute_orb_volume_ratio).
+    # Per-Bar Volume_Ratio (Rolling-MA) nur als Fallback wenn kein Tages-Ratio übergeben.
+    if orb_vol_ratio is not None:
+        _vol_confirmed = bool(orb_vol_ratio >= vol_mult)
+        vol_ok = pd.Series(_vol_confirmed, index=day_df.index)
+    elif "Volume_Ratio" in day_df.columns:
         vol_ok = day_df["Volume_Ratio"] >= vol_mult
     elif "Volume_MA" in day_df.columns:
         vol_ok = day_df["Volume"] >= vol_mult * day_df["Volume_MA"]
