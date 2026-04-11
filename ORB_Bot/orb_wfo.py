@@ -30,6 +30,8 @@ from __future__ import annotations
 
 import copy
 import itertools
+import math
+from time import perf_counter
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -66,7 +68,7 @@ def _slice_data(
     vix_series: pd.Series,
     start: pd.Timestamp,
     end: pd.Timestamp,
-    warmup_calendar_days: int = 40,
+    warmup_calendar_days: int = 60, # grok hat 80 vorgeschlagen 40,
     vix3m_series: Optional[pd.Series] = None,
 ) -> Tuple[Dict[str, pd.DataFrame], pd.Series, Optional[pd.Series]]:
     """Schneide data_dict, vix_series und vix3m_series auf [start, end] zu.
@@ -147,6 +149,42 @@ def _override_cfg(
     if validation_func is not None:
         return cfg if validation_func(cfg, overrides) else {}
     return cfg
+
+
+def _format_duration(seconds: float) -> str:
+    """Formatiere Sekunden kompakt als h/m/s."""
+    total_seconds = max(0, int(round(seconds)))
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours > 0:
+        return f"{hours}h {minutes:02d}m {secs:02d}s"
+    if minutes > 0:
+        return f"{minutes}m {secs:02d}s"
+    return f"{secs}s"
+
+
+def _build_progress_milestones(
+    total_runs: int,
+    first_report_after: int = 10,
+    max_reports: int = 10,
+) -> List[int]:
+    """Erzeuge bis zu `max_reports` Fortschritts-Milestones ab `first_report_after`."""
+    if total_runs < first_report_after:
+        return []
+
+    available_slots = total_runs - first_report_after + 1
+    report_count = min(max_reports, available_slots)
+    if report_count == 1:
+        return [first_report_after]
+
+    milestones: List[int] = []
+    span = total_runs - first_report_after
+    for i in range(report_count):
+        value = first_report_after + math.floor(i * span / (report_count - 1))
+        if milestones and value <= milestones[-1]:
+            value = milestones[-1] + 1
+        milestones.append(min(value, total_runs))
+    return milestones
 
 
 # ---------------------------------------------------------------------------
@@ -234,7 +272,12 @@ class WalkForwardOptimizer:
         window_n = 0
 
         combos    = _param_combinations(self.param_grid)
-        n_combos  = len(combos)
+        valid_combos = [
+            overrides
+            for overrides in combos
+            if _override_cfg(self.base_cfg, overrides, self.validation_func)
+        ]
+        n_combos  = len(valid_combos)
         total_len = self.is_days + self.oos_days
         est_windows = self.estimated_window_count()
 
@@ -243,8 +286,33 @@ class WalkForwardOptimizer:
                 f"Zu wenige Daten ({n} Tage) für IS({self.is_days})+OOS({self.oos_days})."
             )
 
+        est_runs = est_windows * (n_combos + 1)
+        progress_milestones = _build_progress_milestones(est_runs)
+        progress_reports_done = 0
+        completed_runs = 0
+        timer_started_at = perf_counter()
+
+        def report_timing_progress() -> None:
+            nonlocal progress_reports_done
+            if not self.verbose or progress_reports_done >= len(progress_milestones):
+                return
+            if completed_runs < progress_milestones[progress_reports_done]:
+                return
+
+            elapsed = perf_counter() - timer_started_at
+            avg_per_run = elapsed / max(completed_runs, 1)
+            remaining_runs = max(est_runs - completed_runs, 0)
+            eta_seconds = remaining_runs * avg_per_run
+            progress_reports_done += 1
+            print(
+                f"[WFO] Timer {progress_reports_done}/{len(progress_milestones)} | "
+                f"{completed_runs}/{est_runs} Läufe | "
+                f"Ø {avg_per_run:.2f}s/Run | "
+                f"verstrichen {_format_duration(elapsed)} | "
+                f"Rest ca. {_format_duration(eta_seconds)}"
+            )
+
         if self.verbose:
-            est_runs = est_windows * (n_combos + 1)
             print(
                 f"[WFO] Planung: {n} Handelstage | {est_windows} Fenster | "
                 f"{n_combos} Kombinationen/Fenster | ca. {est_runs} Backtest-Läufe"
@@ -275,13 +343,15 @@ class WalkForwardOptimizer:
             best_params: Dict[str, Any] = {}
             best_is_sharpe = -np.inf
 
-            for i, overrides in enumerate(combos):
-                cfg = _override_cfg(self.base_cfg, overrides, self.validation_func)
-                if not cfg:
-                    continue
+            for i, overrides in enumerate(valid_combos):
+                cfg = _override_cfg(self.base_cfg, overrides)
                 try:
-                    _, rep = self.backtest_func(is_data, is_vix, cfg, vix3m_series=is_vix3m)
+                    _, rep = self.backtest_func(is_data, is_vix, cfg, vix3m_series=is_vix3m, silent=True)
+                    completed_runs += 1
+                    report_timing_progress()
                 except Exception as e:
+                    completed_runs += 1
+                    report_timing_progress()
                     if self.verbose:
                         print(f"    Combo {i+1}/{n_combos} FEHLER: {e}")
                     continue
@@ -322,8 +392,12 @@ class WalkForwardOptimizer:
             oos_cfg = _override_cfg(self.base_cfg, best_params, self.validation_func)
 
             try:
-                _, oos_rep = self.backtest_func(oos_data, oos_vix, oos_cfg, vix3m_series=oos_vix3m)
+                _, oos_rep = self.backtest_func(oos_data, oos_vix, oos_cfg, vix3m_series=oos_vix3m, silent=True)
+                completed_runs += 1
+                report_timing_progress()
             except Exception as e:
+                completed_runs += 1
+                report_timing_progress()
                 if self.verbose:
                     print(f"    OOS-Backtest FEHLER: {e}")
                 cursor += self.step_days

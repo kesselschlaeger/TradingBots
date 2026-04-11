@@ -94,7 +94,8 @@ WFO_PARAM_GRID = {
     "profit_target_r":     [1.5, 2.0, 3.0],
     "stop_loss_r":         [0.75, 1.0, 1.25],
     "volume_multiplier":   [1.0, 1.3, 1.5],
-    "min_signal_strength": [0.15, 0.20, 0.30],
+    "min_signal_strength": [0.15, 0.20, 0.30]
+    #,   "mit_ev_threshold_r":  [0.22, 0.28, 0.35] #erstmal auskommentiert
 }
 # 3 × 3 × 3 × 3 = 81 Kombinationen – überschaubar
 # Nur Parameter die auch im Live-Bot (Alpaca Bracket Orders) wirken.

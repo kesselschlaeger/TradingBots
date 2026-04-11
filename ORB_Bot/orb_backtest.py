@@ -168,6 +168,7 @@ def run_orb_backtest(
     vix_series: pd.Series,
     cfg: dict,
     vix3m_series: Optional[pd.Series] = None,
+    silent: bool = False,
 ) -> Tuple[None, dict]:
     """
     Führe den ORB-Backtest aus (Bar-by-Bar auf 5m-Daten).
@@ -209,7 +210,8 @@ def run_orb_backtest(
     avoid_mon     = bool(cfg.get("avoid_mondays", False))
     eod_close     = cfg.get("eod_close_time", time(15, 27))  # Fix #8
 
-    print("[orb_backtest] Starte Simulation ...")
+    if not silent:
+        print("[orb_backtest] Starte Simulation ...")
 
     # ── Alle einzigartigen Handelstage ermitteln ──────────────────────────
     all_dates = set()
@@ -240,10 +242,11 @@ def run_orb_backtest(
     _dd_scaling = cfg.get('use_dynamic_kelly_dd_scaling', False)
     _vix_ts = cfg.get('use_vix_term_structure', False)
     _mit_overlay = cfg.get('use_mit_probabilistic_overlay', False)
-    print(f"[orb_backtest] MIT-Overlay: {'AN' if _mit_overlay else 'AUS'}"
-          f" | DD-Scaling(#15): {'AN' if _dd_scaling else 'AUS'}"
-          f" | VIX-Regime(#16): {'AN' if _vix_ts else 'AUS'}"
-          f" (VIX3M-Daten: {len(vix3m_dict)} Tage)")
+    if not silent:
+        print(f"[orb_backtest] MIT-Overlay: {'AN' if _mit_overlay else 'AUS'}"
+              f" | DD-Scaling(#15): {'AN' if _dd_scaling else 'AUS'}"
+              f" | VIX-Regime(#16): {'AN' if _vix_ts else 'AUS'}"
+              f" (VIX3M-Daten: {len(vix3m_dict)} Tage)")
 
     # ── Filter-Config ─────────────────────────────────────────────────────
     use_trend  = bool(cfg.get("use_trend_filter", True))
@@ -254,6 +257,24 @@ def run_orb_backtest(
 
     # SPY-Daten für Trendfilter (wird pro Tag gesliced)
     spy_df_full = data_dict.get("SPY")
+
+    # ── Day-Cache: _extract_day einmal pro Symbol vorberechnen ────────────
+    day_cache: Dict[str, Dict] = {}
+    for _sym, _df in data_dict.items():
+        _idx = _df.index
+        if _idx.tz is not None:
+            _idx_et = _idx.tz_convert(ET)
+        else:
+            _idx_et = _idx.tz_localize("UTC").tz_convert(ET)
+        _by_day: Dict = {}
+        for _d, _grp_idx in pd.Series(range(len(_df)), index=_idx_et.date).groupby(level=0):
+            _sub = _df.iloc[_grp_idx.values]
+            if len(_sub) >= 8:
+                _by_day[_d] = _sub
+        day_cache[_sym] = _by_day
+
+    # ── Tag-Index: O(1) Lookup für vorherige Tage ─────────────────────────
+    day_to_idx = {d: i for i, d in enumerate(trading_days)}
 
     # ── Simulation ────────────────────────────────────────────────────────
     cash = capital
@@ -292,9 +313,9 @@ def run_orb_backtest(
         # Equity & DD check
         unrealized = 0.0
         for sym, pos in positions.items():
-            df_sym = data_dict.get(sym)
-            if df_sym is not None and not df_sym.empty:
-                last_p = _last_price_on_day(df_sym, day)
+            _cached = day_cache.get(sym, {}).get(day)
+            if _cached is not None and not _cached.empty:
+                last_p = float(_cached["Close"].iloc[-1])
                 if last_p > 0:
                     if pos["side"] == "long":
                         unrealized += pos["shares"] * last_p
@@ -329,7 +350,7 @@ def run_orb_backtest(
         # ── Trendfilter für den Tag (einmal, nicht pro Symbol) ───────────
         trend = {"bullish": True, "bearish": True}
         if use_trend and spy_df_full is not None:
-            spy_day = _extract_day(spy_df_full, day)
+            spy_day = day_cache.get("SPY", {}).get(day)
             # Verwende letzte ~20 Tage an SPY-Daten für EMA
             if spy_day is not None:
                 spy_idx = spy_df_full.index
@@ -339,22 +360,21 @@ def run_orb_backtest(
                     trend = check_trend_filter(spy_recent, ema_period)
 
         # ── Für jedes Symbol: Tages-5m-Bars verarbeiten ──────────────────
+        _day_idx = day_to_idx[day]
         for sym in symbols:
-            df_full = data_dict[sym]
-            day_df = _extract_day(df_full, day)
+            day_df = day_cache.get(sym, {}).get(day)
             if day_df is None or len(day_df) < 8:
                 continue
 
             # Fix #7: Gap-Filter
-            if use_gap:
-                prev_day_idx = [d for d in trading_days if d < day]
-                if prev_day_idx:
-                    prev = _extract_day(df_full, prev_day_idx[-1])
-                    if prev is not None and not prev.empty and not day_df.empty:
-                        today_open = float(day_df["Open"].iloc[0])
-                        prev_close = float(prev["Close"].iloc[-1])
-                        if not check_gap_filter(today_open, prev_close, max_gap):
-                            continue
+            if use_gap and _day_idx > 0:
+                prev_day = trading_days[_day_idx - 1]
+                prev = day_cache.get(sym, {}).get(prev_day)
+                if prev is not None and not prev.empty and not day_df.empty:
+                    today_open = float(day_df["Open"].iloc[0])
+                    prev_close = float(prev["Close"].iloc[-1])
+                    if not check_gap_filter(today_open, prev_close, max_gap):
+                        continue
 
             # ORB-Levels berechnen
             orb_high, orb_low, orb_range = calculate_orb_levels(day_df, orb_minutes)
@@ -370,8 +390,9 @@ def run_orb_backtest(
             _orb_mask      = (_day_hhmm >= _orb_start_min) & (_day_hhmm < _orb_end_min)
             _today_orb_vol = float(day_df["Volume"][_orb_mask].sum()) if _orb_mask.any() else 0.0
             _hist_orb_vols: List[float] = []
-            for _pd in [d for d in trading_days if d < day][-(vol_lb):]:
-                _pdf = _extract_day(df_full, _pd)
+            _prev_days = trading_days[max(0, _day_idx - vol_lb):_day_idx]
+            for _pd in _prev_days:
+                _pdf = day_cache.get(sym, {}).get(_pd)
                 if _pdf is not None and not _pdf.empty:
                     _pi = to_et(_pdf.index)
                     _ph = _pi.hour * 60 + _pi.minute
@@ -624,7 +645,11 @@ def run_orb_backtest(
         # ── Equity Snapshot (Positionen werden via Fix #8 EOD-Close geschlossen) ──
         eod_unrealized = 0.0
         for sym, pos in positions.items():
-            lp = _last_price_on_day(data_dict.get(sym), day)
+            _cached = day_cache.get(sym, {}).get(day)
+            if _cached is not None and not _cached.empty:
+                lp = float(_cached["Close"].iloc[-1])
+            else:
+                lp = 0.0
             if lp > 0:
                 if pos["side"] == "long":
                     eod_unrealized += pos["shares"] * lp
@@ -685,7 +710,8 @@ def run_orb_backtest(
         report["avg_holding_bars"] = round(np.mean(holding_bars_list), 1)
         report["avg_holding_minutes"] = round(np.mean(holding_bars_list) * 5, 0)
 
-    print(f"[orb_backtest] Simulation abgeschlossen: {len(trades_df)} Trades")
+    if not silent:
+        print(f"[orb_backtest] Simulation abgeschlossen: {len(trades_df)} Trades")
     return None, report
 
 
