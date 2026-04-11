@@ -28,9 +28,11 @@ Nutzung:
 
 from __future__ import annotations
 
-import copy
+
 import itertools
 import math
+import os
+from concurrent.futures import ProcessPoolExecutor
 from time import perf_counter
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -144,8 +146,7 @@ def _override_cfg(
     validation_func=None,
 ) -> dict:
     """Erstelle eine Kopie von base_cfg mit den überschriebenen Werten."""
-    cfg = copy.deepcopy(base_cfg)
-    cfg.update(overrides)
+    cfg = {**base_cfg, **overrides}
     if validation_func is not None:
         return cfg if validation_func(cfg, overrides) else {}
     return cfg
@@ -188,6 +189,53 @@ def _build_progress_milestones(
 
 
 # ---------------------------------------------------------------------------
+# Parallel-Worker für IS-Combo-Evaluation
+# ---------------------------------------------------------------------------
+
+_combo_worker_state: Dict[str, Any] = {}
+
+
+def _init_combo_worker(
+    backtest_func: Any,
+    is_data: Dict[str, Any],
+    is_vix: Any,
+    is_vix3m: Any,
+    base_cfg: dict,
+    metric: str,
+    min_trades_is: int,
+) -> None:
+    """Initializer für Worker-Prozesse – setzt shared state einmalig."""
+    _combo_worker_state.update({
+        'func': backtest_func,
+        'data': is_data,
+        'vix': is_vix,
+        'vix3m': is_vix3m,
+        'base_cfg': base_cfg,
+        'metric': metric,
+        'min_trades': min_trades_is,
+    })
+
+
+def _eval_combo(overrides: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Evaluiere eine Parameterkombination im Worker-Prozess."""
+    s = _combo_worker_state
+    cfg = _override_cfg(s['base_cfg'], overrides)
+    try:
+        _, rep = s['func'](s['data'], s['vix'], cfg,
+                           vix3m_series=s['vix3m'], silent=True)
+    except Exception:
+        return None
+    n_trades = int(rep.get("total_trades", rep.get("n_trades", 0)))
+    if n_trades < s['min_trades']:
+        return None
+    val = rep.get(s['metric'], rep.get("sharpe", -np.inf))
+    if val is None:
+        val = -np.inf
+    sharpe = rep.get("sharpe", -np.inf) or -np.inf
+    return {'overrides': overrides, 'metric_val': float(val), 'sharpe': float(sharpe)}
+
+
+# ---------------------------------------------------------------------------
 # Haupt-Klasse
 # ---------------------------------------------------------------------------
 
@@ -226,6 +274,7 @@ class WalkForwardOptimizer:
         validation_func: Optional[Callable] = None,
         min_trades_is: int = 20,
         vix3m_series: Optional[pd.Series] = None,
+        n_workers: int = 0,
     ):
         if backtest_func is None:
             raise ValueError("backtest_func ist Pflichtparameter.")
@@ -243,6 +292,12 @@ class WalkForwardOptimizer:
         self.validation_func = validation_func
         self.min_trades_is   = min_trades_is
         self.windows: List[WFOWindow] = []
+
+        # Parallelisierung: 0 = auto, 1 = sequential
+        if n_workers <= 0:
+            self._n_workers = max(1, (os.cpu_count() or 4) - 1)
+        else:
+            self._n_workers = n_workers
 
         # Gemeinsamen Handels-Tagesindex ermitteln.
         all_idx = pd.DatetimeIndex([])
@@ -313,9 +368,10 @@ class WalkForwardOptimizer:
             )
 
         if self.verbose:
+            _mode = f"Parallel ({self._n_workers} Worker)" if self._n_workers > 1 else "Sequential"
             print(
                 f"[WFO] Planung: {n} Handelstage | {est_windows} Fenster | "
-                f"{n_combos} Kombinationen/Fenster | ca. {est_runs} Backtest-Läufe"
+                f"{n_combos} Kombinationen/Fenster | ca. {est_runs} Backtest-Läufe | {_mode}"
             )
 
         cursor = 0
@@ -343,36 +399,68 @@ class WalkForwardOptimizer:
             best_params: Dict[str, Any] = {}
             best_is_sharpe = -np.inf
 
-            for i, overrides in enumerate(valid_combos):
-                cfg = _override_cfg(self.base_cfg, overrides)
+            # ---- IS-Combos: Parallel oder Sequential ----------------------
+            _use_parallel = self._n_workers > 1 and n_combos >= 4
+            _is_results: Optional[List] = None
+
+            if _use_parallel:
                 try:
-                    _, rep = self.backtest_func(is_data, is_vix, cfg, vix3m_series=is_vix3m, silent=True)
-                    completed_runs += 1
-                    report_timing_progress()
+                    with ProcessPoolExecutor(
+                        max_workers=min(self._n_workers, n_combos),
+                        initializer=_init_combo_worker,
+                        initargs=(self.backtest_func, is_data, is_vix, is_vix3m,
+                                  self.base_cfg, self.metric, self.min_trades_is),
+                    ) as pool:
+                        _is_results = list(pool.map(_eval_combo, valid_combos))
                 except Exception as e:
-                    completed_runs += 1
-                    report_timing_progress()
                     if self.verbose:
-                        print(f"    Combo {i+1}/{n_combos} FEHLER: {e}")
-                    continue
+                        print(f"    [WFO] Parallel-Fehler, Fallback Sequential: {e}")
+                    _is_results = None
 
-                # Minimum-Trades-Gate: Kombos mit zu wenig IS-Trades erzeugen
-                # Sharpe-Artefakte und liefern im OOS reine Zufallsergebnisse.
-                n_trades_is = int(rep.get("total_trades", rep.get("n_trades", 0)))
-                if n_trades_is < self.min_trades_is:
+            if _is_results is not None:
+                # Parallel-Ergebnisse auswerten
+                completed_runs += n_combos
+                while (progress_reports_done < len(progress_milestones)
+                       and completed_runs >= progress_milestones[progress_reports_done]):
+                    report_timing_progress()
+
+                for r in _is_results:
+                    if r is None:
+                        continue
+                    if r['metric_val'] > best_metric:
+                        best_metric    = r['metric_val']
+                        best_params    = r['overrides']
+                        best_is_sharpe = r['sharpe']
+            else:
+                # Sequential (Fallback oder n_workers=1)
+                for i, overrides in enumerate(valid_combos):
+                    cfg = _override_cfg(self.base_cfg, overrides)
+                    try:
+                        _, rep = self.backtest_func(is_data, is_vix, cfg, vix3m_series=is_vix3m, silent=True)
+                        completed_runs += 1
+                        report_timing_progress()
+                    except Exception as e:
+                        completed_runs += 1
+                        report_timing_progress()
+                        if self.verbose:
+                            print(f"    Combo {i+1}/{n_combos} FEHLER: {e}")
+                        continue
+
+                    n_trades_is = int(rep.get("total_trades", rep.get("n_trades", 0)))
+                    if n_trades_is < self.min_trades_is:
+                        if self.verbose and (i + 1) % max(1, n_combos // 5) == 0:
+                            print(f"    {i+1}/{n_combos} combo SKIP (n_trades={n_trades_is} < {self.min_trades_is})")
+                        continue
+
+                    val = rep.get(self.metric, rep.get("sharpe", -np.inf))
+                    if val is None:
+                        val = -np.inf
                     if self.verbose and (i + 1) % max(1, n_combos // 5) == 0:
-                        print(f"    {i+1}/{n_combos} combo SKIP (n_trades={n_trades_is} < {self.min_trades_is})")
-                    continue
-
-                val = rep.get(self.metric, rep.get("sharpe", -np.inf))
-                if val is None:
-                    val = -np.inf
-                if self.verbose and (i + 1) % max(1, n_combos // 5) == 0:
-                    print(f"    {i+1}/{n_combos} combo, bestes IS {self.metric}={best_metric:.3f}")
-                if float(val) > best_metric:
-                    best_metric    = float(val)
-                    best_params    = overrides
-                    best_is_sharpe = rep.get("sharpe", -np.inf) or -np.inf
+                        print(f"    {i+1}/{n_combos} combo, bestes IS {self.metric}={best_metric:.3f}")
+                    if float(val) > best_metric:
+                        best_metric    = float(val)
+                        best_params    = overrides
+                        best_is_sharpe = rep.get("sharpe", -np.inf) or -np.inf
 
             if not best_params:
                 if self.verbose:

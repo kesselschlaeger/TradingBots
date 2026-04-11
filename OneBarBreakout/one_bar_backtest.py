@@ -241,6 +241,8 @@ def run_obb_backtest(
     if not trading_days:
         raise ValueError("Keine Handelstage gefunden.")
 
+    print(f"  Handelstage: {trading_days[0]} → {trading_days[-1]} ({len(trading_days)} Tage)")
+
     # ── Signale vorberechnen (vektorisiert, schnell) ──────────────────────
     signals_cache: Dict[str, pd.DataFrame] = {}
     for sym, df in data_dict.items():
@@ -249,6 +251,16 @@ def run_obb_backtest(
             signals_cache[sym] = sig_df
         except Exception as e:
             print(f"  [WARN] Signal-Berechnung {sym} fehlgeschlagen: {e}")
+
+    # ── Signal-Diagnostik ─────────────────────────────────────────────────
+    total_buy = total_short = total_hold = 0
+    for sym, sig_df in signals_cache.items():
+        vc = sig_df["signal"].value_counts()
+        total_buy   += int(vc.get("BUY", 0))
+        total_short += int(vc.get("SHORT", 0))
+        total_hold  += int(vc.get("HOLD", 0))
+    print(f"  Vorberechnete Signale: BUY={total_buy}  SHORT={total_short}  "
+          f"HOLD={total_hold}  (über alle {len(signals_cache)} Symbole)")
 
     # ── Simulation ────────────────────────────────────────────────────────
     cash = capital
@@ -336,7 +348,7 @@ def run_obb_backtest(
             r_multiples.append(r_mult)
 
             del positions[sym]
-            del pending_exits[sym]
+            pending_exits.pop(sym, None)  # pop statt del: vermeidet KeyError wenn schon gelöscht
 
         # ── 2. Equity-Snapshot ────────────────────────────────────────────
         pos_value = 0.0
@@ -355,10 +367,11 @@ def run_obb_backtest(
 
         # ── 3. Neue Signale prüfen ────────────────────────────────────────
         trades_today = 0
+        skipped_reasons: Dict[str, str] = {}  # Diagnostik: warum Trades übersprungen
 
         for sym in symbols:
             # Guards
-            if len(positions) + len(pending_exits) >= max_concurrent:
+            if len(positions) >= max_concurrent:
                 break
             if trades_today >= max_daily:
                 break
@@ -371,14 +384,11 @@ def run_obb_backtest(
 
             # Signal für heute (Tag D)
             today_sig = _get_signal_on_day(sig_df, day)
-            # ── TEMPORÄRES DEBUG (danach wieder entfernen) ──
-            if day.year == 2026 and day.month >= 3:
-                print(f"  [DEBUG] {day} {sym}: sig={today_sig}")
-            # ── ENDE DEBUG ──
-            
+
             if today_sig not in ("BUY", "SHORT"):
                 continue
             if today_sig == "SHORT" and not allow_shorts:
+                skipped_reasons[sym] = f"{today_sig} (Shorts deaktiviert)"
                 continue
 
             # Entry: Close von heute (Tag D) → MOC-Order
@@ -409,6 +419,11 @@ def run_obb_backtest(
 
             shares = calculate_obb_position_size(eq, entry_p, cfg, rolling_wr)
             if shares <= 0:
+                skipped_reasons[sym] = (
+                    f"{today_sig} übersprungen: shares=0 "
+                    f"(equity={eq:.2f}, price={entry_p:.2f}, "
+                    f"notional={eq * position_pct:.2f})"
+                )
                 continue
 
             # Cash-Check für Long
@@ -417,6 +432,10 @@ def run_obb_backtest(
                 if cost > cash:
                     shares = int(cash / (entry_p * (1 + commission)))
                     if shares <= 0:
+                        skipped_reasons[sym] = (
+                            f"{today_sig} übersprungen: cash zu niedrig "
+                            f"(cash={cash:.2f}, cost={cost:.2f})"
+                        )
                         continue
 
             # Short Margin-Check (vereinfacht: 50% Margin)
@@ -425,6 +444,10 @@ def run_obb_backtest(
                 if margin_required > cash:
                     shares = int(cash * 2 / (entry_p * (1 + commission)))
                     if shares <= 0:
+                        skipped_reasons[sym] = (
+                            f"{today_sig} übersprungen: margin zu niedrig "
+                            f"(cash={cash:.2f}, margin_req={margin_required:.2f})"
+                        )
                         continue
 
             # Cash-Update
@@ -465,6 +488,11 @@ def run_obb_backtest(
                 "signal":    today_sig,
             })
             trades_today += 1
+
+        # ── Diagnostik: übersprungene Signale loggen ──────────────────────
+        if skipped_reasons and trades_today == 0:
+            for sym_s, reason_s in skipped_reasons.items():
+                print(f"  [SKIP] {day} {sym_s}: {reason_s}")
 
     # ── Offene Positionen am Ende schließen ───────────────────────────────
     for sym, pos in list(positions.items()):
