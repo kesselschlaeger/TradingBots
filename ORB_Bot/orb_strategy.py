@@ -51,12 +51,12 @@ ORB_DEFAULT_CONFIG: dict = {
     "symbols_watchonly": ["ES=F", "NQ=F", "MES=F", "MNQ=F"],
 
     # ── ORB-Parameter ──────────────────────────────────────────────────────
-    "opening_range_minutes": 30,
-    "orb_breakout_multiplier": 1.0,   # Fix #1: wird jetzt angewendet
-    "volume_multiplier": 1.5,# nach WFO 1.1, ## vorher 1.3,
+    "opening_range_minutes": 15, # vorher 30, aber Backtest schlecht
+    "orb_breakout_multiplier": 1.15, ## wegen schlechter Backtest vorher 1.0,   # Fix #1: wird jetzt angewendet
+    "volume_multiplier": 1.7,# nach WFO 1.1, ## vorher 1.3,
     # Reduziert, damit frische Breakouts nicht als zu "schwach" verworfen werden.
     # Qualität kommt primär über Volume-/Trend-/Gap-Filter.
-    "min_signal_strength": 0.15,# nach WFO 0.20, # wurde als viel zu niedrig angesehen (Default auf 0.20–0.30) 0.08, #
+    "min_signal_strength": 0.25, #erhöhe wieder wegen schlechter Backtests 0.15,# nach WFO 0.20, # wurde als viel zu niedrig angesehen (Default auf 0.20–0.30) 0.08, #
 
     # ── Risiko-Management ──────────────────────────────────────────────────
     "risk_per_trade":    0.005,
@@ -66,10 +66,10 @@ ORB_DEFAULT_CONFIG: dict = {
     "max_position_value_pct": 0.25,
 
     # ── Trade-Management (R-basiert) ───────────────────────────────────────
-    "profit_target_r": 3.0, # nach WFO 2.0,
-    "stop_loss_r":     1.25, # nach WFO 1.0,
+    "profit_target_r": 2.0, # nach WFO 2.0, ##Der Take-Profit wird auf +3R gesetzt – also dreimal so groß wie der initiale Risiko-Betrag (R).
+    "stop_loss_r":     1.0, # nach WFO 1.0,
     "trail_after_r":   1.0,
-    "trail_distance_r": 0.5,
+    "trail_distance_r": 0.6,
     # Trailing Stop im Backtest: Default AUS, weil Alpaca-Bracket-Orders
     # nur fixe SL/TP unterstützen. Nur aktivieren wenn Live-Bot eigenes
     # Trailing-Stop-Management implementiert.
@@ -120,7 +120,7 @@ ORB_DEFAULT_CONFIG: dict = {
     "use_mit_probabilistic_overlay": True, ##aktiviert nach Einbau False,
     "mit_ev_threshold_r": 0.30, #Empfehlung von Claude  in Config auf etwas wie 0.30R anheben – dann entspricht es wp > 0.44. #0.08,
     "mit_kelly_fraction": 0.50,
-    "mit_min_strength": 0.15,
+    "mit_min_strength": 0.25,
     "mit_calibration_offset": 0.0317,# 0.0,  # Fix #14: Kalibrierungsoffset (aus calibrate_win_probability aufgerufen mit: orb_bot_v2.py --mode calibrate)
     # ── DD-Scaling für dynamic Kelly (Fix #15) ────────────────────────────
     "use_dynamic_kelly_dd_scaling": True,  # vorher false # Aktiviere DD-basiertes Sizing

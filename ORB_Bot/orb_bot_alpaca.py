@@ -37,6 +37,8 @@ import numpy as np
 import pytz
 import time as time_module
 
+from orb_broker_base import BrokerBase
+
 # Shared strategy module – Single Source of Truth
 from orb_strategy import (
     ORB_DEFAULT_CONFIG,
@@ -157,6 +159,13 @@ ORB_CONFIG.update({
     # Kleine Debug-Ausgabe im Scanmodus (z.B. für Volume-/Signal-Validierung)
     "debug_scan_enabled": True,
     "debug_scan_symbols": ["SPY", "QQQ"], ##Verwendung von [] dann wird jedes Symbol ins Debug geschrieben
+
+    # Interactive Brokers Verbindungsparameter
+    "ibkr_host":      "192.168.188.93",
+    "ibkr_port":      4002,        # 4002 = Gateway Paper, 4001 = Gateway Live
+    "ibkr_client_id": 1,
+    "ibkr_bot_id":    "ORB",
+    "ibkr_paper":     True,
 })
 
 ORB_CONFIG["data_dir"].mkdir(exist_ok=True)
@@ -210,7 +219,7 @@ def _build_client_order_id(symbol: str, side: str, overlay_reason: str = "") -> 
 
 # ============================= AlpacaClient =================================
 
-class AlpacaClient:
+class AlpacaClient(BrokerBase):
     """
     Zentrale Klasse für alle Alpaca-Interaktionen.
     Trennt sauber zwischen Datenabruf (StockHistoricalDataClient)
@@ -815,20 +824,22 @@ class ORB_Bot:
     über Bracket-Orders → _manage_position() entfällt im Live-Betrieb.
     """
 
-    def __init__(self, config: dict = None, alpaca: AlpacaClient = None):
+    def __init__(self, config: dict = None,
+                 alpaca: "BrokerBase" = None, broker: "BrokerBase" = None):
         self.cfg       = config or ORB_CONFIG
-        self.alpaca    = alpaca
+        self.broker    = broker or alpaca
+        self.alpaca    = self.broker   # Backward-Compat-Alias – NICHT entfernen!
         self.portfolio = ORBPortfolio(self.cfg)
         self.strategy  = ORBStrategy(self.cfg)
         self.reports_dir = self.cfg["data_dir"] / "reports"
         self.reports_dir.mkdir(exist_ok=True)
-        
+
         # Event-Log-Verzeichnis sicherstellen
         self.event_log_dir = self.cfg["daily_event_log_dir"]
         self.event_log_dir.mkdir(exist_ok=True)
         self._eod_done_date: Optional[str] = None  # Verhindert mehrfaches EOD-Close pro Tag
 
-        mode = "PAPER" if (alpaca and alpaca.paper) else "LIVE" if alpaca else "KEIN ALPACA"
+        mode = "PAPER" if (self.alpaca and self.alpaca.paper) else "LIVE" if self.alpaca else "KEIN BROKER"
         print(f"ORB_Bot  Modus={mode}  Symbole={len(self.cfg['symbols'])}"
               f"  Shorts={'an' if self.cfg.get('allow_shorts') else 'aus'}")
 
@@ -1452,9 +1463,49 @@ def _build_alpaca_client(cfg: dict) -> Optional["AlpacaClient"]:
     return AlpacaClient(api_key=key, secret_key=secret, paper=paper, data_feed=feed)
 
 
+def _build_ibkr_client(cfg: dict) -> Optional["BrokerBase"]:
+    """
+    Erstellt einen IBKRClient aus Umgebungsvariablen.
+    Gibt None zurück bei Fehler (keine Exception).
+    """
+    try:
+        from orb_bot_ibkr import IBKRClient, IBKR_AVAILABLE
+    except ImportError:
+        IBKR_AVAILABLE = False
+
+    if not IBKR_AVAILABLE:
+        print("[ERROR] ib_insync fehlt – pip install ib_insync", file=sys.stderr)
+        return None
+
+    host      = os.getenv("IBKR_HOST", cfg.get("ibkr_host", "192.168.188.93"))
+    port      = int(os.getenv("IBKR_PORT", str(cfg.get("ibkr_port", 4002))))
+    client_id = int(os.getenv("IBKR_CLIENT_ID", str(cfg.get("ibkr_client_id", 1))))
+    bot_id    = os.getenv("IBKR_BOT_ID", cfg.get("ibkr_bot_id", "ORB"))
+
+    paper_env = os.getenv("IBKR_PAPER", "").lower()
+    if paper_env == "false":
+        paper = False
+    elif paper_env == "true":
+        paper = True
+    else:
+        paper = cfg.get("ibkr_paper", True)
+
+    try:
+        return IBKRClient(
+            host=host, port=port, client_id=client_id,
+            paper=paper, bot_id=bot_id,
+        )
+    except Exception as e:
+        print(f"[ERROR] IBKR-Verbindung fehlgeschlagen: {e}\n"
+              f"  Ist TWS/Gateway gestartet auf {host}:{port}?\n"
+              f"  Gateway Paper: Port 4002 | Gateway Live: Port 4001",
+              file=sys.stderr)
+        return None
+
+
 def main():
     parser = argparse.ArgumentParser(
-        description="ORB_Bot – Opening Range Breakout (Alpaca Edition)",
+        description="ORB_Bot – Opening Range Breakout",
         formatter_class=argparse.RawTextHelpFormatter,
     )
     parser.add_argument(
@@ -1474,7 +1525,11 @@ def main():
     parser.add_argument("--shorts", action="store_true",
                         help="Short-Signale aktivieren (Margin-Konto erforderlich)")
     parser.add_argument("--live", action="store_true",
-                        help="Live-Modus – überschreibt APCA_PAPER=true")
+                        help="Live-Modus – überschreibt Paper-Einstellung")
+    parser.add_argument(
+        "--broker", choices=["alpaca", "ibkr"], default=None,
+        help="Broker-Auswahl (überschreibt ORB_BROKER Env-Variable)"
+    )
     mit_group = parser.add_mutually_exclusive_group()
     mit_group.add_argument("--mit-overlay", dest="mit_overlay", action="store_true",
                            help="MIT probabilistic overlay aktivieren")
@@ -1483,12 +1538,15 @@ def main():
     parser.set_defaults(mit_overlay=None)
     args = parser.parse_args()
 
+    # ── Broker-Auswahl bestimmen ─────────────────────────────────────────────
+    broker_name = (args.broker or os.getenv("ORB_BROKER", "alpaca")).lower()
+
     # ── .env-Datei wählen und laden ──────────────────────────────────────────
-    # --mit-overlay gesetzt  → .env_ORB_MIT
-    # sonst (kein Flag oder --no-mit-overlay) → .env_ORB
-    # Fallback-Kette: gewünschte Datei → .env (Kompatibilität mit bisheriger Konfiguration)
     if _DOTENV_AVAILABLE:
-        _env_name = ".env_ORB_MIT" if args.mit_overlay is True else ".env_ORB"
+        if broker_name == "ibkr":
+            _env_name = ".env_ORB_MIT_IBKR" if args.mit_overlay is True else ".env_ORB_IBKR"
+        else:
+            _env_name = ".env_ORB_MIT" if args.mit_overlay is True else ".env_ORB"
         _base = Path(__file__).parent
         _candidates = [_base / _env_name, _base / ".env"]
         _loaded = False
@@ -1510,36 +1568,44 @@ def main():
         cfg["allow_shorts"] = True
     if args.live:
         cfg["alpaca_paper"] = False
+        cfg["ibkr_paper"] = False
         os.environ["APCA_PAPER"] = "false"
+        os.environ["IBKR_PAPER"] = "false"
     if args.mit_overlay is not None:
         cfg["use_mit_probabilistic_overlay"] = args.mit_overlay
 
-    alpaca = _build_alpaca_client(cfg)
+    # ── Broker instanziieren ─────────────────────────────────────────────────
+    if broker_name == "ibkr":
+        broker = _build_ibkr_client(cfg)
+    else:
+        broker = _build_alpaca_client(cfg)
 
     # ── Modus-Ausführung ─────────────────────────────────────────────────────
 
     if args.mode == "scan":
-        bot    = ORB_Bot(config=cfg, alpaca=alpaca)
+        bot    = ORB_Bot(config=cfg, broker=broker)
         result = bot.run_orb_scan()
         print(json.dumps(result, indent=2, default=str))
 
     elif args.mode == "status":
-        bot    = ORB_Bot(config=cfg, alpaca=alpaca)
+        bot    = ORB_Bot(config=cfg, broker=broker)
         status = bot.get_status()
         print(json.dumps(status, indent=2, default=str))
 
     elif args.mode == "eod":
-        if alpaca:
-            bot = ORB_Bot(config=cfg, alpaca=alpaca)
+        if broker:
+            bot = ORB_Bot(config=cfg, broker=broker)
             result = bot._perform_eod_close()
             print(json.dumps(result, indent=2, default=str))
         else:
-            print("[ERROR] Kein Alpaca-Client – EOD nicht möglich", file=sys.stderr)
+            print("[ERROR] Kein Broker-Client – EOD nicht möglich", file=sys.stderr)
             sys.exit(1)
 
     elif args.mode == "backtest":
         cfg["initial_capital"] = 10000.0
-        _run_canonical_backtest(cfg, alpaca,
+        # Backtest nutzt immer Alpaca für Datenabruf (IBKR hat Pacing-Limits)
+        data_client = _build_alpaca_client(cfg)
+        _run_canonical_backtest(cfg, data_client,
                                 start_date=args.start, end_date=args.end)
 
 

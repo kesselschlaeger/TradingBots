@@ -81,7 +81,7 @@ def load_orb_data(
     symbols: List[str],
     start_date: str,
     end_date: str,
-    alpaca=None,
+    alpaca=None,  # BrokerBase | AlpacaClient – nur fetch_bars_bulk() wird genutzt
 ) -> Tuple[Dict[str, pd.DataFrame], pd.Series, pd.Series]:
     """
     Lade 5-Minuten-Bars für alle Symbole + VIX/VIX3M-Tageskurse.
