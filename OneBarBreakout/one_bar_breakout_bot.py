@@ -66,6 +66,7 @@ from one_bar_breakout_strategy import (
     obb_metrics_summary,
     to_et,
 )
+from obb_broker_base import OBBBrokerBase
 
 # ── .env Support ──────────────────────────────────────────────────────────
 try:
@@ -119,6 +120,13 @@ OBB_CONFIG.update({
     # Debug: welche Symbole detailliert loggen
     "debug_scan_enabled":         True,
     "debug_scan_symbols":         ["SPY", "QQQ"],
+
+    # IBKR-spezifische Defaults
+    "ibkr_host":                  "192.168.188.93",
+    "ibkr_port":                  4002,
+    "ibkr_client_id":             1,
+    "ibkr_bot_id":                "OBB",
+    "ibkr_paper":                 True,
 })
 
 OBB_CONFIG["data_dir"].mkdir(exist_ok=True)
@@ -141,7 +149,7 @@ def send_telegram(message: str) -> None:
 
 # ============================= AlpacaClient (Daily Extension) ===============
 
-class AlpacaClientDaily:
+class AlpacaClientDaily(OBBBrokerBase):
     """
     Alpaca-Client spezialisiert für TÄGLICHE Bars (Daily TimeFrame).
 
@@ -558,16 +566,18 @@ class OneBarBreakoutBot:
       Deshalb: 2 separate Scheduler-Jobs.
     """
 
-    def __init__(self, config: dict = None, alpaca: AlpacaClientDaily = None):
+    def __init__(self, config: dict = None,
+                 alpaca: "OBBBrokerBase" = None, broker: "OBBBrokerBase" = None):
         self.cfg       = config or OBB_CONFIG
-        self.alpaca    = alpaca
+        self.broker    = broker or alpaca
+        self.alpaca    = self.broker   # Backward-Compat-Alias – NICHT entfernen!
         self.portfolio = OBBPortfolio(self.cfg)
         self.reports_dir = self.cfg["data_dir"] / "reports"
         self.reports_dir.mkdir(exist_ok=True)
         self.event_log_dir = self.cfg["daily_event_log_dir"]
         self.event_log_dir.mkdir(exist_ok=True)
 
-        mode = "PAPER" if (alpaca and alpaca.paper) else "LIVE" if alpaca else "KEIN ALPACA"
+        mode = "PAPER" if (self.alpaca and self.alpaca.paper) else "LIVE" if self.alpaca else "KEIN BROKER"
         print(f"\nOneBarBreakoutBot  Modus={mode}  Symbole={len(self.cfg['symbols'])}")
         print(f"  Lookback: {self.cfg.get('lookback_bars', 50)} Bars  "
               f"Shorts: {'AN' if self.cfg.get('allow_shorts') else 'AUS'}")
@@ -993,9 +1003,38 @@ def _build_alpaca_client(cfg: dict) -> Optional[AlpacaClientDaily]:
     return AlpacaClientDaily(api_key=key, secret_key=secret, paper=paper, data_feed=feed)
 
 
+def _build_ibkr_client(cfg: dict) -> Optional["OBBBrokerBase"]:
+    """IBKRClientDaily aus orb_bot_ibkr erzeugen (lazy-import)."""
+    try:
+        from obb_bot_ibkr import IBKRClientDaily
+    except ImportError as e:
+        print(f"[ERROR] obb_bot_ibkr nicht ladbar: {e}", file=sys.stderr)
+        return None
+
+    host      = os.getenv("IBKR_HOST",      cfg.get("ibkr_host", "192.168.188.93"))
+    port      = int(os.getenv("IBKR_PORT",   str(cfg.get("ibkr_port", 4002))))
+    client_id = int(os.getenv("IBKR_CLIENT_ID", str(cfg.get("ibkr_client_id", 1))))
+    bot_id    = os.getenv("IBKR_BOT_ID",     cfg.get("ibkr_bot_id", "OBB"))
+
+    paper_env = os.getenv("IBKR_PAPER", "").lower()
+    if paper_env == "false":
+        paper = False
+    elif paper_env == "true":
+        paper = True
+    else:
+        paper = cfg.get("ibkr_paper", True)
+
+    try:
+        return IBKRClientDaily(host=host, port=port, client_id=client_id,
+                               bot_id=bot_id, paper=paper)
+    except Exception as e:
+        print(f"[ERROR] IBKR-Verbindung fehlgeschlagen: {e}", file=sys.stderr)
+        return None
+
+
 def main():
     parser = argparse.ArgumentParser(
-        description="One-Bar-Breakout Bot – 50-Bar High/Low Momentum (Alpaca Edition)",
+        description="One-Bar-Breakout Bot – 50-Bar High/Low Momentum",
         formatter_class=argparse.RawTextHelpFormatter,
     )
     parser.add_argument(
@@ -1009,6 +1048,8 @@ def main():
             "backtest  – Historischen Backtest starten"
         ),
     )
+    parser.add_argument("--broker", choices=["alpaca", "ibkr"], default=None,
+                        help="Broker-Backend (Standard: alpaca, per ORB_BROKER überschreibbar)")
     parser.add_argument("--start", default="2024-01-01",
                         help="Backtest-Start (YYYY-MM-DD)")
     parser.add_argument("--end", default=None,
@@ -1025,10 +1066,16 @@ def main():
                         help="Kelly-basiertes Sizing aktivieren")
     args = parser.parse_args()
 
+    broker_name = (args.broker or os.getenv("OBB_BROKER", "alpaca")).lower()
+
     # .env laden
     if _DOTENV_AVAILABLE:
         _base = Path(__file__).parent
-        for candidate in [_base / ".env_OBB", _base / ".env"]:
+        if broker_name == "ibkr":
+            candidates = [_base / ".env_OBB_IBKR"]
+        else:
+            candidates = [_base / ".env_OBB", _base / ".env"]
+        for candidate in candidates:
             if candidate.exists():
                 _load_dotenv(candidate, override=True)
                 print(f"[Config] Umgebung geladen: {candidate.name}")
@@ -1045,27 +1092,33 @@ def main():
     if args.kelly:
         cfg["use_kelly_sizing"] = True
 
-    alpaca = _build_alpaca_client(cfg)
+    # Broker instanziieren
+    if broker_name == "ibkr":
+        broker = _build_ibkr_client(cfg)
+    else:
+        broker = _build_alpaca_client(cfg)
 
     if args.mode == "scan":
-        bot    = OneBarBreakoutBot(config=cfg, alpaca=alpaca)
+        bot    = OneBarBreakoutBot(config=cfg, broker=broker)
         result = bot.run_scan()
         print(json.dumps(result, indent=2, default=str))
 
     elif args.mode == "morning":
-        bot    = OneBarBreakoutBot(config=cfg, alpaca=alpaca)
+        bot    = OneBarBreakoutBot(config=cfg, broker=broker)
         result = bot.run_morning_exits()
         print(json.dumps(result, indent=2, default=str))
 
     elif args.mode == "status":
-        bot    = OneBarBreakoutBot(config=cfg, alpaca=alpaca)
+        bot    = OneBarBreakoutBot(config=cfg, broker=broker)
         status = bot.get_status()
         print(json.dumps(status, indent=2, default=str))
 
     elif args.mode == "backtest":
         cfg["initial_capital"] = 10_000.0
+        # Backtest nutzt immer Alpaca für Daten (IBKR-Pacing zu langsam)
+        data_client = _build_alpaca_client(cfg) if broker_name == "ibkr" else broker
         run_obb_backtest_mode(
-            cfg, alpaca,
+            cfg, data_client,
             start_date=args.start,
             end_date=args.end,
             compare_with_orb=args.compare_orb,

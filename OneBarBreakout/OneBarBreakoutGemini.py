@@ -15,11 +15,13 @@ Aufruf Live Exit:  python OneBarBreakoutGemini.py --mode exit
 
 import os
 import argparse
+import sys
 import pandas as pd
 import numpy as np
 import pytz
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Dict, List, Optional
 from tabulate import tabulate # Für saubere Reports: pip install tabulate
 
 # Matplotlib (optional)
@@ -50,12 +52,15 @@ try:
 except ImportError:
     ALPACA_AVAILABLE = False
 
+from obb_broker_base import OBBBrokerBase
+
 ## für eine lokale Ausführung ohne OpenClaw-Umgebung können die
 try:
-    from dotenv import load_dotenv
-    load_dotenv()
+    from dotenv import load_dotenv as _load_dotenv
+    _DOTENV_AVAILABLE = True
 except ImportError:
-    pass
+    _load_dotenv = None
+    _DOTENV_AVAILABLE = False
 
 ET = pytz.timezone("America/New_York")
 
@@ -97,6 +102,12 @@ CONFIG = {
     "kelly_lookback_trades": 50,        # Trades für Rolling Win-Rate
     "kelly_min_trades": 20,             # Minimum Trades before using Kelly
     "kelly_payoff_ratio": 1.0,          # Geschätztes Win/Loss-Verhältnis
+    # ── IBKR-spezifische Defaults ─────────────────────────────────────
+    "ibkr_host":                  "192.168.188.93",
+    "ibkr_port":                  4002,
+    "ibkr_client_id":             1,
+    "ibkr_bot_id":                "OBBG",
+    "ibkr_paper":                 True,
 }
 
 # ==========================================
@@ -471,14 +482,171 @@ def run_backtest(symbols, start_date, end_date):
         print(f"  Plot: {plot_path}")
 
 # ==========================================
-# LIVE EXECUTION (ALPACA)
+# BROKER-WRAPPER FÜR GEMINI (OBBBrokerBase)
+# ==========================================
+
+class AlpacaClientGemini(OBBBrokerBase):
+    """Alpaca-Wrapper, der OBBBrokerBase erfüllt – für OneBarBreakoutGemini."""
+
+    def __init__(self, api_key: str, secret_key: str,
+                 paper: bool = True, data_feed: str = "iex"):
+        if not ALPACA_AVAILABLE:
+            raise RuntimeError("alpaca-py fehlt – pip install alpaca-py")
+        self.paper     = paper
+        self.data_feed = data_feed
+        self.trading   = TradingClient(api_key=api_key, secret_key=secret_key, paper=paper)
+        self.data      = StockHistoricalDataClient(api_key=api_key, secret_key=secret_key)
+        mode = "PAPER" if paper else "LIVE"
+        print(f"[AlpacaGemini] Verbunden  Modus={mode}  Feed={data_feed}")
+
+    def fetch_daily_bars(self, symbol: str, days: int = 80) -> pd.DataFrame:
+        try:
+            req = StockBarsRequest(
+                symbol_or_symbols=symbol,
+                timeframe=TimeFrame.Day,
+                start=datetime.now(pytz.UTC) - timedelta(days=days * 2),
+                end=datetime.now(pytz.UTC),
+                feed=self.data_feed,
+            )
+            bars = self.data.get_stock_bars(req)
+            if bars.df.empty:
+                return pd.DataFrame()
+            df = (bars.df.loc[symbol].copy()
+                  if isinstance(bars.df.index, pd.MultiIndex) else bars.df.copy())
+            return df.tail(days)
+        except Exception as e:
+            print(f"[AlpacaGemini] Datenfehler {symbol}: {e}")
+            return pd.DataFrame()
+
+    def fetch_daily_bars_bulk(self, symbols: List[str], start: str,
+                              end: str) -> Dict[str, pd.DataFrame]:
+        result: Dict[str, pd.DataFrame] = {}
+        start_utc = datetime.strptime(start, "%Y-%m-%d").replace(tzinfo=pytz.UTC)
+        end_utc = datetime.strptime(end, "%Y-%m-%d").replace(tzinfo=pytz.UTC)
+        for sym in symbols:
+            try:
+                req = StockBarsRequest(
+                    symbol_or_symbols=sym,
+                    timeframe=TimeFrame.Day,
+                    start=start_utc, end=end_utc,
+                    feed=self.data_feed,
+                )
+                bars = self.data.get_stock_bars(req)
+                if not bars.df.empty:
+                    df = (bars.df.loc[sym].copy()
+                          if isinstance(bars.df.index, pd.MultiIndex) else bars.df.copy())
+                    result[sym] = df
+            except Exception as e:
+                print(f"[AlpacaGemini] Bulk-Fehler {sym}: {e}")
+        return result
+
+    def get_equity(self) -> float:
+        try:
+            return float(self.trading.get_account().equity)
+        except Exception:
+            return 0.0
+
+    def get_cash(self) -> float:
+        try:
+            return float(self.trading.get_account().cash)
+        except Exception:
+            return 0.0
+
+    def get_buying_power(self) -> float:
+        try:
+            return float(self.trading.get_account().buying_power)
+        except Exception:
+            return 0.0
+
+    def sync_positions(self) -> Dict[str, dict]:
+        try:
+            positions = self.trading.get_all_positions()
+            return {
+                p.symbol: {
+                    "symbol": p.symbol, "qty": float(p.qty),
+                    "side": p.side.value,
+                    "entry": float(p.avg_entry_price),
+                    "current_price": float(p.current_price),
+                    "unrealized_pnl": float(p.unrealized_pl),
+                    "market_value": float(p.market_value),
+                } for p in positions
+            }
+        except Exception:
+            return {}
+
+    def is_shortable(self, symbol: str) -> bool:
+        try:
+            asset = self.trading.get_asset(symbol)
+            return bool(asset.shortable) and bool(asset.easy_to_borrow)
+        except Exception:
+            return False
+
+    def get_open_orders(self) -> List[dict]:
+        try:
+            orders = self.trading.get_orders(GetOrdersRequest(status="open", limit=50))
+            return [{"id": str(o.id), "symbol": o.symbol,
+                     "side": o.side.value, "qty": float(o.qty),
+                     "status": o.status.value} for o in orders]
+        except Exception:
+            return []
+
+    def place_market_order(self, symbol: str, qty: int, side: str,
+                           time_in_force: str = "day",
+                           client_order_id: str = "") -> dict:
+        try:
+            tif_map = {"day": TimeInForce.DAY, "opg": TimeInForce.OPG,
+                       "cls": TimeInForce.CLS, "gtc": TimeInForce.GTC}
+            tif = tif_map.get(time_in_force.lower(), TimeInForce.DAY)
+            order_side = OrderSide.BUY if side.lower() == "buy" else OrderSide.SELL
+            req_kwargs = dict(symbol=symbol, qty=qty, side=order_side, time_in_force=tif)
+            if client_order_id:
+                req_kwargs["client_order_id"] = client_order_id[:128]
+            r = self.trading.submit_order(MarketOrderRequest(**req_kwargs))
+            return {"ok": True, "id": str(r.id), "symbol": symbol,
+                    "qty": qty, "side": side, "status": r.status.value}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def cancel_all_orders(self) -> None:
+        try:
+            self.trading.cancel_orders()
+        except Exception as e:
+            print(f"[AlpacaGemini] Stornierungsfehler: {e}")
+
+    def close_position(self, symbol: str) -> dict:
+        try:
+            self.trading.close_position(symbol)
+            return {"ok": True}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def close_all_positions(self) -> dict:
+        try:
+            positions = self.sync_positions()
+            if not positions:
+                return {"ok": True, "closed": []}
+            self.trading.close_all_positions(cancel_orders=True)
+            return {"ok": True, "closed": list(positions.keys())}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+
+# ==========================================
+# LIVE EXECUTION
 # ==========================================
 class OneBarLive:
-    def __init__(self):
-        key = os.getenv("APCA_API_KEY_ID")
-        sec = os.getenv("APCA_API_SECRET_KEY")
-        self.trading = TradingClient(key, sec, paper=CONFIG["alpaca_paper"])
-        self.data = StockHistoricalDataClient(key, sec)
+    def __init__(self, broker: "OBBBrokerBase" = None):
+        if broker:
+            self.broker = broker
+        else:
+            # Legacy: direkter Alpaca-Zugriff
+            key = os.getenv("APCA_API_KEY_ID")
+            sec = os.getenv("APCA_API_SECRET_KEY")
+            self.broker = AlpacaClientGemini(
+                api_key=key, secret_key=sec,
+                paper=CONFIG.get("alpaca_paper", True),
+                data_feed=CONFIG.get("alpaca_data_feed", "iex"),
+            )
         self.trades_history = self._load_trades_history()
 
     def _load_trades_history(self):
@@ -502,133 +670,164 @@ class OneBarLive:
     def execute_entries(self):
         """Wird um 15:58 ET aufgerufen (kurz vor Close)"""
         print(f"[{datetime.now()}] Starte Entry-Scan...")
-        try:
-            account = self.trading.get_account()
-            equity = float(account.equity)
-        except Exception as e:
-            status = getattr(getattr(e, "response", None), "status_code", None)
-            if status in (401, 403):
-                print("[ERROR] Alpaca Auth fehlgeschlagen (401/403). Prüfe APCA_API_KEY_ID/APCA_API_SECRET_KEY und Paper/Live-Mode.")
-            else:
-                print(f"[ERROR] Account konnte nicht geladen werden: {e}")
+        equity = self.broker.get_equity()
+        if equity <= 0:
+            print("[ERROR] Equity konnte nicht geladen werden.")
             return
-        
+
         # Lade aktuelle Win-Rate aus Historical Trades
         rolling_wr = compute_rolling_win_rate(
             self.trades_history,
             lookback=int(CONFIG.get("kelly_lookback_trades", 50)),
             min_trades=int(CONFIG.get("kelly_min_trades", 20)))
-        
+
         for sym in CONFIG["symbols"]:
             # Hole letzte 60 Bars (um 50 sicher zu haben)
-            req = StockBarsRequest(
-                symbol_or_symbols=sym,
-                timeframe=TimeFrame.Day,
-                start=datetime.now()-timedelta(days=100),
-                feed=CONFIG.get("alpaca_data_feed", "iex")
-            )
-
-            try:
-                bars_df = self.data.get_stock_bars(req).df
-            except Exception as e:
-                status = getattr(getattr(e, "response", None), "status_code", None)
-                if status in (401, 403):
-                    # Einmaliger Fallback: falls Feed nicht erlaubt, auf IEX zurückfallen
-                    if CONFIG.get("alpaca_data_feed", "iex").lower() != "iex":
-                        print(f"[WARN] {sym}: Feed '{CONFIG.get('alpaca_data_feed')}' nicht erlaubt. Fallback auf IEX.")
-                        try:
-                            req_fallback = StockBarsRequest(
-                                symbol_or_symbols=sym,
-                                timeframe=TimeFrame.Day,
-                                start=datetime.now()-timedelta(days=100),
-                                feed="iex"
-                            )
-                            bars_df = self.data.get_stock_bars(req_fallback).df
-                        except Exception as e2:
-                            print(f"[ERROR] {sym}: Alpaca Datenabruf fehlgeschlagen (auch mit IEX): {e2}")
-                            continue
-                    else:
-                        print(f"[ERROR] {sym}: Alpaca Auth/Permission-Fehler beim Datenabruf (401/403): {e}")
-                        continue
-                else:
-                    print(f"[WARN] {sym}: Datenabruf fehlgeschlagen: {e}")
-                    continue
-
-            if bars_df is None or bars_df.empty:
-                print(f"[WARN] {sym}: Keine Tagesdaten erhalten.")
-                continue
-
-            try:
-                bars = bars_df.loc[sym]
-            except Exception:
-                print(f"[WARN] {sym}: Symbol nicht im Daten-Response enthalten.")
-                continue
-
-            if bars is None or len(bars) < CONFIG["lookback"] + 1:
+            df_raw = self.broker.fetch_daily_bars(sym, days=100)
+            if df_raw is None or df_raw.empty or len(df_raw) < CONFIG["lookback"] + 1:
                 print(f"[WARN] {sym}: Zu wenige Bars für Lookback={CONFIG['lookback']}.")
                 continue
 
-            df = apply_strategy_logic(bars, CONFIG["lookback"])
-            
+            df = apply_strategy_logic(df_raw, CONFIG["lookback"])
+
             last_row = df.iloc[-1]
             side = None
-            if last_row['long_signal']: side = OrderSide.BUY
-            elif last_row['short_signal'] and CONFIG["allow_shorts"]: side = OrderSide.SELL
-            
+            if last_row['long_signal']:
+                side = "buy"
+            elif last_row['short_signal'] and CONFIG["allow_shorts"]:
+                side = "sell"
+
             if side:
-                # Nutze Kelly Sizing mit historischer Win-Rate
                 qty = calculate_position_size_kelly(equity, last_row['close'], CONFIG, rolling_wr)
                 if qty > 0:
-                    order = MarketOrderRequest(symbol=sym, qty=qty, side=side, time_in_force=TimeInForce.DAY)
-                    self.trading.submit_order(order)
+                    order = self.broker.place_market_order(
+                        symbol=sym, qty=qty, side=side, time_in_force="day",
+                    )
                     wr_str = f" (WR={rolling_wr*100:.1f}%)" if rolling_wr else ""
-                    print(f"ORDER GESENDET: {side} {qty} {sym}{wr_str}")
+                    if order.get("ok"):
+                        print(f"ORDER GESENDET: {side.upper()} {qty} {sym}{wr_str}")
+                    else:
+                        print(f"ORDER FEHLER: {sym} – {order.get('error', '?')}")
 
     def execute_exits(self):
         """Wird um 09:30 ET aufgerufen (Market Open)"""
         print(f"[{datetime.now()}] Schließe alle Overnight-Positionen...")
-        positions = self.trading.get_all_positions()
-        for pos in positions:
+        positions = self.broker.sync_positions()
+        for sym in list(positions.keys()):
             # Wir schließen nur, was in unserer Symbol-Liste ist
-            if pos.symbol in CONFIG["symbols"]:
-                self.trading.close_position(pos.symbol)
-                print(f"EXIT: {pos.symbol} geschlossen.")
+            if sym in CONFIG["symbols"]:
+                result = self.broker.close_position(sym)
+                if result.get("ok"):
+                    print(f"EXIT: {sym} geschlossen.")
+                else:
+                    print(f"EXIT FEHLER: {sym} – {result.get('error', '?')}")
+
+# ==========================================
+# BROKER-BUILDER
+# ==========================================
+
+def _build_alpaca_client_gemini(cfg: dict) -> Optional[AlpacaClientGemini]:
+    if not ALPACA_AVAILABLE:
+        print("[ERROR] alpaca-py fehlt – pip install alpaca-py", file=sys.stderr)
+        return None
+    key    = os.getenv("APCA_API_KEY_ID")
+    secret = os.getenv("APCA_API_SECRET_KEY")
+    if not key or not secret:
+        print("[ERROR] APCA_API_KEY_ID / APCA_API_SECRET_KEY nicht gesetzt.", file=sys.stderr)
+        return None
+    paper_env = os.getenv("APCA_PAPER", "").lower()
+    if paper_env == "false":
+        paper = False
+    elif paper_env == "true":
+        paper = True
+    else:
+        paper = cfg.get("alpaca_paper", True)
+    feed = os.getenv("APCA_DATA_FEED", cfg.get("alpaca_data_feed", "iex"))
+    return AlpacaClientGemini(api_key=key, secret_key=secret, paper=paper, data_feed=feed)
+
+
+def _build_ibkr_client_gemini(cfg: dict) -> Optional["OBBBrokerBase"]:
+    try:
+        from obb_bot_ibkr import IBKRClientDaily
+    except ImportError as e:
+        print(f"[ERROR] obb_bot_ibkr nicht ladbar: {e}", file=sys.stderr)
+        return None
+    host      = os.getenv("IBKR_HOST",      cfg.get("ibkr_host", "192.168.188.93"))
+    port      = int(os.getenv("IBKR_PORT",   str(cfg.get("ibkr_port", 4002))))
+    client_id = int(os.getenv("IBKR_CLIENT_ID", str(cfg.get("ibkr_client_id", 1))))
+    bot_id    = os.getenv("IBKR_BOT_ID",     cfg.get("ibkr_bot_id", "OBBG"))
+    paper_env = os.getenv("IBKR_PAPER", "").lower()
+    if paper_env == "false":
+        paper = False
+    elif paper_env == "true":
+        paper = True
+    else:
+        paper = cfg.get("ibkr_paper", True)
+    try:
+        return IBKRClientDaily(host=host, port=port, client_id=client_id,
+                               bot_id=bot_id, paper=paper)
+    except Exception as e:
+        print(f"[ERROR] IBKR-Verbindung fehlgeschlagen: {e}", file=sys.stderr)
+        return None
+
 
 # ==========================================
 # CLI
 # ==========================================
-# ==========================================
-# KORRIGIERTER CLI ENTRY POINT
-# ==========================================
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="One-Bar Breakout Bot & Backtester")
-    
+    parser = argparse.ArgumentParser(description="One-Bar Breakout Bot & Backtester (Gemini)")
+
     # Pflicht-Modus
     parser.add_argument("--mode", choices=["backtest", "entry", "exit"], required=True,
                         help="backtest: Simulation | entry: Kauf vor Close | exit: Verkauf bei Open")
-    
+    parser.add_argument("--broker", choices=["alpaca", "ibkr"], default=None,
+                        help="Broker-Backend (Standard: alpaca, per OBB_BROKER überschreibbar)")
+
     # Optionale Datums-Argumente für den Backtest
-    parser.add_argument("--start", type=str, default="2024-01-01", 
+    parser.add_argument("--start", type=str, default="2024-01-01",
                         help="Startdatum für Backtest (YYYY-MM-DD)")
-    parser.add_argument("--end", type=str, default=datetime.now().strftime("%Y-%m-%d"), 
+    parser.add_argument("--end", type=str, default=datetime.now().strftime("%Y-%m-%d"),
                         help="Enddatum für Backtest (YYYY-MM-DD)")
     parser.add_argument("--no-shorts", action="store_true",
                         help="Short-Signale deaktivieren (nur Longs)")
-    
+
     args = parser.parse_args()
+
+    broker_name = (args.broker or os.getenv("OBB_BROKER", "alpaca")).lower()
+
+    # .env laden
+    if _DOTENV_AVAILABLE:
+        _base = Path(__file__).parent
+        if broker_name == "ibkr":
+            candidates = [_base / ".env_OBB_IBKR"]
+        else:
+            candidates = [_base / ".env_OBB", _base / ".env"]
+        for candidate in candidates:
+            if candidate.exists():
+                _load_dotenv(candidate, override=True)
+                print(f"[Config] Umgebung geladen: {candidate.name}")
+                break
 
     if args.no_shorts:
         CONFIG["allow_shorts"] = False
 
+    # Broker instanziieren (für entry/exit)
+    broker = None
+    if args.mode in ("entry", "exit"):
+        if broker_name == "ibkr":
+            broker = _build_ibkr_client_gemini(CONFIG)
+        else:
+            broker = _build_alpaca_client_gemini(CONFIG)
+
     if args.mode == "backtest":
-        # Wir nutzen die Symbole aus der CONFIG oben im Skript
+        # Backtest nutzt immer direkte Alpaca-SDK-Aufrufe (unverändert)
         print(f"Starte Backtest von {args.start} bis {args.end}...")
         run_backtest(CONFIG["symbols"], args.start, args.end)
-        
+
     elif args.mode == "entry":
-        bot = OneBarLive()
+        bot = OneBarLive(broker=broker)
         bot.execute_entries()
-        
+
     elif args.mode == "exit":
-        bot = OneBarLive()
+        bot = OneBarLive(broker=broker)
         bot.execute_exits()
