@@ -320,8 +320,12 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="End-Datum (YYYY-MM-DD, Standard: heute)")
     p.add_argument("--symbols", "-s", nargs="+", default=None,
                    help="Symbole überschreiben")
-    p.add_argument("--shorts", action="store_true",
-                   help="Short-Trades aktivieren")
+    short_group = p.add_mutually_exclusive_group()
+    short_group.add_argument("--shorts", dest="shorts", action="store_true",
+                             help="Short-Trades aktivieren")
+    short_group.add_argument("--no-shorts", dest="shorts", action="store_false",
+                             help="Short-Trades deaktivieren (Standard)")
+    p.set_defaults(shorts=False)
     mit_group = p.add_mutually_exclusive_group()
     mit_group.add_argument("--mit-overlay", dest="mit_overlay", action="store_true",
                            help="MIT probabilistic overlay aktivieren")
@@ -348,8 +352,7 @@ def main() -> None:
         args.end = dt.now().strftime("%Y-%m-%d")
 
     cfg = copy.deepcopy(ORB_CONFIG)
-    if args.shorts:
-        cfg["allow_shorts"] = True
+    cfg["allow_shorts"] = bool(args.shorts)
     if args.mit_overlay is not None:
         cfg["use_mit_probabilistic_overlay"] = args.mit_overlay
     symbols = args.symbols or cfg["symbols"]
