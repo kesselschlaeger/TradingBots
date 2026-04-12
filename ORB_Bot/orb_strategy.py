@@ -53,10 +53,10 @@ ORB_DEFAULT_CONFIG: dict = {
     # ── ORB-Parameter ──────────────────────────────────────────────────────
     "opening_range_minutes": 30,
     "orb_breakout_multiplier": 1.0,   # Fix #1: wird jetzt angewendet
-    "volume_multiplier": 1.1, ## vorher 1.3,
+    "volume_multiplier": 1.5,# nach WFO 1.1, ## vorher 1.3,
     # Reduziert, damit frische Breakouts nicht als zu "schwach" verworfen werden.
     # Qualität kommt primär über Volume-/Trend-/Gap-Filter.
-    "min_signal_strength": 0.20, # wurde als viel zu niedrig angesehen (Default auf 0.20–0.30) 0.08, #
+    "min_signal_strength": 0.15,# nach WFO 0.20, # wurde als viel zu niedrig angesehen (Default auf 0.20–0.30) 0.08, #
 
     # ── Risiko-Management ──────────────────────────────────────────────────
     "risk_per_trade":    0.005,
@@ -66,8 +66,8 @@ ORB_DEFAULT_CONFIG: dict = {
     "max_position_value_pct": 0.25,
 
     # ── Trade-Management (R-basiert) ───────────────────────────────────────
-    "profit_target_r": 2.0,
-    "stop_loss_r":     1.0,
+    "profit_target_r": 3.0, # nach WFO 2.0,
+    "stop_loss_r":     1.25, # nach WFO 1.0,
     "trail_after_r":   1.0,
     "trail_distance_r": 0.5,
     # Trailing Stop im Backtest: Default AUS, weil Alpaca-Bracket-Orders
