@@ -1530,6 +1530,10 @@ def main():
         "--broker", choices=["alpaca", "ibkr"], default=None,
         help="Broker-Auswahl (überschreibt ORB_BROKER Env-Variable)"
     )
+    parser.add_argument(
+        "--client-id", dest="client_id", type=int, default=None,
+        help="IBKR Client-ID (Integer, überschreibt IBKR_CLIENT_ID Env-Variable)"
+    )
     mit_group = parser.add_mutually_exclusive_group()
     mit_group.add_argument("--mit-overlay", dest="mit_overlay", action="store_true",
                            help="MIT probabilistic overlay aktivieren")
@@ -1571,6 +1575,9 @@ def main():
         cfg["ibkr_paper"] = False
         os.environ["APCA_PAPER"] = "false"
         os.environ["IBKR_PAPER"] = "false"
+    if args.client_id is not None:
+        cfg["ibkr_client_id"] = args.client_id
+        os.environ["IBKR_CLIENT_ID"] = str(args.client_id)
     if args.mit_overlay is not None:
         cfg["use_mit_probabilistic_overlay"] = args.mit_overlay
 
