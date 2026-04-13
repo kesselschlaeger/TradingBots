@@ -12,6 +12,7 @@ Umgebungsvariablen:
     IBKR_CLIENT_ID   – Eindeutige Client-ID (Standard: 1)
     IBKR_PAPER       – "true"/"false" (Standard: true)
     IBKR_BOT_ID      – Eindeutiger Bot-Name für Multi-Instanz-Betrieb (Standard: ORB)
+    order_prefix     – Optionaler Präfix für orderRef (via --order-prefix CLI, Standard: "")
 """
 
 import json

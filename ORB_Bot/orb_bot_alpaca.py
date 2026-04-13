@@ -829,10 +829,13 @@ class ORB_Bot:
     """
 
     def __init__(self, config: dict = None,
-                 alpaca: "BrokerBase" = None, broker: "BrokerBase" = None):
+                 alpaca: "BrokerBase" = None, broker: "BrokerBase" = None,
+                 data_client: "BrokerBase" = None):
         self.cfg       = config or ORB_CONFIG
         self.broker    = broker or alpaca
         self.alpaca    = self.broker   # Backward-Compat-Alias – NICHT entfernen!
+        # data_client: für Kursdaten (fetch_bars). Wenn None → self.broker wird genutzt.
+        self._data     = data_client or self.broker
         self.portfolio = ORBPortfolio(self.cfg)
         self.strategy  = ORBStrategy(self.cfg)
         self.reports_dir = self.cfg["data_dir"] / "reports"
@@ -1050,8 +1053,8 @@ class ORB_Bot:
 
         # Fix #5: SPY-Daten für Trendfilter vorladen
         spy_df = None
-        if self.alpaca and self.cfg.get("use_trend_filter", True):
-            spy_df = self.alpaca.fetch_bars("SPY", days=5)
+        if self._data and self.cfg.get("use_trend_filter", True):
+            spy_df = self._data.fetch_bars("SPY", days=5)
             if not spy_df.empty:
                 spy_df = compute_indicators(spy_df)
 
@@ -1087,7 +1090,7 @@ class ORB_Bot:
                 print(f"  {sym}: max_concurrent_positions ({max_concurrent}) erreicht – übersprungen")
                 continue
 
-            df = (self.alpaca.fetch_bars(sym, days=2) if self.alpaca
+            df = (self._data.fetch_bars(sym, days=2) if self._data
                   else pd.DataFrame())
             if df.empty:
                 print(f"  {sym}: keine Daten von Alpaca erhalten")
@@ -1097,14 +1100,14 @@ class ORB_Bot:
                 continue
 
             # Fix #4: Freshness-Check – bei stale data Trade blocken, nicht nur warnen
-            if self.alpaca and not self.alpaca.check_bar_freshness(df, max_delay):
+            if self._data and not self._data.check_bar_freshness(df, max_delay):
                 print(f"  {sym}: STALE DATA – übersprungen")
                 self._log_event("STALE_DATA", "Bar zu alt – Trade blockiert", sym,
                                 {"max_delay_min": max_delay})
                 continue
             # Freshness-Check: Daten zu alt → Symbol überspringen wenn block_on_stale=True
-            if self.alpaca:
-                data_fresh = self.alpaca.check_bar_freshness(df, max_delay)
+            if self._data:
+                data_fresh = self._data.check_bar_freshness(df, max_delay)
                 if not data_fresh:
                     msg = (f"  {sym}: Daten zu alt (>{max_delay} Min.) – "
                            f"Trade übersprungen. "
@@ -1596,25 +1599,27 @@ def main():
 
     # ── Broker instanziieren ─────────────────────────────────────────────────
     if broker_name == "ibkr":
-        broker = _build_ibkr_client(cfg)
+        broker      = _build_ibkr_client(cfg)
+        data_client = _build_alpaca_client(cfg)   # Kursdaten immer via Alpaca
     else:
-        broker = _build_alpaca_client(cfg)
+        broker      = _build_alpaca_client(cfg)
+        data_client = None                         # broker übernimmt beides
 
     # ── Modus-Ausführung ─────────────────────────────────────────────────────
 
     if args.mode == "scan":
-        bot    = ORB_Bot(config=cfg, broker=broker)
+        bot    = ORB_Bot(config=cfg, broker=broker, data_client=data_client)
         result = bot.run_orb_scan()
         print(json.dumps(result, indent=2, default=str))
 
     elif args.mode == "status":
-        bot    = ORB_Bot(config=cfg, broker=broker)
+        bot    = ORB_Bot(config=cfg, broker=broker, data_client=data_client)
         status = bot.get_status()
         print(json.dumps(status, indent=2, default=str))
 
     elif args.mode == "eod":
         if broker:
-            bot = ORB_Bot(config=cfg, broker=broker)
+            bot = ORB_Bot(config=cfg, broker=broker, data_client=data_client)
             result = bot._perform_eod_close()
             print(json.dumps(result, indent=2, default=str))
         else:

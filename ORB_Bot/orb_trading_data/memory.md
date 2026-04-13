@@ -72,3 +72,7 @@
 
 **2026-04-10 17:05** SPY SHORT 11 @ 678.82 | SL 680.53 | TP 675.39 | OrderID 70ad0bd9-76e7-4ef3-9cfd-4265e8d1adfb (ORB Breakdown: 678.82 < 680.20 +Vol 4.0x)
 
+**2026-04-13 14:05** MSFT BUY 19 @ 377.45 | SL 374.04 | TP 384.28 | OrderID ef078ffb-707b-471b-914d-bdfa0d0a2ec9 (ORB Breakout: 377.45 > 374.51)
+
+**2026-04-13 14:05** META BUY 11 @ 632.68 | SL 626.94 | TP 644.16 | OrderID 5901499f-3651-433a-8cf2-5811ea593b5a (ORB Breakout: 632.68 > 630.29 +Vol 1.8x)
+
