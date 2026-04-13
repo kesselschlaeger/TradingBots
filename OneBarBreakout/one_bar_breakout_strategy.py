@@ -45,7 +45,22 @@ OBB_DEFAULT_CONFIG: dict = {
     # ── Symbole ────────────────────────────────────────────────────────────
     "symbols": [
         #"SPY", "QQQ", "IWM", "DIA","NVDA", "TSLA", "AMD", "AVGO","AAPL", "MSFT", "META", "AMZN","PLTR", "GOOGL", "NFLX",
-        "ORCL","NOW","TSM","INTC"
+        #"ORCL","NOW","TSM","INTC"
+        "SOXL", #winrate 100
+        "SMCI", #winrate 83
+        "RKLB", #winrate 100
+        "TQQQ", ##winrate 96
+        "PLTR",
+        "INTC",
+        "HOOD", #--winrate100
+        "MSTR",
+        "SNDK", #--winrate100
+        "MU",
+        "WBD", #--winrate100
+        "AVGO", #--winrate100
+        "NFLX",# vorübergehend
+        # zweite Reihe
+        "AMD", "MU","WBD","COIN","MRNA","UPST","MRVL","CCL","F","VRT","APP","NCLH","VST",
                 ],
     #"symbols": ["SPY", "QQQ", "IWM", "TSLA", "NVDA", "AAPL", "AMD"], ##für Vergleich mit Gemini-Implementierung (gleiche Symbole)
 
@@ -76,7 +91,7 @@ OBB_DEFAULT_CONFIG: dict = {
 
     # ── Risiko-Guards ─────────────────────────────────────────────────────
     "max_daily_trades":          3,
-    "max_concurrent_positions":  3,
+    "max_concurrent_positions":  10,
 
     # ── Kosten (realistisch für Backtest) ─────────────────────────────────
     "commission_pct": 0.00005,   # 0.5 Basispunkte je Seite

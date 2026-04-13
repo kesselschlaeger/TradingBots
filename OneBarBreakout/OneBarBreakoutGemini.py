@@ -75,6 +75,7 @@ CONFIG = {
         "SMCI", #winrate 83
         "RKLB", #winrate 100
         "TQQQ", ##winrate 96
+        "PLTR",
         "INTC",
         "HOOD", #--winrate100
         "MSTR",
@@ -83,7 +84,8 @@ CONFIG = {
         "WBD", #--winrate100
         "AVGO", #--winrate100
         "NFLX",# vorübergehend
-
+        # zweite Reihe
+        "AMD", "MU","WBD","COIN","MRNA","UPST","MRVL","CCL","F","VRT","APP","NCLH","VST",
         # vom Universal Selector bestimmt
         #"ORCL","NOW","TSM"
 

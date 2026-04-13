@@ -254,10 +254,12 @@ class IBKRClientDaily(OBBBrokerBase):
         elif "Date" in df.columns:
             df = df.set_index("Date")
 
-        if df.index.tzinfo is None:
-            df.index = df.index.tz_localize(pytz.UTC)
-        else:
-            df.index = df.index.tz_convert(pytz.UTC)
+        # Timezone-Handling für DatetimeIndex (nicht Timestamp)
+        if hasattr(df.index, 'tz'):
+            if df.index.tz is None:
+                df.index = df.index.tz_localize(pytz.UTC)
+            else:
+                df.index = df.index.tz_convert(pytz.UTC)
 
         keep = [c for c in ["Open", "High", "Low", "Close", "Volume"]
                 if c in df.columns]
@@ -269,7 +271,7 @@ class IBKRClientDaily(OBBBrokerBase):
         self._ensure_connected()
         try:
             for v in self.ib.accountValues():
-                if v.tag == "NetLiquidation" and v.currency == "USD":
+                if v.tag == "NetLiquidation":
                     return float(v.value)
             return 0.0
         except Exception as e:
@@ -280,7 +282,7 @@ class IBKRClientDaily(OBBBrokerBase):
         self._ensure_connected()
         try:
             for v in self.ib.accountValues():
-                if v.tag == "TotalCashValue" and v.currency == "USD":
+                if v.tag == "TotalCashValue":
                     return float(v.value)
             return 0.0
         except Exception as e:
@@ -291,11 +293,12 @@ class IBKRClientDaily(OBBBrokerBase):
         self._ensure_connected()
         try:
             for v in self.ib.accountValues():
-                if v.tag == "BuyingPower" and v.currency == "USD":
+                if v.tag == "BuyingPower":
                     return float(v.value)
             return 0.0
         except Exception as e:
             print(f"[IBKR-OBB] get_buying_power() Fehler: {e}", file=sys.stderr)
+            return 0.0
             return 0.0
 
     # ── Positionen & Orders ─────────────────────────────────────────────────

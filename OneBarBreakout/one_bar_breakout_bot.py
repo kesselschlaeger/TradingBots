@@ -577,6 +577,18 @@ class OneBarBreakoutBot:
         self.event_log_dir = self.cfg["daily_event_log_dir"]
         self.event_log_dir.mkdir(exist_ok=True)
 
+        # Wenn ein Broker verbunden ist: echten Equity-Wert abholen und Portfolio + Config aktualisieren
+        if self.broker:
+            try:
+                equity = self.broker.get_equity()
+                if equity > 0:
+                    self.cfg["initial_capital"] = equity
+                    self.portfolio.data["cash"] = equity
+                    self.portfolio.save()
+                    print(f"  ✓ Equity vom Broker geholt: ${equity:,.2f}")
+            except Exception as e:
+                print(f"  [WARN] Equity vom Broker nicht abrufbar: {e}")
+
         mode = "PAPER" if (self.alpaca and self.alpaca.paper) else "LIVE" if self.alpaca else "KEIN BROKER"
         print(f"\nOneBarBreakoutBot  Modus={mode}  Symbole={len(self.cfg['symbols'])}")
         print(f"  Lookback: {self.cfg.get('lookback_bars', 50)} Bars  "
