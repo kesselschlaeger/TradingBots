@@ -45,14 +45,17 @@ ET = pytz.timezone("US/Eastern")
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _build_ibkr_order_ref(bot_id: str, symbol: str, side: str,
-                          overlay_reason: str = "") -> str:
+                          overlay_reason: str = "", prefix: str = "") -> str:
     """
     Baut einen orderRef-String für IBKR (max 50 Zeichen).
-    Format: BOT_ID|SYMBOL|SIDE|MMDD-HHMM[|overlay_kurz]
+    Format: [PREFIX|]BOT_ID|SYMBOL|SIDE|MMDD-HHMM[|overlay_kurz]
+    Ist der String zu lang, wird von rechts gekürzt.
     """
     now_et = datetime.now(ET)
     ts = now_et.strftime("%m%d-%H%M")
     base = f"{bot_id}|{symbol}|{side}|{ts}"
+    if prefix:
+        base = f"{prefix}|{base}"
     if overlay_reason:
         remaining = 50 - len(base) - 1  # -1 für Trennzeichen
         if remaining > 3:
@@ -76,7 +79,8 @@ class IBKRClient(BrokerBase):
 
     def __init__(self, host: str = "192.168.188.93", port: int = 4002,
                  client_id: int = 1, paper: bool = True,
-                 bot_id: str = "ORB", data_dir: Optional[Path] = None):
+                 bot_id: str = "ORB", data_dir: Optional[Path] = None,
+                 order_prefix: str = ""):
         if not IBKR_AVAILABLE:
             raise RuntimeError("ib_insync fehlt – pip install ib_insync")
 
@@ -85,6 +89,7 @@ class IBKRClient(BrokerBase):
         self._port = port
         self._client_id = client_id
         self._bot_id = bot_id.upper()[:8]
+        self._order_prefix = order_prefix
 
         self._data_dir = Path(data_dir) if data_dir else (
             Path(__file__).parent / "orb_trading_data"
@@ -464,7 +469,7 @@ class IBKRClient(BrokerBase):
 
             order_ref = _build_ibkr_order_ref(
                 self._bot_id, symbol, "BUY",
-                client_order_id or ""
+                client_order_id or "", self._order_prefix
             )
 
             # Parent Order – Market Buy
@@ -545,7 +550,7 @@ class IBKRClient(BrokerBase):
 
             order_ref = _build_ibkr_order_ref(
                 self._bot_id, symbol, "SHORT",
-                client_order_id or ""
+                client_order_id or "", self._order_prefix
             )
 
             # Parent Order – Market Sell (Short-Entry)
@@ -660,7 +665,7 @@ class IBKRClient(BrokerBase):
                 close_action = "SELL" if side == "long" else "BUY"
                 close_order = MarketOrder(close_action, qty)
                 close_order.orderRef = _build_ibkr_order_ref(
-                    self._bot_id, sym, "CLOSE"
+                    self._bot_id, sym, "CLOSE", "", self._order_prefix
                 )
 
                 self.ib.placeOrder(contract, close_order)

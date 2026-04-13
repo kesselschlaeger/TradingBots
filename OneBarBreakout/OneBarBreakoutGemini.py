@@ -70,7 +70,7 @@ CONFIG = {
     "symbols": [
         #"SPY", "QQQ", "IWM", "DIA", "NVDA", "TSLA", "AMD", "AVGO", "AAPL", "MSFT", "META", "AMZN", "PLTR", "GOOGL", "NFLX"
         
-"""        
+
         "SOXL", #winrate 100
         "SMCI", #winrate 83
         "RKLB", #winrate 100
@@ -81,10 +81,11 @@ CONFIG = {
         "SNDK", #--winrate100
         "MU",
         "WBD", #--winrate100
-        "AVGO" #--winrate100
-"""        
+        "AVGO", #--winrate100
+        "NFLX",# vorübergehend
+
         # vom Universal Selector bestimmt
-        "ORCL","NOW","TSM"
+        #"ORCL","NOW","TSM"
 
             ],
     "lookback": 50,

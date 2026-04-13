@@ -44,9 +44,9 @@ ET = pytz.timezone("America/New_York")
 OBB_DEFAULT_CONFIG: dict = {
     # ── Symbole ────────────────────────────────────────────────────────────
     "symbols": [
-        "SPY", "QQQ", "IWM", "DIA","NVDA", "TSLA", "AMD", "AVGO","AAPL", "MSFT", "META", "AMZN","PLTR", "GOOGL", "NFLX",
-        #"ORCL","NOW","TSM"
-    ],
+        #"SPY", "QQQ", "IWM", "DIA","NVDA", "TSLA", "AMD", "AVGO","AAPL", "MSFT", "META", "AMZN","PLTR", "GOOGL", "NFLX",
+        "ORCL","NOW","TSM","INTC"
+                ],
     #"symbols": ["SPY", "QQQ", "IWM", "TSLA", "NVDA", "AAPL", "AMD"], ##für Vergleich mit Gemini-Implementierung (gleiche Symbole)
 
     # ── Kern-Strategie-Parameter (exakt nach Original) ────────────────────

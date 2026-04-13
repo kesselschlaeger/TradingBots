@@ -186,21 +186,25 @@ def send_telegram(message: str) -> None:
         print(f"[Telegram] {e}")
 
 
-def _build_client_order_id(symbol: str, side: str, overlay_reason: str = "") -> str:
+def _build_client_order_id(symbol: str, side: str, overlay_reason: str = "",
+                           prefix: str = "") -> str:
     """
     Erzeugt eine lesbare client_order_id ≤ 128 Zeichen für Alpaca.
 
-    Format ohne MIT-Overlay:  "ORB|SPY|BUY|2026-04-08 14:30 ET"
-    Format mit MIT-Overlay:   "ORB|SPY|BUY|2026-04-08 14:30 ET|P=0.82|EV=+0.15R|Kelly=0.75x"
+    Format ohne MIT-Overlay:  "[PREFIX|]ORB|SPY|BUY|2026-04-08 14:30 ET"
+    Format mit MIT-Overlay:   "[PREFIX|]ORB|SPY|BUY|2026-04-08 14:30 ET|P=0.82|EV=+0.15R|Kelly=0.75x"
 
     Bei aktivem MIT-Overlay enthält die ID die komplette Signalbewertung
     (Win-Probability, Expected-Value in R, Kelly-Faktor) aus apply_mit_overlay().
     side: "BUY" oder "SHORT"
+    Ist der String zu lang, wird von rechts gekürzt.
     """
     side_str = "BUY" if side.upper() == "BUY" else "SHORT"
     now_et = datetime.now(pytz.UTC).astimezone(ET)
     ts = now_et.strftime("%Y-%m-%d %H:%M ET")
     base = f"ORB|{symbol}|{side_str}|{ts}"
+    if prefix:
+        base = f"{prefix}|{base}"
     if overlay_reason:
         # overlay_reason Beispiel: "MIT Overlay: P=0.82 EV=+0.15R Kelly=0.75x"
         # Präfix entfernen und Leerzeichen als Trennzeichen durch | ersetzen
@@ -1267,7 +1271,8 @@ class ORB_Bot:
             return None
 
         # Lesbare client_order_id mit Signalinfos für Alpaca-Dashboard (max 128 Zeichen)
-        client_order_id = _build_client_order_id(sym, "BUY", overlay_reason)
+        client_order_id = _build_client_order_id(sym, "BUY", overlay_reason,
+                                                  self.cfg.get("order_prefix", ""))
 
         order = self.alpaca.place_long_bracket(sym, qty, stop, target,
                                                client_order_id=client_order_id) if self.alpaca else {"ok": True, "id": client_order_id}
@@ -1325,7 +1330,8 @@ class ORB_Bot:
             return None
 
         # Lesbare client_order_id mit Signalinfos für Alpaca-Dashboard (max 128 Zeichen)
-        client_order_id = _build_client_order_id(sym, "SHORT", overlay_reason)
+        client_order_id = _build_client_order_id(sym, "SHORT", overlay_reason,
+                                                  self.cfg.get("order_prefix", ""))
 
         order = self.alpaca.place_short_bracket(sym, qty, stop, target,
                                                 client_order_id=client_order_id) if self.alpaca else {"ok": True, "id": client_order_id}
@@ -1494,6 +1500,7 @@ def _build_ibkr_client(cfg: dict) -> Optional["BrokerBase"]:
         return IBKRClient(
             host=host, port=port, client_id=client_id,
             paper=paper, bot_id=bot_id,
+            order_prefix=cfg.get("order_prefix", ""),
         )
     except Exception as e:
         print(f"[ERROR] IBKR-Verbindung fehlgeschlagen: {e}\n"
@@ -1533,6 +1540,10 @@ def main():
     parser.add_argument(
         "--client-id", dest="client_id", type=int, default=None,
         help="IBKR Client-ID (Integer, überschreibt IBKR_CLIENT_ID Env-Variable)"
+    )
+    parser.add_argument(
+        "--order-prefix", dest="order_prefix", default="",
+        help="Optionaler Präfix für Order-IDs (max 20 Zeichen, wird vorangestellt)",
     )
     mit_group = parser.add_mutually_exclusive_group()
     mit_group.add_argument("--mit-overlay", dest="mit_overlay", action="store_true",
@@ -1580,6 +1591,8 @@ def main():
         os.environ["IBKR_CLIENT_ID"] = str(args.client_id)
     if args.mit_overlay is not None:
         cfg["use_mit_probabilistic_overlay"] = args.mit_overlay
+    if args.order_prefix:
+        cfg["order_prefix"] = args.order_prefix
 
     # ── Broker instanziieren ─────────────────────────────────────────────────
     if broker_name == "ibkr":
