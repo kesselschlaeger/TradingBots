@@ -70,10 +70,10 @@ ORB_DEFAULT_CONFIG: dict = {
     "stop_loss_r":     1.0, # nach WFO 1.0,
     "trail_after_r":   1.0,
     "trail_distance_r": 0.6,
-    # Trailing Stop im Backtest: Default AUS, weil Alpaca-Bracket-Orders
-    # nur fixe SL/TP unterstützen. Nur aktivieren wenn Live-Bot eigenes
-    # Trailing-Stop-Management implementiert.
-    "use_trailing_stop": False,
+    # Trailing Stop: AUS für Alpaca (serverseitig fix), EIN für IBKR-Live
+    # (manage_trailing_stop() zieht Stop per modifyOrder() nach).
+    # Für Backtest auf False lassen – Backtest nutzt fixe SL/TP.
+    "use_trailing_stop": True,  # → True setzen wenn IBKR Live aktiv
 
     # ── Short-Seite – Fix #10: Shorts standardmäßig an ────────────────────
     "allow_shorts": True,

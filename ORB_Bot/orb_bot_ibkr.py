@@ -317,7 +317,7 @@ class IBKRClient(BrokerBase):
         try:
             values = self.ib.accountValues()
             for v in values:
-                if v.tag == "NetLiquidation" and v.currency == "USD":
+                if v.tag == "NetLiquidation":
                     return float(v.value)
             return 0.0
         except Exception as e:
@@ -330,7 +330,7 @@ class IBKRClient(BrokerBase):
         try:
             values = self.ib.accountValues()
             for v in values:
-                if v.tag == "TotalCashValue" and v.currency == "USD":
+                if v.tag == "TotalCashValue":
                     return float(v.value)
             return 0.0
         except Exception as e:
@@ -343,7 +343,7 @@ class IBKRClient(BrokerBase):
         try:
             values = self.ib.accountValues()
             for v in values:
-                if v.tag == "BuyingPower" and v.currency == "USD":
+                if v.tag == "BuyingPower":
                     return float(v.value)
             return 0.0
         except Exception as e:
@@ -381,12 +381,21 @@ class IBKRClient(BrokerBase):
             result: Dict[str, dict] = {}
             stale_symbols = []
 
+            registry_updated = False
             for sym, reg_data in list(self._local_positions.items()):
                 if sym in ibkr_map:
                     pos = ibkr_map[sym]
-                    # Entry aus Register übernehmen (genauer als IBKR avgCost
-                    # bei Teilfüllungen)
-                    pos["entry"] = reg_data.get("entry", pos["entry"])
+                    reg_entry = reg_data.get("entry", 0.0)
+                    if reg_entry > 0:
+                        # Bekannter Fill-Preis aus Register übernehmen
+                        pos["entry"] = reg_entry
+                    else:
+                        # Noch kein Fill-Preis bekannt → IBKR avgCost ins
+                        # Register schreiben (Basis für R-Berechnung im Trail)
+                        ibkr_avg = pos.get("entry", 0.0)
+                        if ibkr_avg > 0:
+                            self._local_positions[sym]["entry"] = ibkr_avg
+                            registry_updated = True
                     result[sym] = pos
                 else:
                     # Position im Register aber nicht mehr bei IBKR
@@ -397,6 +406,9 @@ class IBKRClient(BrokerBase):
 
             for sym in stale_symbols:
                 self._unregister_position(sym)
+
+            if registry_updated:
+                self._save_position_registry()
 
             return result
 
@@ -745,6 +757,7 @@ class IBKRClient(BrokerBase):
             "qty": qty,
             "entry": entry,
             "stop_loss": stop_loss,
+            "initial_stop_loss": stop_loss,  # unveränderter Initial-Stop für R-Berechnung
             "take_profit": take_profit,
             "opened_at": datetime.now(pytz.UTC).isoformat(),
             "bot_id": self._bot_id,
@@ -801,6 +814,88 @@ class IBKRClient(BrokerBase):
 
         except Exception as e:
             print(f"[IBKR] Reconcile-Fehler: {e}", file=sys.stderr)
+
+    # ── Trailing Stop Management ────────────────────────────────────────────
+
+    def manage_trailing_stop(self, symbol: str, current_price: float,
+                              trail_after_r: float = 1.0,
+                              trail_distance_r: float = 0.6) -> bool:
+        """
+        Zieht den Stop-Loss nach wenn die Position genug im Gewinn liegt.
+
+        Logik:
+        - Berechnet R-Multiple = (current_price - entry) / initial_risk
+        - Aktiviert sich ab trail_after_r (z.B. 1.0 = 1R Gewinn)
+        - Neuer Stop = current_price - trail_distance_r * initial_risk
+        - Verschiebt den Stop nur wenn er sich verbessert (Long: höher, Short: tiefer)
+        - Modifiziert die offene Stop-Order direkt bei IBKR via modifyOrder()
+
+        Returns True wenn Stop tatsächlich geändert wurde.
+        """
+        reg = self._local_positions.get(symbol)
+        if not reg:
+            return False
+
+        entry         = reg.get("entry", 0.0)
+        initial_stop  = reg.get("initial_stop_loss", reg.get("stop_loss", 0.0))
+        current_stop  = reg.get("stop_loss", 0.0)
+        side          = reg.get("side", "long")
+        parent_id     = reg.get("parent_order_id")
+        qty           = int(reg.get("qty", 0))
+
+        # Entry muss bereits bekannt sein (nach erstem Fill-Sync)
+        if entry <= 0 or initial_stop <= 0 or current_price <= 0 or qty == 0:
+            return False
+
+        if side == "long":
+            risk = entry - initial_stop          # positiver Risikobetrag/Aktie
+            if risk <= 0:
+                return False
+            r_mult   = (current_price - entry) / risk
+            new_stop = round(current_price - trail_distance_r * risk, 2)
+            # Nur nachziehen wenn: Trail aktiviert UND neuer Stop besser als alter
+            if r_mult < trail_after_r or new_stop <= current_stop:
+                return False
+        else:  # short
+            risk = initial_stop - entry          # Stop liegt über Entry
+            if risk <= 0:
+                return False
+            r_mult   = (entry - current_price) / risk
+            new_stop = round(current_price + trail_distance_r * risk, 2)
+            if r_mult < trail_after_r or new_stop >= current_stop:
+                return False
+
+        # Stop-Order bei IBKR suchen und modifizieren
+        self._ensure_connected()
+        try:
+            open_trades = self.ib.openTrades()
+            for trade in open_trades:
+                order    = trade.order
+                contract = trade.contract
+                if (contract.symbol == symbol
+                        and order.orderType == "STP"
+                        and order.parentId == parent_id):
+                    order.auxPrice = new_stop
+                    self.ib.modifyOrder(contract, order)
+                    self.ib.sleep(0.5)
+
+                    # Registry aktualisieren (initial_stop_loss bleibt unverändert)
+                    self._local_positions[symbol]["stop_loss"] = new_stop
+                    self._save_position_registry()
+
+                    print(f"[IBKR] Trail {symbol} ({side.upper()}): "
+                          f"Stop {current_stop:.2f} → {new_stop:.2f} "
+                          f"(R={r_mult:.2f}x, Kurs={current_price:.2f})")
+                    return True
+
+            print(f"[IBKR] Trail {symbol}: Stop-Order nicht gefunden "
+                  f"(parentId={parent_id}) – bereits gefüllt?")
+            return False
+
+        except Exception as e:
+            print(f"[IBKR] manage_trailing_stop({symbol}) Fehler: {e}",
+                  file=sys.stderr)
+            return False
 
     # ── Disconnect ──────────────────────────────────────────────────────────
 

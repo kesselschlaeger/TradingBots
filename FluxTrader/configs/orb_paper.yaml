@@ -1,0 +1,32 @@
+# ORB Paper-Trading
+mode: paper
+
+strategy:
+  name: orb
+  #symbols: [SPY, QQQ, AAPL, NVDA, TSLA]
+  symbols: ["SPY", "QQQ", "IWM", "DIA",           # ETFs – stabiler Kern
+        "NVDA", "TSLA", "AMD", "AVGO",        # High-Vol AI/Chips (2026 besonders stark)
+        "AAPL", "MSFT", "META", "AMZN",       # Big-Tech Klassiker
+        "PLTR", "GOOGL", "NFLX",]              # Volatile Growth-Namen
+  risk_pct: 0.01
+  params:
+    opening_range_minutes: 15
+    orb_breakout_multiplier: 1.15
+    volume_multiplier: 1.7
+    allow_shorts: true
+    use_mit_probabilistic_overlay: true
+    use_trend_filter: true
+    use_gap_filter: true
+    eod_close_time: "15:27"
+
+broker:
+  type: paper
+  paper: true
+
+data:
+  provider: alpaca
+  timeframe: "5Min"
+  lookback_days: 5
+
+notifications:
+  enabled: false

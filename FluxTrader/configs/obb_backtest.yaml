@@ -1,0 +1,39 @@
+# OBB Backtest – One Bar Breakout (Daily Bars)
+mode: backtest
+
+strategy:
+  name: obb
+  #symbols: [SPY, QQQ, IWM, DIA, AAPL, MSFT, NVDA, AMD, TSLA, META, AMZN, GOOGL, NFLX]
+  symbols: ["SOXL", #winrate 100
+        "SMCI", #winrate 83
+        "RKLB", #winrate 100
+        "TQQQ", ##winrate 96
+        "PLTR",
+        "INTC",
+        "HOOD", #--winrate100
+        "MSTR",
+        "SNDK", #--winrate100
+        "MU",
+        "WBD", #--winrate100
+        "AVGO", #--winrate100
+        "NFLX",# vorübergehend
+        # zweite Reihe
+        "AMD", "MU","WBD","COIN","MRNA","UPST","MRVL","CCL","F","VRT","APP","NCLH","VST",]
+
+  risk_pct: 0.01
+  params:
+    lookback_bars: 50
+    allow_shorts: true
+    position_size_pct: 0.15
+    use_kelly_sizing: false
+
+broker:
+  type: paper
+  paper: true
+
+data:
+  provider: yfinance
+  timeframe: "1Day"
+  lookback_days: 105
+
+initial_capital: 30_000.0

@@ -1,0 +1,74 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fluxtrader"
+version = "0.1.0"
+description = "Modular Trading Bot Framework – ORB & OBB Strategies"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [{ name = "André Kesselschläger" }]
+
+dependencies = [
+    "numpy>=1.26",
+    "pandas>=2.1",
+    "pydantic>=2.5",
+    "pydantic-settings>=2.1",
+    "pyyaml>=6.0",
+    "structlog>=23.2",
+    "pytz>=2023.3",
+]
+
+[project.optional-dependencies]
+alpaca = [
+    "alpaca-py>=0.21",
+]
+ibkr = [
+    "ib_insync>=0.9.86",
+]
+live = [
+    "aiosqlite>=0.19",
+    "httpx>=0.25",
+    "apscheduler>=3.10,<4.0",
+]
+backtest = [
+    "yfinance>=0.2.31",
+    "exchange-calendars>=4.5",
+]
+all = [
+    "fluxtrader[alpaca,ibkr,live,backtest]",
+]
+dev = [
+    "pytest>=7.4",
+    "pytest-asyncio>=0.21",
+    "ruff>=0.1",
+]
+docs = [
+    "mkdocs>=1.5",
+    "mkdocs-material>=9.4",
+    "pymdown-extensions>=10.3",
+]
+
+[project.scripts]
+fluxtrader = "main:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["core*", "strategy*", "execution*", "data*", "backtest*", "live*"]
+exclude = ["tests*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "BLE"]
+ignore = ["E501"]

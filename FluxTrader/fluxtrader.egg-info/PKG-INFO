@@ -1,0 +1,35 @@
+Metadata-Version: 2.4
+Name: fluxtrader
+Version: 0.1.0
+Summary: Modular Trading Bot Framework – ORB & OBB Strategies
+Author: André Kesselschläger
+License-Expression: MIT
+Requires-Python: >=3.11
+Requires-Dist: numpy>=1.26
+Requires-Dist: pandas>=2.1
+Requires-Dist: pydantic>=2.5
+Requires-Dist: pydantic-settings>=2.1
+Requires-Dist: pyyaml>=6.0
+Requires-Dist: structlog>=23.2
+Requires-Dist: pytz>=2023.3
+Provides-Extra: alpaca
+Requires-Dist: alpaca-py>=0.21; extra == "alpaca"
+Provides-Extra: ibkr
+Requires-Dist: ib_insync>=0.9.86; extra == "ibkr"
+Provides-Extra: live
+Requires-Dist: aiosqlite>=0.19; extra == "live"
+Requires-Dist: httpx>=0.25; extra == "live"
+Requires-Dist: apscheduler<4.0,>=3.10; extra == "live"
+Provides-Extra: backtest
+Requires-Dist: yfinance>=0.2.31; extra == "backtest"
+Requires-Dist: exchange-calendars>=4.5; extra == "backtest"
+Provides-Extra: all
+Requires-Dist: fluxtrader[alpaca,backtest,ibkr,live]; extra == "all"
+Provides-Extra: dev
+Requires-Dist: pytest>=7.4; extra == "dev"
+Requires-Dist: pytest-asyncio>=0.21; extra == "dev"
+Requires-Dist: ruff>=0.1; extra == "dev"
+Provides-Extra: docs
+Requires-Dist: mkdocs>=1.5; extra == "docs"
+Requires-Dist: mkdocs-material>=9.4; extra == "docs"
+Requires-Dist: pymdown-extensions>=10.3; extra == "docs"

@@ -19,6 +19,8 @@ OpenClaw-Befehle:
     python orb_bot.py --mode eod         # Alle Positionen schließen
     python orb_bot.py --mode backtest    # Historischen Backtest laufen lassen
 
+    #python.exe .\orb_bot_alpaca.py --mode scan --no-mit-overlay --broker ibkr --client-id 2 --order-prefix normal
+
 Hinweis zu Futures (ES=F, NQ=F etc.):
     Alpaca unterstützt keine Futures. Diese Symbole werden in symbols_watchonly
     geführt – Signale werden generiert, aber keine Orders ausgeführt.
@@ -1119,11 +1121,21 @@ class ORB_Bot:
 
             df = compute_indicators(df)
 
-            # Bereits offen? → Status ausgeben, nichts tun (Alpaca managt Exit)
+            # Bereits offen? → Status ausgeben, ggf. Trailing Stop nachziehen
             if sym in open_positions:
                 pos = open_positions[sym]
                 print(f"  {sym}: offen {pos['side'].upper()} {pos['qty']} "
                       f"@ {pos['entry']:.2f}  uPnL {pos['unrealized_pnl']:+.2f}")
+                # Trailing Stop – nur IBKR (Alpaca managt SL/TP serverseitig)
+                if (self.cfg.get("use_trailing_stop", False)
+                        and hasattr(self.broker, "manage_trailing_stop")
+                        and pos.get("current_price", 0.0) > 0):
+                    self.broker.manage_trailing_stop(
+                        sym,
+                        pos["current_price"],
+                        trail_after_r=float(self.cfg.get("trail_after_r", 1.0)),
+                        trail_distance_r=float(self.cfg.get("trail_distance_r", 0.6)),
+                    )
                 continue
 
             if not self.portfolio.can_trade_today():
@@ -1222,12 +1234,25 @@ class ORB_Bot:
                 print(f"  {sym}: {label} – {reason}")
 
         # ── EOD-Close ────────────────────────────────────────────────────────
-        eod_minutes = int(self.cfg.get("eod_close_minutes_before", 33))
-        et_now    = now.astimezone(pytz.timezone("America/New_York"))
-        mins_left = (16 * 60) - (et_now.hour * 60 + et_now.minute)
-        if 0 < mins_left <= eod_minutes:
-            print(f"  {mins_left} Min bis Schluss – EOD Close (Trigger: {eod_minutes} Min)")
-            self._perform_eod_close()
+        et_now = now.astimezone(ET)
+        eod_time_cfg = self.cfg.get("eod_close_time")
+        market_close_cfg = self.cfg.get("market_close", time(16, 0))
+
+        # Primär: absolute EOD-Uhrzeit aus der Strategy-Config (z.B. 15:27 ET)
+        if isinstance(eod_time_cfg, time) and isinstance(market_close_cfg, time):
+            if eod_time_cfg <= et_now.time() < market_close_cfg:
+                mins_to_close = ((market_close_cfg.hour * 60 + market_close_cfg.minute)
+                                 - (et_now.hour * 60 + et_now.minute))
+                print(f"  EOD-Fenster aktiv ({eod_time_cfg.strftime('%H:%M')} ET) "
+                      f"– {mins_to_close} Min bis Schluss")
+                self._perform_eod_close()
+        else:
+            # Fallback für Legacy-Setups ohne eod_close_time
+            eod_minutes = int(self.cfg.get("eod_close_minutes_before", 33))
+            mins_left = (16 * 60) - (et_now.hour * 60 + et_now.minute)
+            if 0 < mins_left <= eod_minutes:
+                print(f"  {mins_left} Min bis Schluss – EOD Close (Trigger: {eod_minutes} Min)")
+                self._perform_eod_close()
 
         self._write_report(today, signals, equity)
         return {

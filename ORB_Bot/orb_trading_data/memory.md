@@ -80,3 +80,9 @@
 
 **2026-04-13 14:55** AVGO BUY 19 @ 375.56 | SL 370.89 | TP 384.90 | OrderID bc03e231-91f6-4b2f-bf7a-6031ad145da7 (ORB Breakout: 375.56 > 374.20 +Vol 2.3x)
 
+**2026-04-14 15:16** SPY BUY 18 @ 691.17 | SL 688.92 | TP 695.67 | OrderID 4 (ORB Breakout: 691.17 > 689.97 +Vol 4.2x)
+
+**2026-04-14 15:16** QQQ BUY 20 @ 623.43 | SL 621.07 | TP 628.15 | OrderID 8 (ORB Breakout: 623.43 > 622.72 +Vol 3.5x)
+
+**2026-04-14 15:16** IWM BUY 46 @ 268.31 | SL 267.00 | TP 270.92 | OrderID 12 (ORB Breakout: 268.31 > 267.60 +Vol 3.7x)
+

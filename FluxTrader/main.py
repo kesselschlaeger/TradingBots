@@ -1,0 +1,233 @@
+"""FluxTrader CLI Entrypoint.
+
+Usage:
+    python main.py live   --config configs/orb_live.yaml
+    python main.py paper  --config configs/orb_paper.yaml
+    python main.py backtest --config configs/orb_backtest.yaml
+"""
+from __future__ import annotations
+
+import argparse
+import asyncio
+import sys
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+# FluxTrader muss im sys.path sein
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from core.config import AppConfig, load_config, load_env
+from core.context import MarketContextService, set_context_service
+from core.logging import get_logger, setup_logging
+
+log = get_logger(__name__)
+
+
+def _resolve_notifier_bot_name(cfg: AppConfig) -> str:
+    configured = cfg.notifications.bot_name.strip()
+    if configured:
+        return configured
+    if cfg.broker.type == "ibkr" and cfg.broker.ibkr_bot_id.strip():
+        return cfg.broker.ibkr_bot_id.strip()
+    strategy_name = cfg.strategy.name.upper()
+    broker_name = cfg.broker.type.upper()
+    mode_name = "PAPER" if cfg.broker.paper else "LIVE"
+    return f"FLUX_{strategy_name}_{broker_name}_{mode_name}"
+
+
+# ─────────────────────────── Strategy-Factory ─────────────────────────────
+
+def _build_strategy(cfg: AppConfig, ctx: MarketContextService):
+    import strategy  # noqa: F401 – trigger @register
+    from strategy.registry import StrategyRegistry
+    return StrategyRegistry.get(cfg.strategy.name, cfg.strategy.params, context=ctx)
+
+
+# ─────────────────────────── Broker-Factory ───────────────────────────────
+
+def _build_broker(cfg: AppConfig):
+    env = load_env()
+    bt = cfg.broker.type
+
+    if bt == "paper":
+        from execution.paper_adapter import PaperAdapter
+        return PaperAdapter(initial_cash=cfg.initial_capital)
+
+    if bt == "alpaca":
+        from execution.alpaca_adapter import AlpacaAdapter
+        return AlpacaAdapter(
+            api_key=env.APCA_API_KEY_ID,
+            secret_key=env.APCA_API_SECRET_KEY,
+            paper=cfg.broker.paper,
+        )
+
+    if bt == "ibkr":
+        from execution.ibkr_adapter import IBKRAdapter
+        return IBKRAdapter(
+            host=cfg.broker.ibkr_host,
+            port=cfg.broker.ibkr_port,
+            client_id=cfg.broker.ibkr_client_id,
+            paper=cfg.broker.paper,
+            bot_id=cfg.broker.ibkr_bot_id,
+        )
+
+    raise ValueError(f"Unknown broker type: {bt}")
+
+
+# ─────────────────────────── Data-Factory ─────────────────────────────────
+
+def _build_data_provider(cfg: AppConfig):
+    env = load_env()
+
+    if cfg.data.provider == "alpaca":
+        from data.providers.alpaca_provider import AlpacaDataProvider
+        return AlpacaDataProvider(
+            api_key=env.APCA_API_KEY_ID,
+            secret_key=env.APCA_API_SECRET_KEY,
+            feed=cfg.broker.alpaca_data_feed,
+        )
+
+    if cfg.data.provider == "yfinance":
+        from data.providers.yfinance_provider import YFinanceDataProvider
+        return YFinanceDataProvider()
+
+    if cfg.data.provider == "ibkr":
+        from data.providers.ibkr_provider import IBKRDataProvider
+        return IBKRDataProvider(
+            host=cfg.broker.ibkr_host,
+            port=cfg.broker.ibkr_port,
+            client_id=cfg.broker.ibkr_client_id + 100,
+            use_rth=bool(cfg.data.model_extra.get("ibkr_use_rth", True)),
+        )
+
+    raise ValueError(f"Unknown data provider: {cfg.data.provider}")
+
+
+# ─────────────────────────── Commands ─────────────────────────────────────
+
+async def cmd_backtest(cfg: AppConfig) -> None:
+    from backtest.engine import BacktestConfig, BarByBarEngine
+    from backtest.report import build_tearsheet, format_tearsheet
+    from execution.paper_adapter import PaperAdapter
+
+    ctx = MarketContextService(initial_capital=cfg.initial_capital)
+    ctx.update_account(equity=cfg.initial_capital, cash=cfg.initial_capital,
+                       buying_power=cfg.initial_capital * 4)
+    set_context_service(ctx)
+
+    strategy = _build_strategy(cfg, ctx)
+    data_prov = _build_data_provider(cfg)
+    paper = PaperAdapter(initial_cash=cfg.initial_capital,
+                         slippage_pct=0.0002, commission_pct=0.00005)
+
+    symbols = cfg.strategy.symbols
+    end = datetime.now(timezone.utc)
+    start = end - timedelta(days=cfg.data.lookback_days)
+
+    log.info("backtest.loading_data", symbols=symbols, start=str(start),
+             end=str(end))
+    data = await data_prov.get_bars_bulk(symbols, start, end,
+                                         cfg.data.timeframe)
+    log.info("backtest.data_loaded", symbols=list(data.keys()),
+             total_bars=sum(len(d) for d in data.values()))
+
+    # SPY für Trendfilter
+    spy_df = None
+    if cfg.benchmark in data:
+        spy_df = data[cfg.benchmark]
+    elif cfg.benchmark not in symbols:
+        spy_df_raw = await data_prov.get_bars(cfg.benchmark, start, end,
+                                               cfg.data.timeframe)
+        if not spy_df_raw.empty:
+            spy_df = spy_df_raw
+
+    eod_str = cfg.strategy.params.get("eod_close_time")
+    eod_time = eod_str if isinstance(eod_str, type(None)) is False else None
+
+    bt_cfg = BacktestConfig(
+        initial_capital=cfg.initial_capital,
+        risk_pct=cfg.strategy.risk_pct,
+        eod_close_time=eod_time if not isinstance(eod_time, str) else None,
+    )
+    engine = BarByBarEngine(strategy, paper, ctx, bt_cfg)
+    result = await engine.run(data=data, spy_df=spy_df)
+
+    ts = build_tearsheet(result.equity_curve, result.trades,
+                         result.initial_capital)
+    print("\n" + "=" * 50)
+    print("BACKTEST RESULT")
+    print("=" * 50)
+    print(format_tearsheet(ts))
+    print(f"Bars processed: {result.bars_processed}")
+    print(f"Trades: {len(result.trades)}")
+
+
+async def cmd_live(cfg: AppConfig) -> None:
+    from live.notifier import TelegramNotifier
+    from live.runner import LiveRunner
+    from live.state import PersistentState
+
+    env = load_env()
+    ctx = MarketContextService(initial_capital=cfg.initial_capital)
+    set_context_service(ctx)
+
+    strategy = _build_strategy(cfg, ctx)
+    broker = _build_broker(cfg)
+    data_prov = _build_data_provider(cfg)
+
+    state = PersistentState(
+        Path(cfg.persistence.data_dir) / cfg.persistence.state_db
+    )
+    notifier = TelegramNotifier(
+        bot_token=env.TELEGRAM_TOKEN or cfg.notifications.telegram_token,
+        chat_id=env.TELEGRAM_CHAT_ID or cfg.notifications.telegram_chat_id,
+        enabled=cfg.notifications.enabled,
+        bot_name=_resolve_notifier_bot_name(cfg),
+        strategy_name=cfg.strategy.name,
+        broker_name=(
+            f"{cfg.broker.type}-paper" if cfg.broker.paper
+            else f"{cfg.broker.type}-live"
+        ),
+    )
+
+    runner = LiveRunner(
+        strategy=strategy,
+        broker=broker,
+        data_provider=data_prov,
+        context=ctx,
+        state=state,
+        notifier=notifier,
+        symbols=cfg.strategy.symbols,
+        config=cfg.strategy.params,
+    )
+
+    log.info("live.starting", mode=cfg.mode,
+             strategy=cfg.strategy.name,
+             broker=cfg.broker.type,
+             symbols=cfg.strategy.symbols)
+    await runner.start()
+
+
+# ─────────────────────────── CLI ──────────────────────────────────────────
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="FluxTrader")
+    parser.add_argument("command", choices=["live", "paper", "backtest"],
+                        help="Modus: live, paper, backtest")
+    parser.add_argument("--config", "-c", required=True,
+                        help="Pfad zur YAML-Config")
+    parser.add_argument("--log-level", default="INFO")
+    parser.add_argument("--log-json", action="store_true")
+    args = parser.parse_args()
+
+    setup_logging(level=args.log_level.upper(), json_output=args.log_json)
+    cfg = load_config(args.config)
+
+    if args.command in ("live", "paper"):
+        asyncio.run(cmd_live(cfg))
+    elif args.command == "backtest":
+        asyncio.run(cmd_backtest(cfg))
+
+
+if __name__ == "__main__":
+    main()

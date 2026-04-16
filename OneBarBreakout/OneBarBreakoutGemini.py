@@ -92,13 +92,16 @@ CONFIG = {
             ],
     "lookback": 50,
     "allow_shorts": True,
-    "initial_capital": 10_000.0,
+    "initial_capital": 30_000.0,
     "risk_pct": 0.15,          # 15% Equity pro Trade (da sehr kurze Haltedauer)
     "slippage_bps": 5,         # 5 Basispunkte Slippage
     "commission": 0.00005,         # Claude hat etwas angenommen Alpaca ist i.d.R. kommissionsfrei (außer ECN-Fees)
-    "max_daily_trades": 3,     # Max. Trades pro Tag
+    "max_daily_trades": 7,     # Max. Trades pro Tag
     "alpaca_paper": True,
     "alpaca_data_feed": "iex",   # IEX für kostenlose Accounts; SIP nur mit Abo
+    # Exit-Order TIF: "opg" für Opening Print (nur wenn vor 09:28 ET eingereicht),
+    # sonst automatisch Fallback auf "day".
+    "exit_time_in_force": "opg",
     # ── Kelly Sizing (optional) ────────────────────────────────────────
     "use_kelly_sizing": False,           # Kelly-basiertes Sizing aktivieren
     "kelly_fraction": 0.50,             # Half-Kelly für Sicherheit
@@ -713,15 +716,53 @@ class OneBarLive:
                         print(f"ORDER FEHLER: {sym} – {order.get('error', '?')}")
 
     def execute_exits(self):
-        """Wird um 09:30 ET aufgerufen (Market Open)"""
+        """Schließt Overnight-Positionen via Market-Order (TIF konfigurierbar)."""
         print(f"[{datetime.now()}] Schließe alle Overnight-Positionen...")
+
+        # OPG muss vor dem Opening-Cutoff eingereicht werden.
+        configured_tif = str(CONFIG.get("exit_time_in_force", "opg")).lower()
+        et_now = datetime.now(pytz.UTC).astimezone(ET)
+        now_minutes = et_now.hour * 60 + et_now.minute
+        opg_cutoff_minutes = 9 * 60 + 28  # 09:28 ET
+
+        exit_tif = configured_tif
+        if configured_tif == "opg" and now_minutes >= opg_cutoff_minutes:
+            print("[WARN] Exit-TIF OPG angefordert, aber >= 09:28 ET. "
+                  "Fallback auf DAY.")
+            exit_tif = "day"
+        elif configured_tif not in {"day", "opg", "cls", "gtc"}:
+            print(f"[WARN] Unbekannter exit_time_in_force='{configured_tif}'. "
+                  "Fallback auf DAY.")
+            exit_tif = "day"
+
+        print(f"[INFO] Exit Time-In-Force: {exit_tif.upper()} (konfiguriert: {configured_tif.upper()})")
+
         positions = self.broker.sync_positions()
         for sym in list(positions.keys()):
             # Wir schließen nur, was in unserer Symbol-Liste ist
             if sym in CONFIG["symbols"]:
-                result = self.broker.close_position(sym)
+                pos = positions.get(sym, {})
+                qty = int(abs(pos.get("qty", 0)))
+                if qty <= 0:
+                    print(f"EXIT SKIP: {sym} – ungültige Qty {pos.get('qty')}")
+                    continue
+
+                side = str(pos.get("side", "long")).lower()
+                order_side = "sell" if side == "long" else "buy"
+
+                result = self.broker.place_market_order(
+                    symbol=sym,
+                    qty=qty,
+                    side=order_side,
+                    time_in_force=exit_tif,
+                    client_order_id=f"OBBG|EXIT|{sym}|{datetime.now().strftime('%Y%m%d')}"
+                )
                 if result.get("ok"):
-                    print(f"EXIT: {sym} geschlossen.")
+                    print(
+                        f"EXIT ORDER: {sym} {order_side.upper()} x{qty} "
+                        f"| TIF={exit_tif.upper()} | ID={result.get('id', '?')} "
+                        f"| STATUS={result.get('status', '?')}"
+                    )
                 else:
                     print(f"EXIT FEHLER: {sym} – {result.get('error', '?')}")
 

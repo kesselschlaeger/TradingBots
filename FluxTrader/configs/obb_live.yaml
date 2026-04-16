@@ -1,0 +1,65 @@
+# OBB Live – One Bar Breakout (Daily Bars)
+mode: live
+
+strategy:
+  name: obb
+  symbols: ["SOXL", #winrate 100
+        "SMCI", #winrate 83
+        "RKLB", #winrate 100
+        "TQQQ", ##winrate 96
+        "PLTR",
+        "INTC",
+        "HOOD", #--winrate100
+        "MSTR",
+        "SNDK", #--winrate100
+        "MU",
+        "WBD", #--winrate100
+        "AVGO", #--winrate100
+        "NFLX",# vorübergehend
+        # zweite Reihe
+        "AMD", "MU","WBD","COIN","MRNA","UPST","MRVL","CCL","F","VRT","APP","NCLH","VST",]
+  risk_pct: 0.015
+  params:
+    lookback_bars: 50
+    allow_shorts: true
+    position_size_pct: 0.15
+    use_kelly_sizing: false
+    max_daily_trades: 1
+    max_concurrent_positions: 10
+
+    # Scheduler-Zeiten (OBB hält über Nacht → kein EOD-Flatten, kein Premarket-Scan)
+    timeframe: "1Day"
+    eod_close_time: null
+    premarket_time: null
+    market_open_time: "09:15"
+    post_market_time: "16:05"
+    poll_interval_s: 300
+
+    # OBB-Live-Methodik: Entry kurz vor Close (Auction), Exit nächster Morgen (OPG)
+    obb_entry_cutoff_time: "15:59"
+    obb_close_time: "16:00"
+    obb_exit_open_time: "09:15"
+    obb_entry_order_type: "market"
+    obb_entry_time_in_force: "cls"
+    obb_exit_order_type: "market"
+    obb_exit_time_in_force: "opg"
+    obb_stop_after_open_exit: true
+
+#broker:
+#  type: alpaca
+#  paper: true
+#  alpaca_data_feed: iex
+broker: 
+  type: ibkr
+  paper: true
+  ibkr_client_id: 7
+  ibkr_bot_id: Flux_OBB
+
+data:
+  provider: alpaca
+  timeframe: "1Day"
+  lookback_days: 90
+
+notifications:
+  enabled: true
+  bot_name: Flux_OBB

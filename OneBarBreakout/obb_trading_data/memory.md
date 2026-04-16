@@ -14,3 +14,25 @@
 
 **2026-04-13 20:25** SNDK BUY 5 @ 952.50 | OBB Long: Close 952.50 > 50-Bar-High 873.95 (+8.99%)
 
+**2026-04-14 13:28** INTC SELL 77 @ 65.72 | 1-Bar Exit (Morning OPG)
+
+**2026-04-14 13:28** SNDK SELL 5 @ 966.00 | 1-Bar Exit (Morning OPG)
+
+**2026-04-14 19:57** SOXL BUY 59 @ 85.11 | OBB Long: Close 85.11 > 50-Bar-High 80.74 (+5.41%)
+
+**2026-04-14 19:57** NFLX BUY 47 @ 106.20 | OBB Long: Close 106.20 > 50-Bar-High 103.67 (+2.44%)
+
+**2026-04-14 19:57** AMD BUY 19 @ 255.07 | OBB Long: Close 255.07 > 50-Bar-High 252.65 (+0.96%)
+
+**2026-04-15 19:57** AVGO BUY 12 @ 394.47 | OBB Long: Close 394.47 > 50-Bar-High 382.28 (+3.19%)
+
+**2026-04-15 19:57** NFLX BUY 46 @ 107.41 | OBB Long: Close 107.41 > 50-Bar-High 106.57 (+0.79%)
+
+**2026-04-15 19:57** AMD BUY 19 @ 256.98 | OBB Long: Close 256.98 > 50-Bar-High 255.46 (+0.60%)
+
+**2026-04-16 13:25** AVGO SELL 12 @ 392.63 | 1-Bar Exit (Morning OPG)
+
+**2026-04-16 13:25** NFLX SELL 46 @ 107.48 | 1-Bar Exit (Morning OPG)
+
+**2026-04-16 13:25** AMD SELL 19 @ 258.06 | 1-Bar Exit (Morning OPG)
+

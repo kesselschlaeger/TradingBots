@@ -1,0 +1,616 @@
+"""LiveRunner – asyncio Event-Loop für den Production-Betrieb.
+
+Verantwortlichkeiten:
+  - Scheduler starten (premarket/open/eod/postmarket)
+  - Bars per Polling oder Stream empfangen
+  - Strategie aufrufen → Signale → Broker ausführen
+  - TradeManager: Trailing + EOD-Close
+  - State persistieren (aiosqlite)
+  - Telegram-Benachrichtigungen
+"""
+from __future__ import annotations
+
+import asyncio
+import signal as signal_mod
+from datetime import date, datetime, time, timezone
+from typing import Optional
+from zoneinfo import ZoneInfo
+
+from core.context import MarketContextService, set_context_service
+from core.logging import get_logger
+from core.models import Bar, OrderRequest, OrderSide, Signal
+from core.trade_manager import ManagedTrade, TradeManager
+from data.providers.base import DataProvider
+from execution.port import BrokerPort
+from live.notifier import TelegramNotifier
+from live.scanner import PremarketScanner
+from live.scheduler import TradingScheduler
+from live.state import PersistentState
+from strategy.base import BaseStrategy
+
+log = get_logger(__name__)
+ET_TZ = ZoneInfo("America/New_York")
+
+
+class LiveRunner:
+    """Production Event-Loop: Scheduler → DataStream → Strategy → Broker."""
+
+    def __init__(
+        self,
+        strategy: BaseStrategy,
+        broker: BrokerPort,
+        data_provider: DataProvider,
+        context: MarketContextService,
+        state: PersistentState,
+        notifier: TelegramNotifier,
+        symbols: list[str],
+        config: dict,
+    ):
+        self.strategy = strategy
+        self.broker = broker
+        self.data = data_provider
+        self.ctx = context
+        self.state = state
+        self.notifier = notifier
+        self.symbols = [s.upper() for s in symbols]
+        self.cfg = config
+
+        self.tm = TradeManager(
+            trail_after_r=float(config.get("trail_after_r", 1.0)),
+            trail_distance_r=float(config.get("trail_distance_r", 0.6)),
+            use_trailing=bool(config.get("use_trailing", False)),
+            eod_close_time=config.get("eod_close_time"),
+        )
+
+        self._scanner: Optional[PremarketScanner] = None
+        self._scheduler: Optional[TradingScheduler] = None
+        self._running = False
+        self._pending_exit_next_open: set[str] = set()
+        self._daily_trades_count: int = 0
+
+        set_context_service(context)
+
+    # ── Lifecycle ──────────────────────────────────────────────────────
+
+    async def start(self) -> None:
+        await self.state.init()
+        self._running = True
+
+        # Account-Snapshot laden
+        acct = await self.broker.get_account()
+        self.ctx.update_account(
+            equity=float(acct["equity"]),
+            cash=float(acct.get("cash", 0)),
+            buying_power=float(acct.get("buying_power", 0)),
+        )
+        await self.state.update_peak_equity(float(acct["equity"]))
+
+        # Scheduler aufbauen (None-Zeiten → Job wird übersprungen)
+        premarket_t = self.cfg.get("premarket_time", time(9, 0))
+        market_open_t = self.cfg.get("market_open_time", time(9, 30))
+        eod_close_t = self.cfg.get("eod_close_time", time(15, 27))
+        post_market_t = self.cfg.get("post_market_time", time(16, 5))
+
+        self._scheduler = TradingScheduler()
+        self._scheduler.schedule_trading_day(
+            premarket_scan=self._on_premarket if premarket_t else None,
+            on_market_open=self._on_market_open if market_open_t else None,
+            on_eod_close=self._on_eod_close if eod_close_t else None,
+            on_post_market=self._on_post_market if post_market_t else None,
+            premarket_time=premarket_t or time(9, 0),
+            market_open_time=market_open_t or time(9, 30),
+            eod_close_time=eod_close_t or time(15, 27),
+            post_market_time=post_market_t or time(16, 5),
+        )
+        self._scheduler.start()
+
+        log.info("runner.started", symbols=self.symbols,
+                 strategy=self.strategy.name,
+                 broker=self.broker.__class__.__name__)
+
+        # Graceful Shutdown via SIGINT / SIGTERM
+        loop = asyncio.get_event_loop()
+        for sig in (signal_mod.SIGINT, signal_mod.SIGTERM):
+            try:
+                loop.add_signal_handler(sig, lambda: asyncio.create_task(self.stop()))
+            except NotImplementedError:
+                pass
+
+        # Hauptloop: Bars streamen/pollt
+        await self._bar_loop()
+
+    async def stop(self) -> None:
+        self._running = False
+        if self._scheduler:
+            self._scheduler.stop()
+        log.info("runner.stopping")
+        await self.notifier.send("*Bot stopped*")
+
+    # ── Scheduled Callbacks ───────────────────────────────────────────
+
+    async def _on_premarket(self) -> None:
+        log.info("runner.premarket_scan")
+        if self._scanner is None:
+            self._scanner = PremarketScanner(
+                watchlist=self.symbols,
+                min_gap_pct=float(self.cfg.get("scanner_min_gap", 0.02)),
+                max_gap_pct=float(self.cfg.get("scanner_max_gap", 0.10)),
+                min_premarket_vol=int(self.cfg.get("scanner_min_vol", 50_000)),
+            )
+        results = await self._scanner.scan_filtered(max_results=10)
+        if results:
+            msg = "*Premarket Gaps*\n" + "\n".join(
+                f"`{r.symbol}` {r.gap_pct:+.1%} (vol {r.premarket_volume:,})"
+                for r in results
+            )
+            await self.notifier.send(msg)
+            # Dynamische Symbolliste erweitern (optional, je nach Config)
+            if self.cfg.get("auto_add_scanned", False):
+                for r in results:
+                    if r.symbol not in self.symbols:
+                        self.symbols.append(r.symbol)
+                        log.info("runner.symbol_added", symbol=r.symbol)
+
+    async def _on_market_open(self) -> None:
+        log.info("runner.market_open")
+
+        now_et = datetime.now(ET_TZ).time()
+        exit_time = self.cfg.get("obb_exit_open_time", time(9, 15))
+        if isinstance(exit_time, str):
+            hh, mm = exit_time.split(":")
+            exit_time = time(int(hh), int(mm))
+        if now_et < exit_time:
+            log.info("runner.exit_next_open_waiting", now=str(now_et),
+                     exit_after=str(exit_time))
+            return
+
+        # Positionen mit exit_next_open schließen (OBB-Pattern)
+        remaining_pending: set[str] = set()
+        exit_order_type = str(self.cfg.get("obb_exit_order_type", "market"))
+        exit_tif = str(self.cfg.get("obb_exit_time_in_force", "opg")).lower()
+
+        for sym in list(self._pending_exit_next_open):
+            pos = await self.broker.get_position(sym)
+            if pos is None:
+                continue
+            close_side = OrderSide.SELL if pos.side == "long" else OrderSide.BUY
+            qty = max(1, int(round(pos.qty)))
+            ok = False
+            try:
+                await self.broker.submit_order(OrderRequest(
+                    symbol=sym,
+                    side=close_side,
+                    qty=qty,
+                    order_type=exit_order_type,
+                    time_in_force=exit_tif,
+                ))
+                ok = True
+            except Exception as e:  # noqa: BLE001
+                log.warning("runner.exit_next_open_failed", symbol=sym,
+                            error=str(e), order_type=exit_order_type,
+                            time_in_force=exit_tif)
+
+            if ok:
+                log.info("runner.exit_next_open", symbol=sym)
+                closes = await self.broker.get_recent_closes([sym])
+                close_exec = closes.get(sym.upper()) or closes.get(sym)
+                await self.notifier.send(
+                    f"*Exit-Next-Open* `{sym}`\n"
+                    f"Order: {exit_order_type.upper()} / {exit_tif.upper()}\n"
+                    "Reason: OBB overnight exit at next market open"
+                )
+                exit_price = (
+                    float(close_exec.fill_price)
+                    if close_exec and close_exec.fill_price > 0
+                    else self._safe_exit_price(
+                        pos.current_price,
+                        pos.entry_price,
+                    )
+                )
+                qty_closed = (
+                    float(close_exec.qty)
+                    if close_exec and close_exec.qty > 0
+                    else float(qty)
+                )
+                pnl = (
+                    float(close_exec.realized_pnl)
+                    if close_exec and close_exec.realized_pnl is not None
+                    else self._compute_pnl(
+                        side=pos.side,
+                        entry=float(pos.entry_price),
+                        exit_price=exit_price,
+                        qty=qty_closed,
+                    )
+                )
+                await self.notifier.trade_closed(
+                    symbol=sym,
+                    side=pos.side,
+                    exit_price=exit_price,
+                    pnl=pnl,
+                    reason="Exit-Next-Open",
+                    qty=qty_closed,
+                    order_id=(close_exec.order_id if close_exec else ""),
+                )
+                self.tm.forget(sym)
+            else:
+                remaining_pending.add(sym)
+        self._pending_exit_next_open = remaining_pending
+
+        if not self._pending_exit_next_open and bool(
+            self.cfg.get("obb_stop_after_open_exit", False)
+        ):
+            log.info("runner.stopping_after_open_exit")
+            await self.stop()
+            return
+
+        self.strategy.reset()
+        self.tm.reset()
+        self.ctx.clear_reserved_groups()
+        await self.state.reset_day(date.today())
+        self._daily_trades_count = 0
+
+        # Reserved Groups aus State wiederherstellen (falls Restart mitten am Tag)
+        for g in await self.state.reserved_groups(date.today()):
+            self.ctx.reserve_group(g)
+
+    async def _on_eod_close(self) -> None:
+        log.info("runner.eod_close")
+        positions_before = await self.broker.get_positions()
+        result = await self.broker.close_all_positions()
+        attempted = list(result.get("attempted", []))
+        remaining = set(result.get("remaining", []))
+        close_execs = await self.broker.get_recent_closes(attempted)
+
+        for sym in attempted:
+            if sym in remaining:
+                continue
+            pos = positions_before.get(sym)
+            tracked = self.tm.get(sym)
+            close_exec = close_execs.get(sym.upper()) or close_execs.get(sym)
+
+            side = pos.side if pos else (tracked.side if tracked else "long")
+            exit_price = (
+                float(close_exec.fill_price)
+                if close_exec and close_exec.fill_price > 0
+                else self._safe_exit_price(
+                    pos.current_price if pos else None,
+                    tracked.entry if tracked else None,
+                )
+            )
+            qty = (
+                float(close_exec.qty)
+                if close_exec and close_exec.qty > 0
+                else (float(pos.qty) if pos else (float(tracked.qty) if tracked else None))
+            )
+            pnl = (
+                float(close_exec.realized_pnl)
+                if close_exec and close_exec.realized_pnl is not None
+                else self._compute_pnl(
+                    side=side,
+                    entry=float(tracked.entry) if tracked else exit_price,
+                    exit_price=exit_price,
+                    qty=float(qty or 0.0),
+                )
+            )
+            await self.notifier.trade_closed(
+                symbol=sym,
+                side=side,
+                exit_price=exit_price,
+                pnl=pnl,
+                reason="EOD close all",
+                qty=qty,
+                order_id=(close_exec.order_id if close_exec else ""),
+            )
+            self.tm.forget(sym)
+
+        if result.get("remaining"):
+            await self.notifier.error("eod_close",
+                                      f"Remaining: {result['remaining']}")
+        else:
+            log.info("runner.eod_closed", attempted=result.get("attempted", []))
+
+    async def _on_post_market(self) -> None:
+        log.info("runner.post_market")
+        acct = await self.broker.get_account()
+        equity = float(acct["equity"])
+        pnl = await self.state.daily_pnl(date.today())
+        trades = await self.state.trades_today(date.today())
+        await self.notifier.daily_summary(
+            day=date.today().isoformat(),
+            pnl=pnl,
+            trades=sum(trades.values()),
+            equity=equity,
+        )
+
+    # ── Bar-Loop (Polling-Fallback) ──────────────────────────────────
+
+    async def _bar_loop(self) -> None:
+        """Polling-Modus: holt periodisch neue Bars über DataProvider."""
+        tf = str(self.cfg.get("timeframe", "5Min"))
+
+        try:
+            async for bar in self.data.stream_bars(self.symbols, tf):
+                if not self._running:
+                    break
+                await self._process_bar(bar)
+        except NotImplementedError:
+            log.info("runner.polling_mode", interval_s=30)
+            await self._polling_fallback(tf)
+
+    async def _polling_fallback(self, tf: str) -> None:
+        from datetime import timedelta
+        last_seen: dict[str, datetime] = {}
+        is_daily = "day" in tf.lower() or "1d" in tf.lower()
+
+        while self._running:
+            now = datetime.now(timezone.utc)
+            start = now - timedelta(days=5) if is_daily else now - timedelta(minutes=60)
+
+            for sym in self.symbols:
+                try:
+                    df = await self.data.get_bars(sym, start, now, tf)
+                except Exception as e:  # noqa: BLE001
+                    log.warning("runner.poll_error", symbol=sym, error=str(e))
+                    continue
+
+                if df.empty:
+                    continue
+
+                last_ts = df.index[-1]
+                if hasattr(last_ts, "to_pydatetime"):
+                    last_ts = last_ts.to_pydatetime()
+                if last_seen.get(sym) == last_ts:
+                    continue
+                last_seen[sym] = last_ts
+
+                row = df.iloc[-1]
+                bar = Bar(
+                    symbol=sym, timestamp=last_ts,
+                    open=float(row["Open"]), high=float(row["High"]),
+                    low=float(row["Low"]), close=float(row["Close"]),
+                    volume=int(row.get("Volume", 0) or 0),
+                )
+                await self._process_bar(bar)
+
+            await asyncio.sleep(int(self.cfg.get("poll_interval_s", 30)))
+
+    # ── Bar-Processing ────────────────────────────────────────────────
+
+    async def _process_bar(self, bar: Bar) -> None:
+        self.ctx.set_now(bar.timestamp)
+
+        # Marktpreis für PaperAdapter (No-Op bei echten Brokern)
+        self.broker.update_price(bar.symbol, bar.close)
+
+        # Trailing auf bestehende Trades
+        new_stop = self.tm.on_price(bar.symbol, bar.close)
+        if new_stop is not None:
+            log.info("runner.trailing_update", symbol=bar.symbol,
+                     new_stop=new_stop)
+
+        # EOD-Check
+        if self.tm.should_eod_close(bar.timestamp):
+            await self._on_eod_close()
+            return
+
+        # Reconcile mit Broker (SL/TP könnte serverseitig gefüllt sein)
+        tracked_before = {
+            symbol: self.tm.get(symbol)
+            for symbol in self.tm.all_symbols()
+        }
+        broker_positions = await self.broker.get_positions()
+        self.tm.reconcile_with_broker(broker_positions)
+        self.ctx.set_open_symbols(list(broker_positions.keys()))
+
+        closed_symbols = [
+            symbol for symbol in tracked_before
+            if symbol not in broker_positions
+        ]
+        close_execs = await self.broker.get_recent_closes(closed_symbols)
+        for sym in closed_symbols:
+            tracked = tracked_before.get(sym)
+            if tracked is None:
+                continue
+            close_exec = close_execs.get(sym.upper()) or close_execs.get(sym)
+            exit_price = (
+                float(close_exec.fill_price)
+                if close_exec and close_exec.fill_price > 0
+                else self._safe_exit_price(
+                    bar.close if bar.symbol == sym else None,
+                    tracked.entry,
+                )
+            )
+            reason = self._infer_close_reason(tracked, bar)
+            pnl = self._compute_pnl(
+                side=tracked.side,
+                entry=tracked.entry,
+                exit_price=exit_price,
+                qty=(
+                    float(close_exec.qty)
+                    if close_exec and close_exec.qty > 0
+                    else tracked.qty
+                ),
+            )
+            if close_exec and close_exec.realized_pnl is not None:
+                pnl = float(close_exec.realized_pnl)
+            await self.notifier.trade_closed(
+                symbol=sym,
+                side=tracked.side,
+                exit_price=exit_price,
+                pnl=pnl,
+                reason=reason,
+                qty=(
+                    float(close_exec.qty)
+                    if close_exec and close_exec.qty > 0
+                    else tracked.qty
+                ),
+                order_id=(close_exec.order_id if close_exec else ""),
+            )
+
+        # Strategie
+        signals = self.strategy.on_bar(bar)
+        for sig in signals:
+            await self._execute_signal(sig)
+
+        # Account-Update
+        acct = await self.broker.get_account()
+        self.ctx.update_account(
+            equity=float(acct["equity"]),
+            cash=float(acct.get("cash", 0)),
+            buying_power=float(acct.get("buying_power", 0)),
+        )
+
+    async def _execute_signal(self, sig: Signal) -> None:
+        if sig.direction == 0:
+            return
+
+        # ── Core-Limits (gelten für alle Strategien) ──────────────────
+        max_daily = int(self.cfg.get("max_daily_trades", 0))
+        if max_daily > 0 and self._daily_trades_count >= max_daily:
+            log.info("runner.max_daily_trades_reached",
+                     symbol=sig.symbol,
+                     trades_today=self._daily_trades_count,
+                     limit=max_daily)
+            return
+
+        max_concurrent = int(self.cfg.get("max_concurrent_positions", 0))
+        if max_concurrent > 0 and len(self.ctx.open_symbols) >= max_concurrent:
+            log.info("runner.max_concurrent_positions_reached",
+                     symbol=sig.symbol,
+                     open_positions=len(self.ctx.open_symbols),
+                     limit=max_concurrent)
+            return
+
+        if sig.metadata.get("exit_next_open"):
+            ts = sig.timestamp
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            ts_et = ts.astimezone(ET_TZ)
+            now_et = ts_et.time()
+
+            entry_cutoff = self.cfg.get("obb_entry_cutoff_time", time(15, 59))
+            market_close = self.cfg.get("obb_close_time", time(16, 0))
+            if isinstance(entry_cutoff, str):
+                hh, mm = entry_cutoff.split(":")
+                entry_cutoff = time(int(hh), int(mm))
+            if isinstance(market_close, str):
+                hh, mm = market_close.split(":")
+                market_close = time(int(hh), int(mm))
+
+            if now_et >= market_close:
+                log.info("runner.obb_entry_skipped_after_close", symbol=sig.symbol,
+                         signal_time=str(now_et), close_time=str(market_close))
+                return
+            if now_et > entry_cutoff:
+                log.info("runner.obb_entry_skipped_after_cutoff", symbol=sig.symbol,
+                         signal_time=str(now_et), cutoff_time=str(entry_cutoff))
+                return
+
+            meta = dict(sig.metadata)
+            meta.setdefault("order_type",
+                            str(self.cfg.get("obb_entry_order_type", "market")))
+            meta.setdefault(
+                "time_in_force",
+                str(self.cfg.get("obb_entry_time_in_force", "cls")).lower(),
+            )
+            sig = Signal(
+                strategy_id=sig.strategy_id,
+                symbol=sig.symbol,
+                direction=sig.direction,
+                strength=sig.strength,
+                stop_price=sig.stop_price,
+                target_price=sig.target_price,
+                timestamp=sig.timestamp,
+                metadata=meta,
+            )
+
+        acct = await self.broker.get_account()
+        equity = float(acct["equity"])
+
+        execution = await self.broker.execute_signal(
+            sig, account_equity=equity,
+            risk_pct=float(self.cfg.get("risk_pct", 0.01)),
+            max_equity_at_risk=float(self.cfg.get("max_equity_at_risk", 0.05)),
+            max_position_value_pct=float(self.cfg.get("max_position_value_pct", 0.25)),
+        )
+        if not execution:
+            return
+        self._daily_trades_count += 1
+
+        side = "long" if sig.direction > 0 else "short"
+        entry = float(sig.metadata.get("entry_price", 0.0))
+        stop = float(sig.stop_price or 0.0)
+        target = float(sig.target_price) if sig.target_price else None
+
+        # TradeManager
+        managed = ManagedTrade(
+            symbol=sig.symbol, side=side, entry=entry,
+            stop=stop, target=target,
+            qty=float(execution.qty),
+            strategy_id=sig.strategy_id,
+            opened_at=sig.timestamp,
+            metadata=dict(sig.metadata),
+        )
+        self.tm.register(managed)
+
+        # Position am nächsten Open schließen (exit_next_open-Flag)
+        if sig.metadata.get("exit_next_open"):
+            self._pending_exit_next_open.add(sig.symbol)
+
+        # Context: Reserve Group
+        group = sig.metadata.get("reserve_group")
+        if group:
+            self.ctx.reserve_group(group)
+            await self.state.reserve_group(group, sig.timestamp.date()
+                                           if hasattr(sig.timestamp, "date")
+                                           else date.today())
+
+        # Notification
+        await self.notifier.trade_opened(
+            sig.symbol,
+            side,
+            managed.qty,
+            entry,
+            stop,
+            target,
+            reason=str(sig.metadata.get("reason", "")),
+            order_id=execution.order_id,
+            order_type=execution.order_type,
+            time_in_force=execution.time_in_force,
+        )
+        log.info("runner.signal_executed", symbol=sig.symbol,
+                 side=side, order_id=execution.order_id,
+                 reason=sig.metadata.get("reason", ""))
+
+    @staticmethod
+    def _safe_exit_price(
+        primary: Optional[float],
+        fallback: Optional[float],
+    ) -> float:
+        if primary is not None and primary > 0:
+            return float(primary)
+        if fallback is not None and fallback > 0:
+            return float(fallback)
+        return 0.0
+
+    @staticmethod
+    def _compute_pnl(side: str, entry: float, exit_price: float, qty: float) -> float:
+        if qty <= 0:
+            return 0.0
+        if side == "long":
+            return (exit_price - entry) * qty
+        return (entry - exit_price) * qty
+
+    @staticmethod
+    def _infer_close_reason(trade: ManagedTrade, bar: Bar) -> str:
+        if trade.side == "long":
+            if trade.current_stop > 0 and bar.low <= trade.current_stop:
+                return "STOP (server/bracket)"
+            if trade.target is not None and bar.high >= trade.target:
+                return "TARGET (server/bracket)"
+        else:
+            if trade.current_stop > 0 and bar.high >= trade.current_stop:
+                return "STOP (server/bracket)"
+            if trade.target is not None and bar.low <= trade.target:
+                return "TARGET (server/bracket)"
+        return "Position closed at broker"

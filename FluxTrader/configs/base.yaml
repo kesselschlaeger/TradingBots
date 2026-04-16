@@ -1,0 +1,30 @@
+# ──────────────────────────────────────────────────────
+# FluxTrader – Shared Base Config
+# Wird von allen spezifischen Configs gemerged.
+# Spezifische Config überschreibt diese Werte.
+# ──────────────────────────────────────────────────────
+
+initial_capital: 30000.0
+currency: USD
+benchmark: SPY
+
+broker:
+  type: paper
+  paper: true
+  alpaca_data_feed: iex
+  ibkr_host: "192.168.188.93"
+  ibkr_port: 4002
+  ibkr_client_id: 1
+  ibkr_bot_id: FLUX
+
+data:
+  provider: alpaca
+  timeframe: "5Min"
+  lookback_days: 5
+
+notifications:
+  enabled: false
+
+persistence:
+  data_dir: fluxtrader_data
+  state_db: state.db

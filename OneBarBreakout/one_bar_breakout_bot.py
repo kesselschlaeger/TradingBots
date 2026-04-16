@@ -18,6 +18,7 @@ Warum eigenständig statt integriert (Variante A vs. B)?
 
 Verwendung:
     python one_bar_breakout_bot.py --mode scan       # Signal + Order (nach Market Close)
+    python one_bar_breakout_bot.py --broker ibkr --mode scan # Signal + Order (nach Market Close) mit IBKR-Broker
     python one_bar_breakout_bot.py --mode morning    # Exit-Orders für offene Positionen
     python one_bar_breakout_bot.py --mode status     # Portfolio-Status (JSON)
     python one_bar_breakout_bot.py --mode backtest   # Historischer Backtest
@@ -116,6 +117,10 @@ OBB_CONFIG.update({
 
     # Sicherheitsfaktor für Buying-Power-Check
     "buying_power_safety_factor": 0.95,
+
+    # Exit-Order TIF: "opg" für Opening Print (nur wenn vor 09:28 ET eingereicht),
+    # sonst automatisch Fallback auf "day".
+    "exit_time_in_force": "opg",
 
     # Debug: welche Symbole detailliert loggen
     "debug_scan_enabled":         True,
@@ -670,6 +675,23 @@ class OneBarBreakoutBot:
             print("  Wochenende – kein Exit.")
             return {"date": today, "closed": []}
 
+        configured_tif = str(self.cfg.get("exit_time_in_force", "opg")).lower()
+        now_minutes = et_now.hour * 60 + et_now.minute
+        opg_cutoff_minutes = 9 * 60 + 28  # 09:28 ET
+
+        exit_tif = configured_tif
+        if configured_tif == "opg" and now_minutes >= opg_cutoff_minutes:
+            print("  [WARN] Exit-TIF OPG angefordert, aber >= 09:28 ET. "
+                  "Fallback auf DAY.")
+            exit_tif = "day"
+        elif configured_tif not in {"day", "opg", "cls", "gtc"}:
+            print(f"  [WARN] Unbekannter exit_time_in_force='{configured_tif}'. "
+                  "Fallback auf DAY.")
+            exit_tif = "day"
+
+        print(f"  [INFO] Exit Time-In-Force: {exit_tif.upper()} "
+              f"(konfiguriert: {configured_tif.upper()})")
+
         positions = self.alpaca.sync_positions() if self.alpaca else {}
         closed = []
 
@@ -681,24 +703,39 @@ class OneBarBreakoutBot:
             qty       = int(abs(pos["qty"]))
             order_side = "sell" if side == "long" else "buy"
 
-            # OPG = Opening Order (exakt am Opening Print)
-            # Wichtig: muss vor 09:28 ET submitted werden
+            if qty <= 0:
+                print(f"  EXIT SKIP: {sym} – ungültige Qty {pos.get('qty')}")
+                continue
+
             order = (self.alpaca.place_market_order(
                 symbol=sym, qty=qty, side=order_side,
-                time_in_force="opg",
+                time_in_force=exit_tif,
                 client_order_id=f"OBB|EXIT|{sym}|{today}",
             ) if self.alpaca else {"ok": True, "id": "SIM"})
 
             if order.get("ok"):
+                print(
+                    f"  EXIT ORDER: {sym} {order_side.upper()} x{qty} "
+                    f"| TIF={exit_tif.upper()} | ID={order.get('id', '?')} "
+                    f"| STATUS={order.get('status', '?')}"
+                )
                 pnl_est = pos.get("unrealized_pnl", 0.0)
                 msg = (f"OBB EXIT {sym}: {order_side.upper()} {qty} Aktien "
-                       f"[OPG] uPnL≈{pnl_est:+.2f}")
+                       f"[{exit_tif.upper()}] uPnL≈{pnl_est:+.2f}")
                 self._notify("ORDER_EXIT", "OBB Morning Exit", sym,
-                             {"qty": qty, "side": order_side, "upnl": pnl_est}, msg)
+                             {
+                                 "qty": qty,
+                                 "side": order_side,
+                                 "upnl": pnl_est,
+                                 "time_in_force": exit_tif,
+                                 "order_status": order.get("status", ""),
+                                 "order_id": order.get("id", ""),
+                             },
+                             msg)
                 self.portfolio.log_order(
                     sym, order_side.upper(), qty, pos["current_price"],
                     alpaca_order_id=order.get("id", ""),
-                    reason="1-Bar Exit (Morning OPG)", signal="EXIT"
+                    reason=f"1-Bar Exit (Morning {exit_tif.upper()})", signal="EXIT"
                 )
                 closed.append(sym)
             else:
