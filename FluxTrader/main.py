@@ -176,6 +176,93 @@ async def cmd_backtest(cfg: AppConfig) -> None:
     print(f"Trades: {len(result.trades)}")
 
 
+def cmd_wfo(cfg: AppConfig) -> None:
+    """Walk-Forward-Optimierung (sync – WFO läuft CPU-bound ohne Event-Loop)."""
+    from backtest.wfo import WalkForwardOptimizer, run_flux_backtest
+
+    wfo_raw: dict = {}
+    if cfg.model_extra:
+        wfo_raw = cfg.model_extra.get("wfo", {}) or {}
+
+    param_grid = dict(wfo_raw.get("param_grid") or {})
+    if not param_grid:
+        log.error("wfo.no_param_grid",
+                  hint="configs/*.yaml muss 'wfo.param_grid' definieren")
+        return
+
+    is_days = int(wfo_raw.get("is_days", 120))
+    oos_days = int(wfo_raw.get("oos_days", 30))
+    step_days = int(wfo_raw.get("step_days", 20))
+    metric = str(wfo_raw.get("metric", "sharpe"))
+    min_trades_is = int(wfo_raw.get("min_trades_is", 20))
+    n_workers = int(wfo_raw.get("n_workers", 0))
+
+    symbols = cfg.strategy.symbols
+    end = datetime.now(timezone.utc)
+    start = end - timedelta(days=cfg.data.lookback_days)
+
+    async def _load_data():
+        data_prov = _build_data_provider(cfg)
+        data = await data_prov.get_bars_bulk(
+            symbols, start, end, cfg.data.timeframe,
+        )
+        spy = None
+        if cfg.benchmark in data:
+            spy = data[cfg.benchmark]
+        elif cfg.benchmark:
+            raw = await data_prov.get_bars(
+                cfg.benchmark, start, end, cfg.data.timeframe,
+            )
+            if not raw.empty:
+                spy = raw
+        return data, spy
+
+    log.info("wfo.loading_data", symbols=symbols,
+             start=str(start), end=str(end))
+    data, spy_df = asyncio.run(_load_data())
+    log.info("wfo.data_loaded",
+             symbols=list(data.keys()),
+             total_bars=sum(len(d) for d in data.values()))
+
+    wfo = WalkForwardOptimizer(
+        data_dict=data,
+        vix_series=None,
+        base_cfg=cfg,
+        param_grid=param_grid,
+        backtest_func=run_flux_backtest,
+        is_days=is_days,
+        oos_days=oos_days,
+        step_days=step_days,
+        metric=metric,
+        min_trades_is=min_trades_is,
+        spy_df=spy_df,
+        n_workers=n_workers,
+    )
+    wfo.run()
+
+    summary = wfo.summary_frame()
+    stability = wfo.stability_report()
+
+    print("\n" + "=" * 60)
+    print("WFO SUMMARY")
+    print("=" * 60)
+    if summary.empty:
+        print("(keine Fenster ausgewertet)")
+    else:
+        print(summary.to_string(index=False))
+
+    if not stability.empty:
+        print("\n" + "=" * 60)
+        print("PARAMETER STABILITY")
+        print("=" * 60)
+        print(stability.to_string(index=False))
+
+    oos_eq = wfo.combined_oos_equity()
+    if not oos_eq.empty:
+        total = (oos_eq.iloc[-1] - oos_eq.iloc[0]) / oos_eq.iloc[0] * 100.0
+        print(f"\nKombinierte OOS-Gesamtrendite: {total:+.2f}%")
+
+
 async def cmd_live(cfg: AppConfig) -> None:
     from live.notifier import TelegramNotifier
     from live.runner import LiveRunner
@@ -242,8 +329,8 @@ async def cmd_live(cfg: AppConfig) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="FluxTrader")
-    parser.add_argument("command", choices=["live", "paper", "backtest"],
-                        help="Modus: live, paper, backtest")
+    parser.add_argument("command", choices=["live", "paper", "backtest", "wfo"],
+                        help="Modus: live, paper, backtest, wfo")
     parser.add_argument("--config", "-c", required=True,
                         help="Pfad zur YAML-Config")
     parser.add_argument("--log-level", default="INFO")
@@ -257,6 +344,8 @@ def main() -> None:
         asyncio.run(cmd_live(cfg))
     elif args.command == "backtest":
         asyncio.run(cmd_backtest(cfg))
+    elif args.command == "wfo":
+        cmd_wfo(cfg)
 
 
 if __name__ == "__main__":
