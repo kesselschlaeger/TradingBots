@@ -46,7 +46,7 @@ from core.indicators import (
     orb_volume_ratio,
 )
 from core.logging import get_logger
-from core.models import Bar, Signal
+from core.models import Bar, FeatureVector, Signal
 from core.risk import (
     dynamic_kelly,
     expected_value_r,
@@ -335,9 +335,18 @@ class ORBStrategy(BaseStrategy):
         if overlay_reason:
             reason += f" | {overlay_reason}"
 
+        last = df.iloc[-1]
+        close = float(last["Close"])
+        atr_val = float(last.get("ATR", 0.0) or 0.0)
+        features = FeatureVector(
+            atr_pct=atr_val / close if close > 0 else 0.0,
+            volume_ratio=vol_r,
+        )
+
         signal = Signal(
-            strategy_id=self.name,
+            strategy=self.name,
             symbol=symbol,
+            features=features,
             direction=direction,
             strength=float(np.clip(strength, 0.0, 1.0)),
             stop_price=float(stop_price),

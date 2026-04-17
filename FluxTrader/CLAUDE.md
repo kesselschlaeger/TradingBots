@@ -33,21 +33,24 @@ Diese Regeln dürfen NIEMALS verletzt werden:
 ## Verzeichnis-Verantwortlichkeiten
 
 ```
-core/models.py          → Datenklassen (Bar, Signal, OrderRequest, Position, Trade)
-core/indicators.py      → Reine Indikatoren-Funktionen (kein State)
+core/models.py          → Datenklassen (Bar, FeatureVector, BaseSignal, Signal, PairSignal, ...)
+core/indicators.py      → Reine Indikatoren-Funktionen + KalmanSpreadEstimator
 core/risk.py            → Position Sizing, Kelly, Stops, EV-Berechnung
 core/filters.py         → Marktzeiten, Gap, Trend, MIT-Independence, VIX-Regime
+core/ml_filter.py       → MLFilter (optionaler Konfidenz-Filter, Null-Object-Pattern)
 core/context.py         → MarketContextService (DI-Container, Singleton)
 core/trade_manager.py   → ManagedTrade, TradeManager (Exits/Trailing/EOD)
 core/config.py          → AppConfig (Pydantic v2), load_config(), load_env()
 core/logging.py         → setup_logging(), get_logger() via structlog
 
-strategy/base.py        → BaseStrategy ABC mit on_bar() + DI-Property
-strategy/registry.py    → @register-Decorator, StrategyRegistry
+strategy/base.py        → BaseStrategy ABC + PairStrategy ABC
+strategy/registry.py    → @register-Decorator, StrategyRegistry (Single + Pair)
 strategy/orb.py         → ORBStrategy (@register("orb"))
 strategy/obb.py         → OBBStrategy (@register("obb"))
+strategy/botti.py       → BottiStrategy (@register("botti"))
+strategy/botti_pair.py  → BottiPairStrategy (@register("botti_pair"))
 
-execution/port.py       → BrokerPort ABC + execute_signal() Default-Impl
+execution/port.py       → BrokerPort ABC + execute_signal() + execute_pair_signal()
 execution/paper_adapter.py  → In-Memory, kein Netzwerk, für Tests/Backtest
 execution/alpaca_adapter.py → alpaca-py sync→async via run_in_executor
 execution/ibkr_adapter.py   → ib_insync sync→async, Bracket via Parent/Child
@@ -60,18 +63,24 @@ backtest/engine.py   → BarByBarEngine (chronologische Bar-Iteration)
 backtest/report.py   → build_tearsheet(), format_tearsheet()
 backtest/slippage.py → SlippageModel, CommissionModel
 
-live/runner.py    → LiveRunner (asyncio Event-Loop, Hauptschleife)
-live/scheduler.py → TradingScheduler (APScheduler CronTrigger Mon-Fri ET)
-live/state.py     → PersistentState (aiosqlite SQLite)
-live/notifier.py  → TelegramNotifier (httpx, graceful degradation)
-live/scanner.py   → PremarketScanner (Alpaca Snapshot-API)
+live/runner.py      → LiveRunner (asyncio Event-Loop, Einzelsymbol-Strategien)
+live/pair_runner.py → PairEngine (asyncio Task, Pair-Strategien)
+live/scheduler.py   → TradingScheduler (APScheduler CronTrigger Mon-Fri ET)
+live/state.py       → PersistentState (aiosqlite SQLite)
+live/notifier.py    → TelegramNotifier (httpx, graceful degradation)
+live/scanner.py     → PremarketScanner (Alpaca Snapshot-API)
 
-configs/base.yaml → Shared Defaults (wird gemerged)
-main.py           → CLI: live | paper | backtest
+tools/train_ml.py   → CLI: ML-Model-Training auf historischen Trades
+tools/models/       → Gespeicherte model.pkl + scaler.pkl
+
+configs/base.yaml       → Shared Defaults (wird gemerged)
+configs/botti_pair.yaml → Botti Pair-Trading (SPY/QQQ Kalman Z-Score)
+main.py                 → CLI: live | paper | backtest
 ```
 
 ## Signal-Flow (Kurzfassung)
 
+### Einzelsymbol (ORB, OBB, Botti)
 ```
 DataProvider.get_bars_bulk()
   → BarByBarEngine / LiveRunner
@@ -79,7 +88,8 @@ DataProvider.get_bars_bulk()
     → strategy.on_bar(bar)
       → context.push_bar(bar)
       → _generate_signals(bar)  ← reine Logik
-    → [Signal]
+    → [Signal] (mit FeatureVector)
+    → ml_filter.passes(signal)   ← optionaler ML-Konfidenz-Filter
     → broker.execute_signal(signal, equity, risk_pct)
       → position_size() / fixed_fraction_size()
       → broker.submit_order(OrderRequest)
@@ -87,17 +97,42 @@ DataProvider.get_bars_bulk()
     → context.set_open_symbols / reserve_group
 ```
 
-## Zwei Sizing-Paradigmen
+### Pair-Trading (botti_pair)
+```
+PairEngine._fetch_bars(sym_a, sym_b)
+  → strategy._generate_pair_signal(bar_a, bar_b, snapshot)
+  → PairSignal (mit FeatureVector, z_score)
+  → ml_filter.passes(signal)
+  → broker.execute_pair_signal(signal, equity)
+    → submit_order(long_leg) + submit_order(short_leg)
+    → bei Failure: cancel(long_leg) → kein Leg-Mismatch
+  → trade_manager.register(long_leg + short_leg)
+```
+
+## Signal-Hierarchie
+
+```
+BaseSignal (strategy, symbol, features: FeatureVector, timestamp)
+  ├── Signal      (direction, strength, stop_price, ...) → Einzelsymbol
+  └── PairSignal  (long_symbol, short_symbol, z_score, action, qty_pct) → Pair
+```
+
+`FeatureVector` ist einheitlich für ML-Filter: sma_diff, adx, atr_pct, rsi,
+macd_hist, z_score (Pair: Spread Z-Score, Einzelsymbol: 0.0), volume_ratio.
+
+## Drei Sizing-Paradigmen
 
 - **ORB**: R-basiert über `position_size(equity, risk_pct, entry, stop)`
   Gesteuert durch `qty_factor` aus MIT-Overlay (0.25–1.0)
 - **OBB**: Fixed-Fraction über `fixed_fraction_size(equity, price, fraction)`
   Signal enthält `qty_hint` im metadata; `execute_signal` prüft das zuerst
+- **Pair**: ATR-basiert über `execute_pair_signal(signal, equity)`
+  Nutzt `qty_pct` und `atr_pct` aus PairSignal/FeatureVector
 
 ## Strategie registrieren
 
 ```python
-# Neue Strategie in strategy/my_strat.py:
+# Neue Einzelsymbol-Strategie:
 from strategy.registry import register
 from strategy.base import BaseStrategy
 
@@ -106,6 +141,19 @@ class MyStrat(BaseStrategy):
     @property
     def name(self): return "my_strat"
     def _generate_signals(self, bar): ...
+
+# Neue Pair-Strategie:
+from strategy.base import PairStrategy
+
+@register("my_pair")
+class MyPair(PairStrategy):
+    @property
+    def name(self): return "my_pair"
+    @property
+    def symbol_a(self): return "SPY"
+    @property
+    def symbol_b(self): return "QQQ"
+    def _generate_pair_signal(self, bar_a, bar_b, snapshot): ...
 
 # In strategy/__init__.py importieren:
 from strategy import my_strat  # noqa: F401
@@ -117,6 +165,7 @@ from strategy import my_strat  # noqa: F401
 pytest              # Alle Tests (kein Netzwerk nötig)
 pytest tests/unit/  # Nur Unit-Tests
 pytest -v -k "orb"  # Nur ORB-Tests
+pytest -v -k "pair or ml_filter"  # Pair-Trading + ML-Filter
 ```
 
 Fixtures in `tests/conftest.py`:
@@ -132,11 +181,13 @@ Fixtures in `tests/conftest.py`:
 
 | Aufgabe | Datei | Was tun |
 |---|---|---|
-| Neue Strategie | `strategy/my_strat.py` | `@register("name")` + `BaseStrategy` |
+| Neue Einzelsymbol-Strategie | `strategy/my_strat.py` | `@register("name")` + `BaseStrategy` |
+| Neue Pair-Strategie | `strategy/my_pair.py` | `@register("name")` + `PairStrategy` |
 | Neuer Broker | `execution/my_broker.py` | `BrokerPort` erben, `submit_order` etc. implementieren |
 | Neue Datenquelle | `data/providers/my_provider.py` | `DataProvider` erben |
 | Neuer Filter | `core/filters.py` | Pure Funktion hinzufügen |
 | Neuer Indikator | `core/indicators.py` | Pure Funktion hinzufügen |
+| ML-Modell trainieren | `tools/train_ml.py` | `python tools/train_ml.py --history DB --output tools/models/` |
 
 ## Pydantic v2 Konventionen
 

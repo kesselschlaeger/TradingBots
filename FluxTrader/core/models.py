@@ -4,7 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Optional
+from typing import Literal, Optional
 
 
 def _utcnow() -> datetime:
@@ -23,15 +23,52 @@ class Bar:
     vwap: Optional[float] = None
 
 
+# ── Feature Vector & Signal-Hierarchie ──────────────────────────────────
+
 @dataclass(frozen=True)
-class Signal:
-    strategy_id: str
+class FeatureVector:
+    """Einheitlicher Feature-Vektor für ML-Filter – shared über alle Signaltypen."""
+    sma_diff: float = 0.0       # (SMA_short - SMA_long) / SMA_long
+    adx: float = 0.0
+    atr_pct: float = 0.0        # ATR / Close
+    rsi: float = 0.0
+    macd_hist: float = 0.0
+    z_score: float = 0.0        # Pair-Trading: Spread Z-Score; Einzelsymbol: 0.0
+    volume_ratio: float = 1.0   # Volume / Vol_SMA
+
+
+@dataclass(frozen=True)
+class BaseSignal:
+    """Gemeinsame Basis für Signal und PairSignal. Wird vom MLFilter konsumiert."""
+    strategy: str
     symbol: str
-    direction: int              # +1 long, -1 short, 0 flat/exit
-    strength: float             # 0.0–1.0
-    stop_price: float
-    target_price: Optional[float] = None
+    features: FeatureVector = field(default_factory=FeatureVector)
     timestamp: datetime = field(default_factory=_utcnow)
+
+
+@dataclass(frozen=True)
+class Signal(BaseSignal):
+    """Einzelsymbol-Signal (ORB, OBB, Botti Trend/MR)."""
+    direction: int = 0              # +1 long, -1 short, 0 flat/exit
+    strength: float = 0.0           # 0.0–1.0
+    stop_price: float = 0.0
+    target_price: Optional[float] = None
+    metadata: dict = field(default_factory=dict)
+
+    @property
+    def strategy_id(self) -> str:
+        """Alias für Abwärtskompatibilität."""
+        return self.strategy
+
+
+@dataclass(frozen=True)
+class PairSignal(BaseSignal):
+    """Signal für Pair-/Multi-Symbol-Strategien."""
+    long_symbol: str = ""
+    short_symbol: str = ""
+    z_score: float = 0.0
+    action: Literal["ENTER", "EXIT", "HOLD"] = "HOLD"
+    qty_pct: float = 0.05       # % of equity pro Seite
     metadata: dict = field(default_factory=dict)
 
 

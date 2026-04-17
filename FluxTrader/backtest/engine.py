@@ -293,7 +293,7 @@ class BarByBarEngine:
             stop=float(sig.stop_price or 0.0),
             target=float(sig.target_price) if sig.target_price else None,
             qty=float(self._last_position_qty_sync(sig.symbol)),
-            strategy_id=sig.strategy_id,
+            strategy_id=sig.strategy,
             opened_at=bar.timestamp,
             metadata=dict(sig.metadata),
         )

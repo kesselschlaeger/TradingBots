@@ -10,6 +10,7 @@ from core.models import (
     ExecutionResult,
     OrderRequest,
     OrderSide,
+    PairSignal,
     Position,
     Signal,
 )
@@ -143,3 +144,51 @@ class BrokerPort(ABC):
             order_type=req.order_type,
             time_in_force=req.time_in_force,
         )
+
+    # ── Pair-Signal Execution ──────────────��────────────────────────────
+
+    async def execute_pair_signal(
+        self,
+        signal: PairSignal,
+        equity: float,
+    ) -> tuple[Optional[dict], Optional[dict]]:
+        """Führt Long- und Short-Leg atomar aus.
+
+        Gibt (long_result, short_result) zurück.
+        Bei Failure eines Legs: anderen sofort stornieren (kein Leg-Mismatch).
+        Default-Implementierung in BrokerPort – Adapter erben sie.
+        """
+        atr_pct = signal.features.atr_pct
+        if atr_pct <= 0:
+            atr_pct = 0.01
+        qty = max(1, int(equity * signal.qty_pct / atr_pct))
+
+        long_req = OrderRequest(
+            symbol=signal.long_symbol,
+            side=OrderSide.BUY,
+            qty=qty,
+        )
+        short_req = OrderRequest(
+            symbol=signal.short_symbol,
+            side=OrderSide.SELL,
+            qty=qty,
+        )
+
+        long_id = await self.submit_order(long_req)
+        if long_id is None:
+            log.warning("pair.long_leg_failed", symbol=signal.long_symbol)
+            return None, None
+
+        short_id = await self.submit_order(short_req)
+        if short_id is None:
+            await self.cancel_order(long_id)
+            log.warning("pair.short_leg_failed_rollback",
+                        long_symbol=signal.long_symbol,
+                        short_symbol=signal.short_symbol)
+            return None, None
+
+        long_r = {"id": long_id, "symbol": signal.long_symbol,
+                  "side": "long", "qty": qty}
+        short_r = {"id": short_id, "symbol": signal.short_symbol,
+                   "side": "short", "qty": qty}
+        return long_r, short_r

@@ -43,6 +43,20 @@ def _build_strategy(cfg: AppConfig, ctx: MarketContextService):
     return StrategyRegistry.get(cfg.strategy.name, cfg.strategy.params, context=ctx)
 
 
+def _build_ml_filter(cfg: AppConfig):
+    from core.ml_filter import build_ml_filter
+    ml_cfg = getattr(cfg, "ml", None)
+    if ml_cfg is None:
+        ml_raw = cfg.model_extra.get("ml", {}) if cfg.model_extra else {}
+    else:
+        ml_raw = ml_cfg if isinstance(ml_cfg, dict) else {}
+    return build_ml_filter(
+        enabled=bool(ml_raw.get("enabled", False)),
+        model_path=ml_raw.get("model_path"),
+        threshold=float(ml_raw.get("threshold", 0.6)),
+    )
+
+
 # ─────────────────────────── Broker-Factory ───────────────────────────────
 
 def _build_broker(cfg: AppConfig):
@@ -166,6 +180,7 @@ async def cmd_live(cfg: AppConfig) -> None:
     from live.notifier import TelegramNotifier
     from live.runner import LiveRunner
     from live.state import PersistentState
+    from strategy.base import PairStrategy
 
     env = load_env()
     ctx = MarketContextService(initial_capital=cfg.initial_capital)
@@ -174,6 +189,7 @@ async def cmd_live(cfg: AppConfig) -> None:
     strategy = _build_strategy(cfg, ctx)
     broker = _build_broker(cfg)
     data_prov = _build_data_provider(cfg)
+    ml_filter = _build_ml_filter(cfg)
 
     state = PersistentState(
         Path(cfg.persistence.data_dir) / cfg.persistence.state_db
@@ -190,22 +206,36 @@ async def cmd_live(cfg: AppConfig) -> None:
         ),
     )
 
-    runner = LiveRunner(
-        strategy=strategy,
-        broker=broker,
-        data_provider=data_prov,
-        context=ctx,
-        state=state,
-        notifier=notifier,
-        symbols=cfg.strategy.symbols,
-        config=cfg.strategy.params,
-    )
-
     log.info("live.starting", mode=cfg.mode,
              strategy=cfg.strategy.name,
              broker=cfg.broker.type,
              symbols=cfg.strategy.symbols)
-    await runner.start()
+
+    # Pair-Pfad: PairEngine als separate Task
+    if isinstance(strategy, PairStrategy):
+        from live.pair_runner import PairEngine
+        pair_engine = PairEngine(
+            strategy=strategy,
+            broker=broker,
+            data_provider=data_prov,
+            context=ctx,
+            ml_filter=ml_filter,
+            config=cfg.strategy.params,
+        )
+        await pair_engine.run()
+    else:
+        # Standard-Pfad: LiveRunner
+        runner = LiveRunner(
+            strategy=strategy,
+            broker=broker,
+            data_provider=data_prov,
+            context=ctx,
+            state=state,
+            notifier=notifier,
+            symbols=cfg.strategy.symbols,
+            config=cfg.strategy.params,
+        )
+        await runner.start()
 
 
 # ─────────────────────────── CLI ──────────────────────────────────────────

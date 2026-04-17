@@ -514,7 +514,7 @@ class LiveRunner:
                 str(self.cfg.get("obb_entry_time_in_force", "cls")).lower(),
             )
             sig = Signal(
-                strategy_id=sig.strategy_id,
+                strategy=sig.strategy,
                 symbol=sig.symbol,
                 direction=sig.direction,
                 strength=sig.strength,
@@ -547,7 +547,7 @@ class LiveRunner:
             symbol=sig.symbol, side=side, entry=entry,
             stop=stop, target=target,
             qty=float(execution.qty),
-            strategy_id=sig.strategy_id,
+            strategy_id=sig.strategy,
             opened_at=sig.timestamp,
             metadata=dict(sig.metadata),
         )

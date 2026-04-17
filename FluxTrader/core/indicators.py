@@ -1,4 +1,8 @@
-"""Reine Indikatoren-Funktionen. Keine I/O, keine Seiteneffekte."""
+"""Reine Indikatoren-Funktionen. Keine I/O, keine Seiteneffekte.
+
+Ausnahme: KalmanSpreadEstimator hat internen State (eine Instanz pro
+Pair-Strategie). Lebt hier, weil es ein Indikator ist.
+"""
 from __future__ import annotations
 
 from typing import Optional
@@ -217,3 +221,39 @@ def orb_volume_ratio(
         return 1.0
     avg = float(np.mean(hist_vols))
     return today_vol / avg if avg > 0 else 1.0
+
+
+# ─────────────────────────── Kalman Spread Estimator ─────────────────────────
+
+
+class KalmanSpreadEstimator:
+    """Inkrementeller Kalman-Filter für Spread-Zeitreihen.
+
+    State lebt in der Instanz – pro Pair-Strategie eine Instanz erstellen.
+    Mathematik übernommen aus Trading_Bot/trader_v6.py (kalman_estimate).
+    """
+
+    def __init__(self, q: float = 1e-5, r: float = 0.01):
+        self._x: Optional[float] = None   # Schätzung
+        self._p: float = 1.0              # Fehler-Kovarianz
+        self._q = q                        # Prozessrauschen
+        self._r = r                        # Messrauschen
+
+    def update(self, value: float) -> tuple[float, float]:
+        """Gibt (mean_estimate, variance) zurück. Thread-safe: nein."""
+        if self._x is None:
+            self._x = value
+        p_pred = self._p + self._q
+        k = p_pred / (p_pred + self._r)
+        self._x = self._x + k * (value - self._x)
+        self._p = (1 - k) * p_pred
+        return self._x, self._p
+
+    def z_score(self, value: float, rolling_std: float) -> float:
+        """Convenience: update + Z-Score in einem Schritt."""
+        mean, _ = self.update(value)
+        return (value - mean) / (rolling_std + 1e-9)
+
+    def reset(self) -> None:
+        self._x = None
+        self._p = 1.0

@@ -1,0 +1,54 @@
+# ──────────────────────────────────────────────────────
+# FluxTrader – Botti Pair (SPY/QQQ Kalman Z-Score)
+# ──────────────────────────────────────────────────────
+
+mode: paper
+
+strategy:
+  name: botti_pair
+  symbols:
+    - SPY
+    - QQQ
+  risk_pct: 0.02
+  params:
+    # Pair-Symbole
+    symbol_a: SPY
+    symbol_b: QQQ
+
+    # Z-Score Schwellenwerte
+    z_entry: 2.0
+    z_exit: 0.5
+
+    # Position Sizing pro Seite
+    pair_position_pct: 0.05
+
+    # Rolling-Window für Spread-Standardabweichung
+    pair_lookback: 20
+
+    # Kalman-Filter-Parameter
+    kalman_q: 0.00001
+    kalman_r: 0.01
+
+    # Misc
+    initial_capital: 10000.0
+
+# ML-Filter (optional)
+ml:
+  enabled: false
+  model_path: tools/models/
+  threshold: 0.6
+
+broker:
+  type: paper
+  paper: true
+  alpaca_data_feed: iex
+
+data:
+  provider: yfinance
+  timeframe: "1D"
+  lookback_days: 60
+
+notifications:
+  enabled: false
+
+benchmark: SPY

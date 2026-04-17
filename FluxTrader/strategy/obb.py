@@ -21,7 +21,7 @@ import pandas as pd
 
 from core.indicators import rolling_high_low
 from core.logging import get_logger
-from core.models import Bar, Signal
+from core.models import Bar, FeatureVector, Signal
 from core.risk import fixed_fraction_size, kelly_fraction
 from strategy.base import BaseStrategy
 from strategy.registry import register
@@ -146,8 +146,9 @@ class OBBStrategy(BaseStrategy):
         qty_hint = self._qty_hint(current_close)
 
         signal = Signal(
-            strategy_id=self.name,
+            strategy=self.name,
             symbol=symbol,
+            features=FeatureVector(),
             direction=direction,
             strength=float(strength),
             stop_price=0.0,                 # kein SL (OBB-Regel)
