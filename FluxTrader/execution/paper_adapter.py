@@ -39,8 +39,10 @@ class PaperAdapter(BrokerPort):
                  initial_cash: float = 30_000.0,
                  slippage_pct: float = 0.0002,
                  commission_pct: float = 0.00005,
-                 paper: bool = True):
+                 paper: bool = True,
+                 log_fills: bool = True):
         self.paper = paper
+        self.log_fills = log_fills
         self._cash = initial_cash
         self._initial = initial_cash
         self._slippage = slippage_pct
@@ -50,8 +52,24 @@ class PaperAdapter(BrokerPort):
         self._market_prices: dict[str, float] = {}
         self._trade_log: list[Trade] = []
         self._lock = asyncio.Lock()
+        # Simulierte Zeit: wenn gesetzt (Backtest), werden Trade.timestamp und
+        # PaperOrder.filled_at aus dieser Bar-Zeit statt wall-clock gespeist.
+        # Live-Modus l\u00e4sst dies auf None und nutzt utcnow().
+        self._sim_clock: Optional[datetime] = None
 
     # ── Preis-Injection (Backtest ruft dies) ───────────────────────
+
+    def set_sim_clock(self, ts: Optional[datetime]) -> None:
+        """Backtest-Engine setzt pro Bar die simulierte Zeit.
+
+        Dadurch erhalten Trades und Fills konsistente Bar-Timestamps, was
+        Equity-Curve, Tearsheet und zeitbasierte Trade-Analyse korrekt macht.
+        """
+        self._sim_clock = ts
+
+    def _now(self) -> datetime:
+        """Sim-Clock im Backtest, wall-clock im Live-Modus."""
+        return self._sim_clock or datetime.now(timezone.utc)
 
     def set_market_price(self, symbol: str, price: float) -> None:
         self._market_prices[symbol] = float(price)
@@ -83,11 +101,13 @@ class PaperAdapter(BrokerPort):
             order_id = f"paper-{uuid.uuid4().hex[:12]}"
             self._orders[order_id] = PaperOrder(
                 id=order_id, req=req, filled_price=filled,
+                filled_at=self._now(),
             )
             self._apply_fill(req, filled, commission, order_id)
-            log.info("paper.fill", symbol=req.symbol, side=req.side.value,
-                     qty=req.qty, filled_price=filled, commission=commission,
-                     order_id=order_id)
+            if self.log_fills:
+                log.info("paper.fill", symbol=req.symbol, side=req.side.value,
+                         qty=req.qty, filled_price=filled,
+                         commission=commission, order_id=order_id)
             return order_id
 
     async def cancel_order(self, order_id: str) -> bool:
@@ -213,6 +233,7 @@ class PaperAdapter(BrokerPort):
                 self._trade_log.append(Trade(
                     symbol=sym, side="COVER", qty=close_qty,
                     price=price, pnl=pnl,
+                    timestamp=self._now(),
                     order_id=order_id,
                     reason=req.client_order_id or "",
                     fees=commission,
@@ -235,6 +256,7 @@ class PaperAdapter(BrokerPort):
                 self._trade_log.append(Trade(
                     symbol=sym, side="SELL", qty=close_qty,
                     price=price, pnl=pnl,
+                    timestamp=self._now(),
                     order_id=order_id,
                     reason=req.client_order_id or "",
                     fees=commission,
@@ -287,9 +309,10 @@ class PaperAdapter(BrokerPort):
             id=order_id, req=req, filled_price=filled,
         )
         self._apply_fill(req, filled, commission, order_id)
-        log.info("paper.fill", symbol=req.symbol, side=req.side.value,
-                 qty=req.qty, filled_price=filled, commission=commission,
-                 order_id=order_id)
+        if self.log_fills:
+            log.info("paper.fill", symbol=req.symbol, side=req.side.value,
+                     qty=req.qty, filled_price=filled, commission=commission,
+                     order_id=order_id)
         return order_id
 
     # ── Convenience für Tests ──────────────────────────────────────

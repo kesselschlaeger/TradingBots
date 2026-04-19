@@ -100,16 +100,13 @@ def _bullish_spy_daily(days_before: int = 40,
 
 
 def _trade_signature(t: Trade) -> tuple:
-    """Vergleichbare Trade-Signatur ohne nicht-deterministische Felder.
+    """Vergleichbare Trade-Signatur ohne UUID-order_id.
 
-    Ausgeschlossen:
-    - ``order_id``: UUID, pro Run neu.
-    - ``timestamp``: aus ``datetime.utcnow()``-Default, wall-clock.
-    - ``fees``/``pnl``: numerisch, aber vom gleichen Code erzeugt, daher
-      bei identischem Input immer gleich -- dennoch mit runden Toleranzen.
+    ``timestamp`` wird im Backtest aus der Bar-Zeit gef\u00fcllt (siehe
+    ``PaperAdapter.set_sim_clock``) und ist daher deterministisch.
     """
     return (t.symbol, t.side, float(t.qty), round(float(t.price), 6),
-            round(float(t.pnl), 6), t.reason, t.strategy_id)
+            round(float(t.pnl), 6), t.timestamp, t.reason, t.strategy_id)
 
 
 def _count_short_closes(trades: list[Trade]) -> int:

@@ -47,6 +47,9 @@ class BacktestConfig:
     trail_distance_r: float = 0.6
     slippage: SlippageModel = field(default_factory=SlippageModel)
     commission: CommissionModel = field(default_factory=CommissionModel)
+    # Steuert paper.fill- und trade.register-Logs: im Backtest i.d.R.
+    # stoerend (tausende Einzelzeilen), daher default off.
+    log_order_events: bool = False
 
 
 @dataclass
@@ -56,6 +59,11 @@ class BacktestResult:
     final_equity: float
     initial_capital: float
     bars_processed: int
+    start_ts: Optional[datetime] = None
+    end_ts: Optional[datetime] = None
+    strategy_name: str = ""
+    allow_shorts: bool = True
+    mit_enabled: bool = False
 
 
 # ── Timeline-Builder (Variante C) ────────────────────────────────────────
@@ -108,12 +116,19 @@ class BarByBarEngine:
         self.broker = broker
         self.context = context
         self.cfg = config
+        # Fill- und Register-Logs werden gemeinsam über log_order_events
+        # gesteuert. PaperAdapter hat das Attribut; Live-Broker ignorieren
+        # es harmlos (setattr ist no-op-safe).
+        try:
+            broker.log_fills = bool(config.log_order_events)
+        except AttributeError:
+            pass
         self.tm = TradeManager(
             trail_after_r=config.trail_after_r,
             trail_distance_r=config.trail_distance_r,
             use_trailing=config.use_trailing,
             eod_close_time=config.eod_close_time,
-            log_registers=bool(getattr(broker, "log_fills", True)),
+            log_registers=bool(config.log_order_events),
         )
         self._equity_curve: list[tuple[datetime, float]] = []
         self._pending_exit_next_open: dict[str, ManagedTrade] = {}
@@ -140,13 +155,27 @@ class BarByBarEngine:
         # ── Variante C: Effiziente Timeline aus numpy-Arrays ─────────
         timeline, sym_arrays = _build_timeline(precomputed)
 
+        strat_cfg = getattr(self.strategy, "config", {}) or {}
+        meta = dict(
+            strategy_name=getattr(self.strategy, "name", type(self.strategy).__name__),
+            allow_shorts=bool(strat_cfg.get("allow_shorts", True)),
+            mit_enabled=bool(strat_cfg.get("use_mit_probabilistic_overlay", False)),
+        )
+
         if not timeline:
             return BacktestResult(
                 trades=[], equity_curve=pd.Series(dtype=float),
                 final_equity=self.cfg.initial_capital,
                 initial_capital=self.cfg.initial_capital,
                 bars_processed=0,
+                **meta,
             )
+
+        def _py_ts(ts):
+            return ts.to_pydatetime() if hasattr(ts, "to_pydatetime") else ts
+
+        start_ts = _py_ts(timeline[0][0])
+        end_ts = _py_ts(timeline[-1][0])
 
         n_bars = len(timeline)
         log.info("backtest.start", total_bars=n_bars,
@@ -167,6 +196,9 @@ class BarByBarEngine:
             # Cursor setzen (Strategie liest precomputed frame bis hierhin)
             self.context.set_bar_cursor(sym, ridx)
             self.context.set_now(py_ts)
+            # Broker nutzt Bar-Zeit f\u00fcr Trade.timestamp / filled_at statt
+            # wall-clock -- wichtig f\u00fcr Tearsheet und Equity-Curve.
+            self.broker.set_sim_clock(py_ts)
             self._update_vix(py_ts, vix_series, vix3m_series)
 
             # Day-Change → reserved groups zurücksetzen
@@ -227,6 +259,9 @@ class BarByBarEngine:
             final_equity=float(final_account["equity"]),
             initial_capital=self.cfg.initial_capital,
             bars_processed=n_bars,
+            start_ts=start_ts,
+            end_ts=end_ts,
+            **meta,
         )
 
     # ── Sync-Hilfsmethoden (Variante D: kein async im Hot-Loop) ──────

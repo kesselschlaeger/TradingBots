@@ -171,7 +171,14 @@ async def cmd_backtest(cfg: AppConfig) -> None:
     print("\n" + "=" * 50)
     print("BACKTEST RESULT")
     print("=" * 50)
-    print(format_tearsheet(ts))
+    print(format_tearsheet(
+        ts,
+        start_ts=result.start_ts,
+        end_ts=result.end_ts,
+        strategy_name=result.strategy_name,
+        allow_shorts=result.allow_shorts,
+        mit_enabled=result.mit_enabled,
+    ))
     print(f"Bars processed: {result.bars_processed}")
     print(f"Trades: {len(result.trades)}")
 

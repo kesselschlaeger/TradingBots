@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from datetime import datetime
+from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -108,8 +110,37 @@ def build_tearsheet(equity: pd.Series, trades: list[Trade],
     )
 
 
-def format_tearsheet(ts: Tearsheet) -> str:
-    return (
+def _fmt_ts(ts: Optional[datetime]) -> str:
+    if ts is None:
+        return "—"
+    return ts.strftime("%Y-%m-%d %H:%M %Z").strip() or ts.strftime("%Y-%m-%d %H:%M")
+
+
+def format_tearsheet(
+    ts: Tearsheet,
+    *,
+    start_ts: Optional[datetime] = None,
+    end_ts: Optional[datetime] = None,
+    strategy_name: str = "",
+    allow_shorts: Optional[bool] = None,
+    mit_enabled: Optional[bool] = None,
+) -> str:
+    header = ""
+    if strategy_name:
+        header += f"Strategy:       {strategy_name}\n"
+    if start_ts is not None or end_ts is not None:
+        span_days = ""
+        if start_ts is not None and end_ts is not None:
+            days = max((end_ts - start_ts).days, 0)
+            span_days = f"  ({days} d)"
+        header += f"Period:         {_fmt_ts(start_ts)} → {_fmt_ts(end_ts)}{span_days}\n"
+    if allow_shorts is not None:
+        header += f"Shorts allowed: {'yes' if allow_shorts else 'no'}\n"
+    if mit_enabled is not None:
+        header += f"MIT overlay:    {'on' if mit_enabled else 'off'}\n"
+    if header:
+        header += "-" * 50 + "\n"
+    return header + (
         f"Initial:        ${ts.initial_capital:,.2f}\n"
         f"Final:          ${ts.final_equity:,.2f}\n"
         f"Total Return:   {ts.total_return_pct:+.2f}%\n"
