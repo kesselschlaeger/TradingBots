@@ -4,7 +4,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
+
+from pydantic import BaseModel, ConfigDict, Field as PField
 
 
 def _utcnow() -> datetime:
@@ -136,3 +138,124 @@ class Trade:
     order_id: str = ""
     fees: float = 0.0
     metadata: dict = field(default_factory=dict)
+
+
+# ── Monitoring / Alerts ──────────────────────────────────────────────────
+
+
+class AlertLevel(str, Enum):
+    INFO = "info"
+    WARNING = "warning"
+    CRITICAL = "critical"
+
+
+@dataclass
+class DailySummary:
+    date: datetime
+    equity: float
+    equity_change_pct: float
+    benchmark_pct: float
+    alpha_pct: float
+    drawdown_pct: float
+    trades_today: int
+    winners_today: int
+    pnl_today: float
+    open_positions: int
+    circuit_breaker: bool
+    top_winner: Optional[str] = None
+    top_loser: Optional[str] = None
+    signals_filtered: int = 0
+
+
+@dataclass
+class AnomalyEvent:
+    timestamp: datetime
+    check_name: str
+    severity: AlertLevel
+    symbol: Optional[str] = None
+    strategy: Optional[str] = None
+    message: str = ""
+    context: dict[str, Any] = field(default_factory=dict)
+
+
+# ── Persistence-Records (Pydantic v2) ────────────────────────────────────
+# Abbilden 1:1 der SQLite-Tabellen in live/state.py. Alle enthalten das
+# Pflichtfeld ``strategy`` für Multi-Bot-Betrieb auf einer DB.
+
+
+class TradeRecord(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    id: Optional[int] = None
+    strategy: str
+    symbol: str
+    side: str                              # "long" | "short"
+    entry_ts: str
+    exit_ts: Optional[str] = None
+    entry_price: float
+    exit_price: Optional[float] = None
+    qty: float
+    pnl: Optional[float] = None
+    pnl_pct: Optional[float] = None
+    reason: Optional[str] = None
+    stop_price: Optional[float] = None
+    signal_strength: Optional[float] = None
+    mit_qty_factor: Optional[float] = None
+    ev_estimate: Optional[float] = None
+    group_name: Optional[str] = None
+    features_json: Optional[str] = None
+
+
+class EquitySnapshot(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    ts: str
+    strategy: str
+    equity: float
+    cash: float = 0.0
+    drawdown_pct: float = 0.0
+    peak_equity: float = 0.0
+    unrealized_pnl_total: float = 0.0
+
+
+class PositionRecord(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    id: Optional[int] = None
+    strategy: str
+    symbol: str
+    side: Optional[str] = None
+    entry_ts: Optional[str] = None
+    entry_price: Optional[float] = None
+    qty: float = 0.0
+    stop_price: Optional[float] = None
+    last_update_ts: Optional[str] = None
+    current_price: Optional[float] = None
+    unrealized_pnl: Optional[float] = None
+    unrealized_pnl_pct: Optional[float] = None
+    held_minutes: Optional[int] = None
+
+
+class SignalRecord(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    id: Optional[int] = None
+    strategy: str
+    symbol: Optional[str] = None
+    ts: Optional[str] = None
+    action: Optional[str] = None
+    strength: Optional[float] = None
+    filtered_by: Optional[str] = None
+    mit_passed: Optional[int] = None
+    ev_value: Optional[float] = None
+    features_json: Optional[str] = None
+
+
+class DailyRecord(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    day: str
+    strategy: str
+    pnl: float = 0.0
+    trades_count: int = 0
+    by_symbol: dict[str, int] = PField(default_factory=dict)

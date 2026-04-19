@@ -61,7 +61,7 @@ ORB_DEFAULT_CONFIG: dict = {
     # ── Risiko-Management ──────────────────────────────────────────────────
     "risk_per_trade":    0.005,
     "max_daily_trades":  15,
-    "max_concurrent_positions": 3,
+    "max_concurrent_positions": 10,
     "max_equity_at_risk": 0.05,
     "max_position_value_pct": 0.25,
 

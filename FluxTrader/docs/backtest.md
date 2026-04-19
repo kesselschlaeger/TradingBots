@@ -153,6 +153,163 @@ async def main():
 asyncio.run(main())
 ```
 
+---
+
+## Walk-Forward-Optimierung (WFO)
+
+WFO verhindert Overfitting: Parameter werden auf In-Sample-Daten (IS) optimiert
+und sofort auf Out-of-Sample-Daten (OOS) validiert. Nur der kombinierte
+OOS-Track zählt.
+
+### Konzept
+
+```
+|── IS (120 Tage) ──|─ OOS (30 Tage) ─|
+                    |── IS ──|─ OOS ─|           ← nächstes Fenster (Step: 20 Tage)
+                             |── IS ──|─ OOS ─|  ← ...
+```
+
+### 1 · YAML-Config vorbereiten
+
+Ins Config-YAML einen `wfo:`-Block einfügen:
+
+```yaml
+# configs/orb_backtest.yaml
+data:
+  provider: alpaca
+  timeframe: "5Min"
+  lookback_days: 470   # genug Daten für mehrere Fenster
+
+wfo:
+  is_days:       120
+  oos_days:       30
+  step_days:      20
+  metric:         sharpe   # oder: cagr_pct, profit_factor
+  min_trades_is:  20       # IS-Combos mit weniger Trades werden ignoriert
+  n_workers:       0       # 0 = auto (CPU-1), 1 = sequentiell
+  param_grid:
+    profit_target_r:     [1.5, 2.0, 3.0]
+    stop_loss_r:         [0.75, 1.0, 1.25]
+    volume_multiplier:   [1.0, 1.3, 1.5]
+    min_signal_strength: [0.15, 0.20, 0.30]
+```
+
+`param_grid`-Keys überschreiben `strategy.params` je Kombination.
+Alle anderen Werte aus dem Config-Block bleiben erhalten.
+
+### 2 · CLI-Aufruf
+
+```bash
+python main.py wfo --config configs/orb_backtest.yaml
+```
+
+Keine weiteren Flags nötig – alle WFO-Parameter kommen aus dem YAML.
+`--help` funktioniert ohne laufenden Event-Loop.
+
+### 3 · Programmatischer Aufruf
+
+```python
+from backtest.wfo import WalkForwardOptimizer, run_flux_backtest
+from core.config import load_config
+
+cfg = load_config("configs/orb_backtest.yaml")
+wfo_raw = cfg.model_extra.get("wfo", {})
+
+wfo = WalkForwardOptimizer(
+    data_dict=data,          # dict[str, pd.DataFrame] – OHLCV je Symbol
+    vix_series=vix,          # Optional[pd.Series] Tages-VIX
+    base_cfg=cfg,
+    param_grid=wfo_raw["param_grid"],
+    backtest_func=run_flux_backtest,   # Standard-Adapter auf BarByBarEngine
+    is_days=wfo_raw.get("is_days", 120),
+    oos_days=wfo_raw.get("oos_days", 30),
+    step_days=wfo_raw.get("step_days", 20),
+    metric=wfo_raw.get("metric", "sharpe"),
+    min_trades_is=wfo_raw.get("min_trades_is", 20),
+    spy_df=spy_df,
+)
+windows = wfo.run()
+
+# Ergebnisse auswerten
+print(wfo.summary_frame().to_string(index=False))
+print(wfo.stability_report())
+
+combined = wfo.combined_oos_equity()
+total_return = (combined.iloc[-1] / combined.iloc[0] - 1) * 100
+print(f"Kombinierte OOS-Rendite: {total_return:+.2f}%")
+```
+
+### 4 · Eigene backtest_func (Custom-Engine)
+
+`backtest_func` muss diese Signatur haben:
+
+```python
+def my_func(
+    data:        dict[str, pd.DataFrame],
+    vix:         pd.Series | None,
+    cfg:         AppConfig,
+    *,
+    vix3m_series: pd.Series | None = None,
+    spy_df:       pd.DataFrame | None = None,
+    silent:       bool = True,
+) -> dict:
+    ...
+    return {
+        "sharpe":           float,
+        "cagr_pct":         float,
+        "max_drawdown_pct": float,
+        "num_trades":       int,       # oder total_trades
+        "equity_curve":     pd.Series, # optional – für combined_oos_equity
+        "trades":           list,      # optional
+    }
+```
+
+!!! warning "Pickelbarkeit bei n_workers > 1"
+    Wenn `n_workers > 1` (Parallelisierung via `ProcessPoolExecutor`), muss
+    `backtest_func` als Top-Level-Funktion importierbar sein – keine Lambdas
+    oder Closures. `run_flux_backtest` aus `backtest.wfo` erfüllt das.
+    Für Tests lokale Mock-Funktionen mit `n_workers=1` nutzen.
+
+### 5 · Ergebnis-Objekte
+
+| Attribut/Methode | Beschreibung |
+|---|---|
+| `wfo.windows` | `list[WFOWindow]` – alle Fenster |
+| `wfo.summary_frame()` | DataFrame: IS/OOS-Zeiträume, Metriken je Fenster |
+| `wfo.stability_report()` | DataFrame: Parameter-Häufigkeit, OOS-Sharpe/CAGR |
+| `wfo.combined_oos_equity()` | Verkettete, normalisierte OOS-Equity-Kurve |
+| `win.best_params` | Dict mit den besten IS-Parametern |
+| `win.oos_metrics` | Dict mit OOS-Metriken (sharpe, cagr_pct, …) |
+
+### 6 · Unit-Test-Pattern
+
+```python
+# Kein Netzwerk, keine echte Strategie – rein deterministisch
+def _mock_backtest(data, vix, cfg, *, vix3m_series=None, spy_df=None, silent=True):
+    foo = float(cfg.strategy.params.get("foo", 1.0))
+    return {"sharpe": foo, "num_trades": 30, "cagr_pct": foo * 5.0,
+            "max_drawdown_pct": 1.0}
+
+wfo = WalkForwardOptimizer(
+    data_dict={"SPY": daily_df_30_rows},
+    vix_series=None,
+    base_cfg=cfg,
+    param_grid={"foo": [1.0, 2.0, 3.0]},
+    backtest_func=_mock_backtest,
+    is_days=10, oos_days=5, step_days=10,
+    min_trades_is=1,
+    n_workers=1,   # sequential – Mock ist nicht picklebar
+)
+assert wfo.estimated_window_count() == 2
+windows = wfo.run()
+assert len(windows) == 2
+assert windows[0].best_params == {"foo": 3.0}
+```
+
+Fertige Tests: `tests/unit/test_wfo.py` (7 Tests, kein Netzwerk).
+
+---
+
 ## SPY & VIX für den Backtest
 
 ```python

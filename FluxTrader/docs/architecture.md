@@ -13,7 +13,7 @@
 
 ---
 
-## Vollständiger Daten-Flow
+## Vollständiger Daten-Flow (Live)
 
 ```mermaid
 sequenceDiagram
@@ -23,6 +23,7 @@ sequenceDiagram
     participant TM as TradeManager
     participant BP as BrokerPort
     participant ST as PersistentState
+    participant AD as AnomalyDetector
 
     DP->>CTX: set_spy_df / set_vix
     Note over CTX: Writer-API (nur Runner)
@@ -32,12 +33,20 @@ sequenceDiagram
         STR->>CTX: push_bar(bar) + snapshot()
         CTX-->>STR: spy_df, vix, account, reserved_groups
         STR-->>STR: _generate_signals()
-        STR->>TM: Signal → ManagedTrade.register()
-        STR->>BP: execute_signal(Signal)
-        BP-->>STR: order_id
+        STR->>TM: Signal
+        TM->>TM: register_and_persist(trade, sig)
+        TM->>ST: save_trade() ← trades-Tabelle
+        TM->>ST: update_or_create_position() ← positions-Tabelle
+        TM->>ST: save_signal() ← signals-Tabelle (optional)
+        TM->>BP: execute_signal()
+        BP-->>TM: ExecutionResult
         TM->>TM: on_price() → trailing stop?
-        TM->>BP: close (SL/TP/EOD)
-        BP->>ST: add_trade(pnl)
+        Note over TM: TradeManager → close_trade()
+        TM->>ST: close_trade() ← trades (set exit_ts, pnl)
+        TM->>ST: remove_position() ← positions (delete)
+        TM->>ST: update_daily_record() ← daily (inkrementiert)
+        AD->>ST: log_anomaly() ← anomaly_events (bei Anomalie)
+        TM->>ST: save_equity_snapshot() ← equity_snapshots (pro Bar)
     end
 ```
 
@@ -76,12 +85,19 @@ graph TB
         ADP[data/providers/alpaca_provider.py]
         YFP[data/providers/yfinance_provider.py]
     end
-    subgraph L6["Layer 6 – Runner"]
+    subgraph L6["Layer 6 – Runtime & Persistence"]
         BT[backtest/engine.py]
-        LR[live/runner.py]
-        SC[live/scheduler.py]
-        ST[live/state.py]
-        NT[live/notifier.py]
+        LR[live/runner.py<br/>orchestriert alles]
+        SC[live/scheduler.py<br/>APScheduler]
+        ST[live/state.py<br/>SQLite: Single-Source-of-Truth]
+        NT[live/notifier.py<br/>Telegram Alerts]
+        AD[live/anomaly.py<br/>Anomaly-Detection]
+        DB["DB-Tabellen<br/>(9 Tabellen):<br/>trades, positions,<br/>equity_snapshots,<br/>signals, anomaly_events,<br/>daily, account,<br/>cooldowns,<br/>reserved_groups"]
+    end
+    subgraph L7["Layer 7 – Monitoring & Dashboard"]
+        HS[live/health.py<br/>HTTP Health-Server]
+        DASH[dashboard/<br/>FastAPI + Read-Only DB]
+        PROM[Prometheus-Metriken<br/>live/metrics.py]
     end
 
     L1 --> L2 --> L3 --> L4
@@ -89,6 +105,11 @@ graph TB
     L2 --> L6
     L3 --> L6
     L4 --> L6
+    ST --> DB
+    ST --> L7
+    DASH --> ST
+    HS --> L6
+    PROM --> L6
 ```
 
 ---
@@ -136,6 +157,75 @@ set_context_service(MarketContextService(initial_capital=100_000))
 ctx = get_context_service()
 spy = ctx.spy_df
 ```
+
+---
+
+## PersistentState (Single-Source-of-Truth)
+
+Die zentrale SQLite-Datenbank (`fluxtrader_data/state.db`) ist **nicht Teil von Tests**
+und wird nicht geleert zwischen Test-Runs – sie lebt daher unabhängig und kann
+beliebig lange Historien halten.
+
+### Writer-Pfade (nur LiveRunner + TradeManager)
+
+```python
+# OpenOrder
+await state.save_trade(
+    strategy='orb', symbol='AAPL', side='long',
+    entry_ts=datetime.now(), entry_price=150.25, qty=10,
+    mit_qty_factor=0.75, ev_estimate=0.42, features_json='{"rsi":55}'
+)
+
+# CloseOrder
+await state.close_trade(
+    strategy='orb', symbol='AAPL',
+    exit_ts=datetime.now(), exit_price=152.10, pnl=18.50
+)
+
+# Equity-Snapshot (jeden Bar)
+await state.save_equity_snapshot(
+    strategy='orb', ts=bar.timestamp,
+    equity=101500, cash=95000, drawdown_pct=-1.2, peak_equity=102500
+)
+
+# Position-Update (jeden Bar)
+await state.update_or_create_position(
+    strategy='orb', symbol='AAPL', side='long',
+    entry_price=150.25, qty=10, current_price=151.5,
+    unrealized_pnl=12.5, unrealized_pnl_pct=0.83, held_minutes=15
+)
+
+# Anomaly-Logging
+await state.log_anomaly(event)  # event.strategy muss gesetzt sein
+```
+
+### Reader-Pfade (Dashboard, Post-Trade-Analyse)
+
+```python
+# Trade-Historie mit MIT + EV
+trades = await state.get_trades(
+    strategy='orb', only_closed=True, limit=100
+)
+
+# Offene Positionen
+positions = await state.get_open_positions('orb')
+
+# Equity-Kurve (für Charts)
+curve = await state.get_latest_equity_curve('orb', limit=500)
+
+# Bot-Aggregat
+status = await state.get_strategy_status('orb')
+# {equity, drawdown_pct, peak_equity, open_positions, trades_today, pnl_today}
+
+# Alle aktiven Bots
+strategies = await state.get_strategies()
+```
+
+### Persistenz-Garantien
+
+- **WAL-Modus:** Bessere Concurrency bei mehreren gleichzeitigen Bots
+- **Lock-Serialisierung:** Alle Writer-Operationen hängen an `asyncio.Lock()` – keine Race Conditions
+- **Idempotente Schema-Migration:** `ensure_schema()` kann beliebig oft aufgerufen werden (kein Datenverlust)
 
 ---
 

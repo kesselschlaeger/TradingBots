@@ -1,4 +1,4 @@
-"""Zentrales Exit-/Trailing-/EOD-Management.
+"""Zentrales Exit-/Trailing-/EOD-Management + Trade-Persistenz.
 
 Verantwortung:
   - R-basierte Exit-Levels (Stop / Target) werden aus Signal.metadata
@@ -7,19 +7,28 @@ Verantwortung:
     nachgezogen. Nur relevant für Broker, die ``modify_stop`` unterstützen
     (IBKR). Alpaca managed serverseitig.
   - EOD-Close: wenn now >= eod_close_time, werden alle Positionen geflattet.
+  - Persistenz: Bei ``register_and_persist`` wird ein offener Trade in die
+    zentrale SQLite angelegt, bei ``close_trade`` aktualisiert. Das ist
+    die einzige Stelle, an der Core in die DB schreibt – Strategien
+    bleiben I/O-frei (CLAUDE.md Invariante).
 
 Strategien emittieren nur Entry-Signale. Exits entstehen entweder über
 die Bracket-Order oder über diesen Manager.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from datetime import datetime, time
-from typing import Optional
+import json
+from dataclasses import asdict, dataclass, field, is_dataclass
+from datetime import datetime, time, timezone
+from typing import Any, Optional, TYPE_CHECKING
 
 from core.filters import to_et_time
 from core.logging import get_logger
 from core.models import Position
+
+if TYPE_CHECKING:  # pragma: no cover
+    from core.models import BaseSignal
+    from live.state import PersistentState
 
 log = get_logger(__name__)
 
@@ -65,12 +74,14 @@ class TradeManager:
                  trail_distance_r: float = 0.6,
                  use_trailing: bool = False,
                  eod_close_time: Optional[time] = None,
-                 market_close: time = time(16, 0)):
+                 market_close: time = time(16, 0),
+                 state: Optional["PersistentState"] = None):
         self.trail_after_r = trail_after_r
         self.trail_distance_r = trail_distance_r
         self.use_trailing = use_trailing
         self.eod_close_time = eod_close_time
         self.market_close = market_close
+        self.state = state
         self._trades: dict[str, ManagedTrade] = {}
 
     # ── Register / Remove ─────────────────────────────────────────────
@@ -85,8 +96,149 @@ class TradeManager:
         log.info("trade.register", symbol=trade.symbol, side=trade.side,
                  entry=trade.entry, stop=trade.stop, target=trade.target)
 
+    async def register_and_persist(
+        self,
+        trade: ManagedTrade,
+        signal: Optional["BaseSignal"] = None,
+    ) -> Optional[int]:
+        """Registriert + persistiert den Trade in der zentralen DB.
+
+        Extrahiert MIT-Qty-Factor, EV-Estimate, Signal-Strength und
+        Feature-Vector aus ``signal``/``trade.metadata`` – entscheidend
+        für probabilistische Auswertungen (Kelly, MIT-Overlay, EV).
+        Gibt die neue Trade-ID zurück (als ``trade.metadata['trade_id']``
+        hinterlegt), damit ``close_trade`` denselben Datensatz aktua-
+        lisiert."""
+        self.register(trade)
+        if self.state is None:
+            return None
+
+        meta = trade.metadata or {}
+        sig_meta: dict[str, Any] = {}
+        sig_features_json: Optional[str] = None
+        strength: Optional[float] = None
+        if signal is not None:
+            sig_meta = dict(getattr(signal, "metadata", {}) or {})
+            strength = getattr(signal, "strength", None)
+            feats = getattr(signal, "features", None)
+            sig_features_json = _dump_features(feats)
+
+        mit_qty_factor = (
+            _first_float(meta, "qty_factor", "mit_qty_factor")
+            or _first_float(sig_meta, "qty_factor", "mit_qty_factor")
+        )
+        ev_estimate = (
+            _first_float(meta, "ev_estimate", "expected_value", "ev")
+            or _first_float(sig_meta, "ev_estimate", "expected_value", "ev")
+        )
+        group_name = meta.get("reserve_group") or sig_meta.get("reserve_group")
+        reason = meta.get("reason") or sig_meta.get("reason")
+
+        try:
+            trade_id = await self.state.save_trade(
+                strategy=trade.strategy_id,
+                symbol=trade.symbol,
+                side=trade.side,
+                entry_ts=trade.opened_at,
+                entry_price=trade.entry,
+                qty=trade.qty,
+                stop_price=trade.stop,
+                signal_strength=strength,
+                mit_qty_factor=mit_qty_factor,
+                ev_estimate=ev_estimate,
+                group_name=group_name,
+                features_json=sig_features_json,
+                reason=reason,
+            )
+        except Exception as e:  # noqa: BLE001
+            log.warning("trade.persist_open_failed",
+                        symbol=trade.symbol, error=str(e))
+            return None
+
+        trade.metadata["trade_id"] = trade_id
+        # Offene Position spiegeln (Dashboard).
+        try:
+            await self.state.update_or_create_position(
+                strategy=trade.strategy_id,
+                symbol=trade.symbol,
+                side=trade.side,
+                entry_ts=trade.opened_at,
+                entry_price=trade.entry,
+                qty=trade.qty,
+                stop_price=trade.stop,
+                current_price=trade.entry,
+                unrealized_pnl=0.0,
+                unrealized_pnl_pct=0.0,
+                held_minutes=0,
+            )
+        except Exception as e:  # noqa: BLE001
+            log.warning("trade.persist_position_failed",
+                        symbol=trade.symbol, error=str(e))
+        return trade_id
+
     def forget(self, symbol: str) -> None:
         self._trades.pop(symbol, None)
+
+    async def close_trade(
+        self,
+        symbol: str,
+        *,
+        exit_price: float,
+        exit_ts: Optional[datetime] = None,
+        pnl: Optional[float] = None,
+        reason: Optional[str] = None,
+        tracked: Optional[ManagedTrade] = None,
+    ) -> None:
+        """Schließt einen Trade in DB (``trades``) + entfernt offene
+        Position aus ``positions`` und entfernt ihn aus dem In-Memory-
+        TradeManager.
+
+        ``tracked`` kann explizit übergeben werden, falls der Trade
+        zuvor bereits aus dem In-Memory-State entfernt wurde
+        (z.B. durch ``reconcile_with_broker``)."""
+        tracked = tracked or self._trades.get(symbol)
+        ts = exit_ts or datetime.now(timezone.utc)
+        trade_id: Optional[int] = None
+        strategy: Optional[str] = None
+        pnl_pct: Optional[float] = None
+        if tracked is not None:
+            trade_id = tracked.metadata.get("trade_id")
+            strategy = tracked.strategy_id
+            if tracked.entry > 0 and pnl is not None and tracked.qty > 0:
+                pnl_pct = (pnl / (tracked.entry * tracked.qty)) * 100.0
+
+        if self.state is not None:
+            try:
+                await self.state.close_trade(
+                    trade_id=trade_id,
+                    strategy=strategy,
+                    symbol=symbol,
+                    exit_ts=ts,
+                    exit_price=float(exit_price),
+                    pnl=pnl,
+                    pnl_pct=pnl_pct,
+                    reason=reason,
+                )
+            except Exception as e:  # noqa: BLE001
+                log.warning("trade.persist_close_failed",
+                            symbol=symbol, error=str(e))
+            if strategy:
+                try:
+                    await self.state.remove_position(strategy, symbol)
+                except Exception as e:  # noqa: BLE001
+                    log.warning("trade.remove_position_failed",
+                                symbol=symbol, error=str(e))
+                if pnl is not None:
+                    try:
+                        await self.state.update_daily_record(
+                            day=ts.date(), strategy=strategy,
+                            pnl_delta=float(pnl), symbol=symbol,
+                        )
+                    except Exception as e:  # noqa: BLE001
+                        log.warning("trade.daily_update_failed",
+                                    symbol=symbol, error=str(e))
+
+        self.forget(symbol)
 
     def reconcile_with_broker(self, broker_positions: dict[str, Position]) -> None:
         """Entfernt Trades, die der Broker nicht mehr kennt (z.B. durch
@@ -179,3 +331,33 @@ class TradeManager:
 
     def reset(self) -> None:
         self._trades.clear()
+
+
+# ── Helpers ───────────────────────────────────────────────────────────
+
+def _first_float(d: dict[str, Any], *keys: str) -> Optional[float]:
+    for k in keys:
+        v = d.get(k) if d else None
+        if v is None:
+            continue
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _dump_features(feats: Any) -> Optional[str]:
+    """Serialisiert einen FeatureVector (dataclass oder pydantic) zu JSON."""
+    if feats is None:
+        return None
+    try:
+        if hasattr(feats, "model_dump"):  # Pydantic v2
+            return json.dumps(feats.model_dump(), default=str)
+        if is_dataclass(feats):
+            return json.dumps(asdict(feats), default=str)
+        if isinstance(feats, dict):
+            return json.dumps(feats, default=str)
+    except (TypeError, ValueError):
+        return None
+    return None

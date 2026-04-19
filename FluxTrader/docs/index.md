@@ -15,8 +15,9 @@ FluxTrader migriert und vereinheitlicht die bestehenden ORB- und OBB-Bots in ein
 | **Datenquellen** | Alpaca Data API, yfinance (Backtest) |
 | **Risk-Engine** | Kelly-Fraction, Drawdown-Scaling, MIT Probabilistic Overlay, VIX-Regime |
 | **Backtest** | Identische Strategy-Klasse wie Live – kein Code-Drift |
-| **Persistenz** | SQLite via aiosqlite (Tages-PnL, Cooldowns, Gruppen-Reservierungen) |
-| **Alerts** | Telegram Push-Notifications |
+| **Persistenz** | Zentrale SQLite-DB (eine Datei für alle Bots): Trade-Historie + MIT-Qty-Factor + EV-Estimates, Equity-Snapshots, Positionen, Signale, Anomalies, Daily-Aggregates |
+| **Dashboard** | FastAPI + Read-Only DB-Reader: `/api/trades`, `/api/positions`, `/api/equity`, `/api/strategies/status` |
+| **Alerts** | Telegram Push-Notifications + Anomaly-Detection (Duplicate, Oversized, PnL-Spike, Connectivity, Signal-Flood) |
 | **Config** | YAML + Pydantic v2 mit `.env`-Merge |
 | **Logging** | structlog (strukturiert, JSON-fähig) |
 
@@ -98,9 +99,23 @@ FluxTrader/
 ├── live/
 │   ├── runner.py          # LiveRunner (asyncio)
 │   ├── scheduler.py       # APScheduler CronTrigger
-│   ├── state.py           # PersistentState (aiosqlite)
+│   ├── state.py           # PersistentState (zentrale SQLite: Single-Source-of-Truth)
+│   ├── health.py          # HealthState + HTTP Health-Server
+│   ├── metrics.py         # Prometheus-Metriken
+│   ├── anomaly.py         # AnomalyDetector (5 Checks + DB-Persistenz)
 │   ├── notifier.py        # TelegramNotifier
 │   └── scanner.py         # Premarket Gap-Scanner
+├── dashboard/
+│   ├── app.py             # FastAPI-App
+│   ├── routers/
+│   │   ├── trades.py      # GET /api/trades (mit mit_qty_factor, ev_estimate)
+│   │   ├── portfolio.py   # GET /api/positions, /api/equity, /api/portfolio
+│   │   ├── strategies.py  # GET /api/strategies/status
+│   │   └── wfo.py         # GET /api/wfo/* (Walk-Forward-Optimizer)
+│   └── static/
+│       ├── index.html
+│       ├── style.css
+│       └── dashboard.js
 ├── configs/
 │   ├── base.yaml
 │   ├── orb_live.yaml
@@ -120,15 +135,35 @@ FluxTrader/
 
 ## Schnellstart
 
-```bash
-pip install -e ".[alpaca,live,backtest]"
-cp .env.example .env   # API-Keys eintragen
+### Live-Bot (Paper) + Dashboard
 
-# Paper-Trading
+```bash
+# Terminal 1: Paper-Trading
 python main.py paper --config configs/orb_paper.yaml
 
-# Backtest
+# Terminal 2: Dashboard
+python main.py dashboard --config configs/orb_paper.yaml --port 8080
+
+# Browser: http://localhost:8080
+```
+
+Der Bot schreibt automatisch in die zentrale SQLite-DB:
+- `trades` mit MIT-Qty-Factor + EV-Estimates
+- `equity_snapshots` (Hochfrequenz-Equity-Kurve)
+- `positions` (Live-Positionen mit Unrealized-PnL)
+- `anomaly_events` (Erkannte Anomalien)
+- `daily` (Tägliche Aggregates)
+
+### Backtest
+
+```bash
 python main.py backtest --config configs/orb_backtest.yaml
+```
+
+### Walk-Forward-Optimization
+
+```bash
+python main.py wfo --config configs/orb_backtest.yaml
 ```
 
 Detaillierte Anleitung: [Quickstart](quickstart.md)

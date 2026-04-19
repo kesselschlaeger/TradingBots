@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "fluxtrader"
 version = "0.1.0"
 description = "Modular Trading Bot Framework – ORB & OBB Strategies"
-requires-python = ">=3.11"
+requires-python = ">=3.11"  # tested on 3.13
 license = "MIT"
 authors = [{ name = "André Kesselschläger" }]
 

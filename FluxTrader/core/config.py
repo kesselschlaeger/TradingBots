@@ -41,6 +41,10 @@ class NotificationConfig(BaseModel):
     bot_name: str = ""
     telegram_token: str = ""
     telegram_chat_id: str = ""
+    health_telegram_token: str = ""
+    readiness_telegram_token: str = ""
+    health_telegram_chat_id: str = ""
+    readiness_telegram_chat_id: str = ""
 
 
 class StrategyConfig(BaseModel):
@@ -59,6 +63,53 @@ class PersistenceConfig(BaseModel):
     state_db: str = "state.db"
 
 
+class MonitoringConfig(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    health_port: int = 8090
+    prometheus_enabled: bool = True
+    dashboard_port: int = 8080
+
+
+class AlertsConfig(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    trade_opened: bool = True
+    trade_closed: bool = True
+    stop_loss_hit: bool = True
+    drawdown_warning_pct: float = -10.0
+    drawdown_critical_pct: float = -15.0
+    circuit_breaker: bool = True
+    broker_disconnect: bool = True
+    daily_summary_time_et: str = "15:55"
+    daily_summary_enabled: bool = True
+    large_order_confirm_above: float = 0.0
+    max_per_symbol_per_minute: int = 1
+    max_per_hour: int = 20
+
+
+class AnomalyConfig(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    duplicate_window_minutes: int = 5
+    duplicate_hard_block: bool = False
+    max_single_order_pct: float = 0.25
+    max_volume_pct: float = 0.01
+    pnl_spike_sigma: float = 3.0
+    pnl_lookback_trades: int = 50
+    bar_gap_minutes: int = 10
+    max_signals_per_hour: int = 20
+    enabled_checks: dict[str, bool] = Field(
+        default_factory=lambda: {
+            "duplicate_trade": True,
+            "oversized_order": True,
+            "pnl_spike": True,
+            "connectivity": True,
+            "signal_flood": True,
+        }
+    )
+
+
 class AppConfig(BaseModel):
     """Wurzel-Konfiguration. extra='allow' -> unbekannte Keys werden durchgereicht."""
     model_config = ConfigDict(extra="allow")
@@ -68,6 +119,9 @@ class AppConfig(BaseModel):
     data: DataConfig = Field(default_factory=DataConfig)
     notifications: NotificationConfig = Field(default_factory=NotificationConfig)
     persistence: PersistenceConfig = Field(default_factory=PersistenceConfig)
+    monitoring: MonitoringConfig = Field(default_factory=MonitoringConfig)
+    alerts: AlertsConfig = Field(default_factory=AlertsConfig)
+    anomaly: AnomalyConfig = Field(default_factory=AnomalyConfig)
     initial_capital: float = 10_000.0
     currency: str = "USD"
     benchmark: str = "SPY"
@@ -96,6 +150,22 @@ class EnvSettings(BaseSettings):
         validation_alias=AliasChoices("TELEGRAM_TOKEN", "TELEGRAM_BOT_TOKEN"),
     )
     TELEGRAM_CHAT_ID: Optional[str] = None
+    TELEGRAM_HEALTH_TOKEN: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "TELEGRAM_HEALTH_TOKEN",
+            "TELEGRAM_HEALTH_BOT_TOKEN",
+        ),
+    )
+    TELEGRAM_READINESS_TOKEN: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "TELEGRAM_READINESS_TOKEN",
+            "TELEGRAM_READINESS_BOT_TOKEN",
+        ),
+    )
+    TELEGRAM_HEALTH_CHAT_ID: Optional[str] = None
+    TELEGRAM_READINESS_CHAT_ID: Optional[str] = None
 
 
 # ─────────────────────────── YAML-Loader ────────────────────────────────────

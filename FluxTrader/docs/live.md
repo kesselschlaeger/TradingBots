@@ -80,21 +80,67 @@ strategy:
 Der Scanner nutzt die Alpaca Snapshot-API und sendet ein Telegram-Alert
 mit den Top-Gap-Kandidaten.
 
-## State-Persistenz
+## State-Persistenz (zentrale Multi-Bot-DB)
 
-`PersistentState` speichert in `fluxtrader_data/state.db` (SQLite):
+`PersistentState` speichert in `fluxtrader_data/state.db` (SQLite) – **eine DB für alle Bots**:
 
-```
-daily          │ day TEXT PK │ pnl REAL │ trades_count INT │ by_symbol JSON
-account        │ key TEXT PK │ value REAL
-cooldowns      │ symbol TEXT PK │ until_ts TEXT
-reserved_groups│ group_name TEXT │ day TEXT │ PRIMARY KEY(group_name, day)
-```
+| Tabelle | Diskriminator | Zweck |
+|---------|---|---|
+| **trades** | strategy | Komplette Trade-Historie (entry_ts, exit_ts, pnl, mit_qty_factor, ev_estimate, features_json) |
+| **equity_snapshots** | (ts, strategy) | Hochfrequente Equity-Kurve (pro Bar-Tick) |
+| **positions** | (strategy, symbol) | Offene Positionen (Live-Spiegel mit unrealized_pnl) |
+| **signals** | strategy | Eingegangene Signale (optional, für ML-Retraining) |
+| **anomaly_events** | strategy | Erkannte Anomalien (Duplicate, Oversized, Spike, Connectivity, Flood) |
+| **daily** | (day, strategy) | Tägliche Aggregates (pnl, trades_count, by_symbol) |
+| **account** | key | Peak-Equity, globale Meter |
+| **cooldowns** | symbol | Symbol-Cooldowns (Restart-persistent) |
+| **reserved_groups** | (group_name, day, strategy) | MIT-Independence-Gruppen (pro Strategie/Tag) |
 
 **Überleben eines Restarts:**
-- Daily-PnL und Trade-Counter bleiben erhalten
+- Daily-PnL und Trade-Counter pro Strategie bleiben erhalten
+- Offene Positionen + ihr Unrealized-PnL werden nach Restart neu aus Broker gelesen + DB aktualisiert
 - Reservierte MIT-Korrelationsgruppen bleiben erhalten (kein Doppel-Entry nach Restart)
 - Cooldowns bleiben erhalten
+- **Neu:** Komplette Trade-Historie mit MIT-Qty-Factor + EV-Estimates bleibt für Probabilistische Auswertungen erhalten
+
+### Datenfluss zur DB
+
+```
+LiveRunner.on_bar(bar)
+├─ strategy.on_bar(bar) → Signal(features, strength, metadata)
+├─ broker.execute_signal(sig) → ExecutionResult
+├─ TradeManager.register_and_persist(trade, sig)
+│  ├─ state.save_trade(...)  ← trades table (open, mit_qty_factor, ev_estimate)
+│  └─ state.update_or_create_position(...)  ← positions table
+├─ state.save_signal(sig)  ← signals table (für ML-Retraining)
+├─ state.save_equity_snapshot(...)  ← equity_snapshots (alle 1–5 Min je nach Datendichte)
+└─ (bei Close oder EOD)
+   ├─ state.close_trade(...)  ← trades table (set exit_ts, pnl, realized-flag)
+   ├─ state.remove_position(...)  ← positions table (delete)
+   ├─ state.update_daily_record(...)  ← daily table (inkrementiert pnl + trades_count)
+   └─ AnomalyDetector._emit(event)
+      └─ state.log_anomaly(event)  ← anomaly_events table
+```
+
+### Beispiel: Trade in DB mit MIT + EV
+
+```sql
+SELECT id, symbol, entry_price, exit_price, pnl, mit_qty_factor, ev_estimate, group_name
+FROM trades WHERE strategy='orb' AND symbol='AAPL' ORDER BY entry_ts DESC LIMIT 1;
+```
+
+Zeigt z.B.:
+```
+id | symbol | entry_price | exit_price | pnl    | mit_qty_factor | ev_estimate | group_name
+---|--------|-------------|------------|--------|----------------|-------------|----------
+42 | AAPL   | 150.25      | 152.10     | 18.50  | 0.75           | 0.42        | TECH_1
+```
+
+**Probabilistische Nutzung:**
+- `mit_qty_factor`: Adjusted Trade-Größe aus MIT-Overlay (0.25–1.0) – für Law-of-Large-Numbers
+- `ev_estimate`: Expected-Value des Signals – für Kelly-Criterion / Optimal-F-Calculation
+- `group_name`: MIT-Independence-Gruppe – für Trade-Correlation-Analysen
+- `features_json`: kompletter FeatureVector – für ML-Model-Retraining (offline)
 
 ## Telegram-Alerts
 
@@ -152,6 +198,17 @@ python main.py live --config configs/orb_live.yaml --log-json 2>&1 | tee bot.log
 # Nur Errors anzeigen
 python main.py live --config configs/orb_live.yaml | grep '"level":"error"'
 ```
+
+## Monitoring & Dashboard
+
+Health-Server, Prometheus-Metrics, Web-Dashboard und Anomaly-Detection sind
+eine eigene Subsystem-Ebene – siehe [monitoring.md](monitoring.md).
+
+Wichtige Dashboard-Funktionen (lesen read-only aus der zentralen DB):
+- **Trade-History:** `/api/trades?strategy=orb&since=2026-04-15` (mit MIT-Qty + EV)
+- **Live-Positionen:** `/api/positions?strategy=orb` (Unrealized-PnL live)
+- **Equity-Kurven:** `/api/equity?strategy=orb&limit=500` (für Charts)
+- **Bot-Status:** `/api/strategies/list` (aggregierter Status aller Bots)
 
 ## Mehrere Bot-Instanzen
 

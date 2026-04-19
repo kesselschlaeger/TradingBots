@@ -176,6 +176,29 @@ class MarketContextService:
     def push_bar(self, bar: Bar) -> None:
         self._bars[bar.symbol].append(bar)
 
+    def get_higher_tf_bars(
+        self, symbol: str, timeframe: str = "1H",
+    ) -> Optional[pd.DataFrame]:
+        """Resample stored bars for a symbol to a higher timeframe.
+
+        Pure reader – does not modify state.  Returns None when there
+        are fewer than 2 bars for the symbol.
+        """
+        from core.indicators import resample_ohlcv
+
+        bars_list = list(self._bars.get(symbol, ()))
+        if len(bars_list) < 2:
+            return None
+        idx = pd.DatetimeIndex([b.timestamp for b in bars_list], tz="UTC")
+        df = pd.DataFrame({
+            "Open": [b.open for b in bars_list],
+            "High": [b.high for b in bars_list],
+            "Low": [b.low for b in bars_list],
+            "Close": [b.close for b in bars_list],
+            "Volume": [b.volume for b in bars_list],
+        }, index=idx)
+        return resample_ohlcv(df, timeframe)
+
     def reset_bars(self, symbol: Optional[str] = None) -> None:
         if symbol is None:
             self._bars.clear()

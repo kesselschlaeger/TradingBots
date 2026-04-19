@@ -223,6 +223,280 @@ def orb_volume_ratio(
     return today_vol / avg if avg > 0 else 1.0
 
 
+# ─────────────────────────── OHLCV Resampling ───────────────────────────────
+
+_TF_MAP = {
+    "1M": "1min", "5M": "5min", "15M": "15min",
+    "30M": "30min", "1H": "1h", "4H": "4h", "1D": "1D",
+}
+
+
+def resample_ohlcv(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
+    """Resample OHLCV DataFrame to a higher timeframe.
+
+    Accepts timeframe strings like '15M', '1H', '4H'.
+    Expects columns: Open, High, Low, Close, Volume.
+    """
+    freq = _TF_MAP.get(timeframe.upper(), timeframe)
+    resampled = df.resample(freq).agg({
+        "Open": "first",
+        "High": "max",
+        "Low": "min",
+        "Close": "last",
+        "Volume": "sum",
+    }).dropna(subset=["Open"])
+    return resampled
+
+
+# ─────────────────────────── ICT / Smart Money Helpers ───────────────────────
+
+
+def swing_highs(high: pd.Series, lookback: int = 5) -> pd.Series:
+    """Boolean series marking swing highs (local maxima over 2*lookback+1)."""
+    return high == high.rolling(2 * lookback + 1, center=True).max()
+
+
+def swing_lows(low: pd.Series, lookback: int = 5) -> pd.Series:
+    """Boolean series marking swing lows (local minima over 2*lookback+1)."""
+    return low == low.rolling(2 * lookback + 1, center=True).min()
+
+
+def fair_value_gaps(df: pd.DataFrame) -> list[dict]:
+    """Detect Fair Value Gaps (3-candle imbalance).
+
+    Bullish FVG: candle[i+1].Low > candle[i-1].High (gap up).
+    Bearish FVG: candle[i+1].High < candle[i-1].Low (gap down).
+    """
+    gaps: list[dict] = []
+    if len(df) < 3:
+        return gaps
+
+    highs = df["High"].values
+    lows = df["Low"].values
+    timestamps = df.index
+
+    for i in range(1, len(df) - 1):
+        if lows[i + 1] > highs[i - 1]:
+            gaps.append({
+                "type": "bullish",
+                "high": float(lows[i + 1]),
+                "low": float(highs[i - 1]),
+                "timestamp": timestamps[i],
+                "idx": i,
+            })
+        if highs[i + 1] < lows[i - 1]:
+            gaps.append({
+                "type": "bearish",
+                "high": float(lows[i - 1]),
+                "low": float(highs[i + 1]),
+                "timestamp": timestamps[i],
+                "idx": i,
+            })
+    return gaps
+
+
+def detect_order_blocks(
+    df: pd.DataFrame,
+    atr_period: int = 14,
+    displacement_mult: float = 1.8,
+    swing_lookback: int = 5,
+) -> list[dict]:
+    """Detect valid ICT Order Blocks.
+
+    A valid OB requires all three conditions:
+    1. Liquidity sweep – price took out a prior swing point.
+    2. Displacement – impulsive candle body > displacement_mult × ATR.
+    3. Imbalance/FVG – 3-candle gap left behind.
+
+    Bullish OB: last bearish candle before strong upward displacement
+    after sweeping a swing low.
+    Bearish OB: last bullish candle before strong downward displacement
+    after sweeping a swing high.
+
+    Returns list of dicts: type, high, low, mid, timestamp, idx,
+    displacement_strength.
+    """
+    n = len(df)
+    min_required = max(swing_lookback * 2 + 3, atr_period + 2)
+    if n < min_required:
+        return []
+
+    blocks: list[dict] = []
+    atr_vals = atr(df, atr_period)
+
+    highs = df["High"].values
+    lows = df["Low"].values
+    opens = df["Open"].values
+    closes = df["Close"].values
+    timestamps = df.index
+
+    sw_hi = swing_highs(df["High"], swing_lookback)
+    sw_lo = swing_lows(df["Low"], swing_lookback)
+
+    swing_high_levels = [(i, highs[i]) for i in range(n) if sw_hi.iloc[i]]
+    swing_low_levels = [(i, lows[i]) for i in range(n) if sw_lo.iloc[i]]
+
+    # Pre-compute FVG indices (middle candle of 3-candle gap)
+    fvg_set: set[int] = set()
+    for i in range(1, n - 1):
+        if lows[i + 1] > highs[i - 1]:
+            fvg_set.add(i)
+        if highs[i + 1] < lows[i - 1]:
+            fvg_set.add(i)
+
+    for i in range(min_required, n):
+        atr_val = atr_vals.iloc[i]
+        if pd.isna(atr_val) or atr_val <= 0:
+            continue
+
+        body = closes[i] - opens[i]
+        if abs(body) <= displacement_mult * atr_val:
+            continue
+
+        # FVG near displacement (displacement candle ± 1)
+        has_fvg = (i in fvg_set
+                   or (i - 1) in fvg_set
+                   or (i + 1 < n and (i + 1) in fvg_set))
+        if not has_fvg:
+            continue
+
+        search_start = max(0, i - swing_lookback * 4)
+
+        if body > 0:
+            # ── Bullish displacement ──
+            last_sl = None
+            for si, sl in reversed(swing_low_levels):
+                if si < i:
+                    last_sl = (si, sl)
+                    break
+            if last_sl is None:
+                continue
+
+            swept = any(
+                lows[j] < last_sl[1]
+                for j in range(last_sl[0] + 1, i + 1)
+            )
+            if not swept:
+                continue
+
+            # OB = last bearish candle before displacement
+            ob_idx = None
+            for k in range(i - 1, max(search_start - 1, -1), -1):
+                if closes[k] < opens[k]:
+                    ob_idx = k
+                    break
+            if ob_idx is not None:
+                blocks.append({
+                    "type": "bullish",
+                    "high": float(opens[ob_idx]),
+                    "low": float(closes[ob_idx]),
+                    "mid": float((opens[ob_idx] + closes[ob_idx]) / 2),
+                    "timestamp": timestamps[ob_idx],
+                    "idx": ob_idx,
+                    "displacement_strength": float(abs(body) / atr_val),
+                })
+
+        else:
+            # ── Bearish displacement ──
+            last_sh = None
+            for si, sh in reversed(swing_high_levels):
+                if si < i:
+                    last_sh = (si, sh)
+                    break
+            if last_sh is None:
+                continue
+
+            swept = any(
+                highs[j] > last_sh[1]
+                for j in range(last_sh[0] + 1, i + 1)
+            )
+            if not swept:
+                continue
+
+            # OB = last bullish candle before displacement
+            ob_idx = None
+            for k in range(i - 1, max(search_start - 1, -1), -1):
+                if closes[k] > opens[k]:
+                    ob_idx = k
+                    break
+            if ob_idx is not None:
+                blocks.append({
+                    "type": "bearish",
+                    "high": float(closes[ob_idx]),
+                    "low": float(opens[ob_idx]),
+                    "mid": float((opens[ob_idx] + closes[ob_idx]) / 2),
+                    "timestamp": timestamps[ob_idx],
+                    "idx": ob_idx,
+                    "displacement_strength": float(abs(body) / atr_val),
+                })
+
+    return blocks
+
+
+def detect_structure_break(df: pd.DataFrame, lookback: int = 5) -> dict:
+    """Detect the most recent Break of Structure / Change of Character.
+
+    BOS Bullish:  price breaks above prior swing high in an uptrend.
+    BOS Bearish:  price breaks below prior swing low in a downtrend.
+    CHOCH Bullish: break above swing high after a downtrend (reversal).
+    CHOCH Bearish: break below swing low after an uptrend (reversal).
+    Higher Low / Lower High: structural confirmation without BOS.
+
+    Returns dict with keys: type, level, timestamp.
+    """
+    _none = {"type": "none", "level": 0.0, "timestamp": None}
+    if len(df) < lookback * 4:
+        return _none
+
+    sw_hi = swing_highs(df["High"], lookback)
+    sw_lo = swing_lows(df["Low"], lookback)
+
+    highs = df["High"].values
+    lows = df["Low"].values
+    closes = df["Close"].values
+    timestamps = df.index
+
+    recent_sh = [(i, highs[i]) for i in range(len(df)) if sw_hi.iloc[i]]
+    recent_sl = [(i, lows[i]) for i in range(len(df)) if sw_lo.iloc[i]]
+
+    if len(recent_sh) < 2 or len(recent_sl) < 2:
+        return _none
+
+    last_sh = recent_sh[-1][1]
+    prev_sh = recent_sh[-2][1]
+    last_sl = recent_sl[-1][1]
+    prev_sl = recent_sl[-2][1]
+
+    prior_uptrend = last_sh > prev_sh and last_sl > prev_sl
+    prior_downtrend = last_sh < prev_sh and last_sl < prev_sl
+
+    current_close = closes[-1]
+
+    if current_close > last_sh:
+        if prior_uptrend:
+            return {"type": "bos_bullish", "level": float(last_sh),
+                    "timestamp": timestamps[-1]}
+        return {"type": "choch_bullish", "level": float(last_sh),
+                "timestamp": timestamps[-1]}
+
+    if current_close < last_sl:
+        if prior_downtrend:
+            return {"type": "bos_bearish", "level": float(last_sl),
+                    "timestamp": timestamps[-1]}
+        return {"type": "choch_bearish", "level": float(last_sl),
+                "timestamp": timestamps[-1]}
+
+    # Structural HL / LH (no breakout yet)
+    if last_sl > prev_sl:
+        return {"type": "higher_low", "level": float(last_sl),
+                "timestamp": timestamps[recent_sl[-1][0]]}
+    if last_sh < prev_sh:
+        return {"type": "lower_high", "level": float(last_sh),
+                "timestamp": timestamps[recent_sh[-1][0]]}
+
+    return _none
+
+
 # ─────────────────────────── Kalman Spread Estimator ─────────────────────────
 
 

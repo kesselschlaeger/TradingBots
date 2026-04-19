@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FluxTrader Dashboard</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+  <header>
+    <h1>🤖 FluxTrader Dashboard</h1>
+    <div id="header-stats">
+      <div class="stat">
+        <span class="label">Total Equity</span>
+        <span class="value" id="total-equity">$0</span>
+      </div>
+      <div class="stat">
+        <span class="label">Drawdown</span>
+        <span class="value" id="total-drawdown" style="color: #f44336;">0%</span>
+      </div>
+      <div class="stat">
+        <span class="label">Open Positions</span>
+        <span class="value" id="total-positions">0</span>
+      </div>
+      <div class="stat">
+        <span class="label">Last Update</span>
+        <span class="value muted" id="last-update">—</span>
+      </div>
+    </div>
+  </header>
+
+  <section class="main-grid">
+    <!-- Health Status (Live-Mode nur) -->
+    <article class="panel full-width" id="health-panel" style="display:none;">
+      <h2>💚 Bot Health Check (Live)</h2>
+      <div id="health-status" class="health-grid">
+        <!-- Wird dynamisch gefüllt -->
+      </div>
+    </article>
+
+    <!-- Bots Status (3-spaltig) -->
+    <article class="panel full-width">
+      <h2>🚀 Active Bots</h2>
+      <div id="bots-container" class="bots-grid">
+        <!-- Wird dynamisch gefüllt -->
+      </div>
+    </article>
+
+    <!-- Portfolio & Equity -->
+    <article class="panel">
+      <h2>📊 Portfolio</h2>
+      <div class="kv"><span>Current Equity</span><strong id="portfolio-equity">-</strong></div>
+      <div class="kv"><span>Peak Equity</span><strong id="portfolio-peak">-</strong></div>
+      <div class="kv"><span>Cash</span><strong id="portfolio-cash">-</strong></div>
+      <div class="kv"><span>Circuit Breaker</span><strong id="cb" style="color: #ff9800;">OFF</strong></div>
+    </article>
+
+    <!-- Live-Positionen -->
+    <article class="panel">
+      <h2>📍 Open Positions</h2>
+      <table id="positions-table">
+        <thead><tr><th>Symbol</th><th>Qty</th><th>Entry</th><th>Current</th><th>PnL</th><th>Held</th></tr></thead>
+        <tbody id="positions-body"></tbody>
+      </table>
+    </article>
+
+    <!-- Equity-Chart (Tag-Aggregates) -->
+    <article class="panel full-width">
+      <h2>📈 Daily Equity Curve</h2>
+      <canvas id="equity-chart"></canvas>
+    </article>
+
+    <!-- Trades Pro Bot -->
+    <article class="panel full-width">
+      <h2>📋 Recent Trades (Closed)</h2>
+      <div class="filter-bar">
+        <select id="trade-filter-strategy">
+          <option value="">All Strategies</option>
+        </select>
+        <select id="trade-filter-days">
+          <option value="7">Last 7 days</option>
+          <option value="30" selected>Last 30 days</option>
+          <option value="90">Last 90 days</option>
+        </select>
+      </div>
+      <table id="trades-table">
+        <thead>
+          <tr>
+            <th>Date</th><th>Strategy</th><th>Symbol</th><th>Side</th>
+            <th>Entry</th><th>Exit</th><th>PnL</th><th>PnL%</th>
+            <th>MIT-Qty</th><th>EV</th><th>Reason</th>
+          </tr>
+        </thead>
+        <tbody id="trades-body"></tbody>
+      </table>
+    </article>
+
+    <!-- Trade Summary Stats -->
+    <article class="panel">
+      <h2>📊 Summary Stats</h2>
+      <table id="summary-stats">
+        <tbody>
+          <tr><td>Total Trades</td><td id="stat-total-trades">0</td></tr>
+          <tr><td>Winning Trades</td><td id="stat-winning">0</td></tr>
+          <tr><td>Losing Trades</td><td id="stat-losing">0</td></tr>
+          <tr><td>Win Rate</td><td id="stat-winrate">0%</td></tr>
+          <tr><td>Avg PnL</td><td id="stat-avg-pnl">$0</td></tr>
+          <tr><td>Total PnL (closed)</td><td id="stat-total-pnl">$0</td></tr>
+        </tbody>
+      </table>
+    </article>
+
+    <!-- Anomalies -->
+    <article class="panel">
+      <h2>⚠️ Recent Anomalies</h2>
+      <div id="anomalies-container">
+        <p class="muted">No anomalies detected</p>
+      </div>
+    </article>
+  </section>
+
+  <script src="/static/dashboard.js"></script>
+</body>
+</html>

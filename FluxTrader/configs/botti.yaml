@@ -102,7 +102,9 @@ broker:
   alpaca_data_feed: iex
 
 data:
-  provider: yfinance
+  --provider: yfinance
+  provider: alpaca
+  alpaca_data_feed: iex
   timeframe: "1D"
   lookback_days: 150
 

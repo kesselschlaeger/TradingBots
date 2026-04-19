@@ -83,6 +83,25 @@ def atr_stop(side: str, entry: float, atr_value: float, mult: float = 1.5) -> fl
     return entry + mult * atr_value
 
 
+def order_block_stop(
+    side: str,
+    ob_high: float,
+    ob_low: float,
+    mult: float = 0.75,
+) -> float:
+    """Stop-Loss außerhalb der Order-Block-Zone.
+
+    long:  stop = ob_low  − mult × OB-Range
+    short: stop = ob_high + mult × OB-Range
+    """
+    ob_range = ob_high - ob_low
+    if ob_range <= 0:
+        return ob_low if side == "long" else ob_high
+    if side == "long":
+        return ob_low - mult * ob_range
+    return ob_high + mult * ob_range
+
+
 def target_from_r(side: str, entry: float, stop: float, r_multiple: float) -> float:
     """Take-Profit-Level als Vielfaches der Entry-Stop-Distanz."""
     risk = abs(entry - stop)

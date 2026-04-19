@@ -1,3 +1,9 @@
+Powershell, Umgebung setzen:
+.\tools\Enter-FluxEnv.ps1
+
+Installation von Paketen in der Umgebung
+c:/!/privat/TradingBots/FluxTrader/.venv/Scripts/python.exe -m pip install <paket>
+
 
 ##ORB Bot
 CronTrigger bedeutet nicht "einmalig starten"

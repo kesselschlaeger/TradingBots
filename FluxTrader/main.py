@@ -264,6 +264,9 @@ def cmd_wfo(cfg: AppConfig) -> None:
 
 
 async def cmd_live(cfg: AppConfig) -> None:
+    from live.anomaly import AnomalyDetector
+    from live.health import HealthState, start_health_server
+    from live.metrics import MetricsCollector
     from live.notifier import TelegramNotifier
     from live.runner import LiveRunner
     from live.state import PersistentState
@@ -281,9 +284,29 @@ async def cmd_live(cfg: AppConfig) -> None:
     state = PersistentState(
         Path(cfg.persistence.data_dir) / cfg.persistence.state_db
     )
+    # Zentrale DB vor Runner/Scheduler/Notifier bereitstellen – damit
+    # Dashboard + Prometheus + AnomalyDetector sofort gegen das Schema
+    # lesen/schreiben können und Concurrency (WAL) aktiv ist.
+    await state.ensure_schema()
     notifier = TelegramNotifier(
         bot_token=env.TELEGRAM_TOKEN or cfg.notifications.telegram_token,
         chat_id=env.TELEGRAM_CHAT_ID or cfg.notifications.telegram_chat_id,
+        health_bot_token=(
+            env.TELEGRAM_HEALTH_TOKEN
+            or cfg.notifications.health_telegram_token
+        ),
+        readiness_bot_token=(
+            env.TELEGRAM_READINESS_TOKEN
+            or cfg.notifications.readiness_telegram_token
+        ),
+        health_chat_id=(
+            env.TELEGRAM_HEALTH_CHAT_ID
+            or cfg.notifications.health_telegram_chat_id
+        ),
+        readiness_chat_id=(
+            env.TELEGRAM_READINESS_CHAT_ID
+            or cfg.notifications.readiness_telegram_chat_id
+        ),
         enabled=cfg.notifications.enabled,
         bot_name=_resolve_notifier_bot_name(cfg),
         strategy_name=cfg.strategy.name,
@@ -291,12 +314,29 @@ async def cmd_live(cfg: AppConfig) -> None:
             f"{cfg.broker.type}-paper" if cfg.broker.paper
             else f"{cfg.broker.type}-live"
         ),
+        alerts_cfg=cfg.alerts,
     )
+
+    # ── Monitoring-Infrastruktur ─────────────────────────────────────
+    health_state = HealthState()
+    metrics_collector = MetricsCollector.create(
+        enabled=cfg.monitoring.prometheus_enabled
+    )
+    anomaly_detector = AnomalyDetector(notifier=notifier, state=state, cfg=cfg)
+    await health_state.set_broker_status(
+        connected=False, adapter=cfg.broker.type,
+    )
+    asyncio.create_task(start_health_server(
+        health_state=health_state,
+        metrics_collector=metrics_collector,
+        port=cfg.monitoring.health_port,
+    ))
 
     log.info("live.starting", mode=cfg.mode,
              strategy=cfg.strategy.name,
              broker=cfg.broker.type,
-             symbols=cfg.strategy.symbols)
+             symbols=cfg.strategy.symbols,
+             health_port=cfg.monitoring.health_port)
 
     # Pair-Pfad: PairEngine als separate Task
     if isinstance(strategy, PairStrategy):
@@ -321,20 +361,49 @@ async def cmd_live(cfg: AppConfig) -> None:
             notifier=notifier,
             symbols=cfg.strategy.symbols,
             config=cfg.strategy.params,
+            health_state=health_state,
+            metrics_collector=metrics_collector,
+            anomaly_detector=anomaly_detector,
+            alerts_cfg=cfg.alerts,
         )
         await runner.start()
+
+
+def cmd_dashboard(cfg: AppConfig, port: int) -> None:
+    """Startet das Web-Dashboard als eigenen Prozess (uvicorn).
+
+    Laeuft NICHT im gleichen Event-Loop wie der LiveRunner – liest das
+    SQLite-State read-only + optional den HTTP-Health-Endpunkt des
+    Runners.
+    """
+    try:
+        import uvicorn
+    except ImportError as e:
+        log.error("dashboard.missing_dep",
+                  hint="pip install fastapi uvicorn", error=str(e))
+        sys.exit(2)
+
+    from dashboard.app import create_app
+
+    app = create_app(cfg, health_state=None)
+    uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")
 
 
 # ─────────────────────────── CLI ──────────────────────────────────────────
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="FluxTrader")
-    parser.add_argument("command", choices=["live", "paper", "backtest", "wfo"],
-                        help="Modus: live, paper, backtest, wfo")
+    parser.add_argument(
+        "command",
+        choices=["live", "paper", "backtest", "wfo", "dashboard"],
+        help="Modus: live, paper, backtest, wfo, dashboard",
+    )
     parser.add_argument("--config", "-c", required=True,
                         help="Pfad zur YAML-Config")
     parser.add_argument("--log-level", default="INFO")
     parser.add_argument("--log-json", action="store_true")
+    parser.add_argument("--port", type=int, default=None,
+                        help="Port fuer dashboard-Kommando (Default aus Config)")
     args = parser.parse_args()
 
     setup_logging(level=args.log_level.upper(), json_output=args.log_json)
@@ -346,6 +415,9 @@ def main() -> None:
         asyncio.run(cmd_backtest(cfg))
     elif args.command == "wfo":
         cmd_wfo(cfg)
+    elif args.command == "dashboard":
+        port = args.port or cfg.monitoring.dashboard_port
+        cmd_dashboard(cfg, port=port)
 
 
 if __name__ == "__main__":

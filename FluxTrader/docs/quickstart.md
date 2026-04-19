@@ -21,6 +21,35 @@ pip install -e ".[alpaca,live,backtest]"
 pip install -e ".[backtest]"
 ```
 
+### PowerShell (empfohlen unter Windows)
+
+!!! warning "Execution Policy – einmalig pro Session"
+    Windows blockiert PS-Skripte standardmaessig. Vor dem ersten Skript-Aufruf:
+    ```powershell
+    Set-ExecutionPolicy -Scope Process -ExecutionPolicy RemoteSigned
+    ```
+    `-Scope Process` gilt **nur fuer die aktuelle Shell**, kein Admin-Recht noetig,
+    nichts systemweit veraendert.
+
+```powershell
+# 0. Execution Policy entsperren (jede neue PS-Session einmalig)
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy RemoteSigned
+
+Set-Location FluxTrader
+
+# 1. Einmalig: dediziertes FluxTrader-venv erstellen + Basis-Extras installieren
+.\tools\Setup-FluxEnv.ps1 -PythonVersion 3.11 -Recreate
+
+# Optional: ML-Test-Abhaengigkeiten fuer test_ml_filter.py installieren
+.\tools\Setup-FluxEnv.ps1 -PythonVersion 3.11 -InstallMlTestDeps
+
+# 2. In jeder neuen Shell aktivieren
+.\tools\Enter-FluxEnv.ps1
+```
+
+Damit verwendest du in VS Code Terminal und PowerShell immer dasselbe `.venv`
+im FluxTrader-Ordner statt zufaellig wechselnder globaler Interpreter.
+
 ### Extras im Überblick
 
 | Extra | Pakete | Wann nötig |
@@ -116,6 +145,12 @@ pytest tests/unit/
 # Mit Verbose-Output
 pytest -v
 ```
+
+!!! tip "Warum manchmal Tests geskippt werden"
+    Einige Tests sind absichtlich optional aufgebaut (z.B. ML/Prometheus).
+    Fehlen die Pakete, werden einzelne Tests mit `importorskip` uebersprungen
+    statt als Fehler zu brechen. Fuer vollstaendige lokale Testlaeufe installiere
+    diese Pakete zusaetzlich, z.B. via `tools/Setup-FluxEnv.ps1 -InstallMlTestDeps`.
 
 !!! info "Netzwerkfreie Tests"
     Alle Tests in `tests/unit/` und `tests/integration/` laufen vollständig

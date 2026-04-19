@@ -11,17 +11,23 @@ Verantwortlichkeiten:
 from __future__ import annotations
 
 import asyncio
+import json
 import signal as signal_mod
+import time as _time
+from dataclasses import asdict
 from datetime import date, datetime, time, timezone
-from typing import Optional
+from typing import Any, Optional
 from zoneinfo import ZoneInfo
 
 from core.context import MarketContextService, set_context_service
 from core.logging import get_logger
-from core.models import Bar, OrderRequest, OrderSide, Signal
+from core.models import AlertLevel, Bar, OrderRequest, OrderSide, Signal
 from core.trade_manager import ManagedTrade, TradeManager
 from data.providers.base import DataProvider
 from execution.port import BrokerPort
+from live.anomaly import AnomalyDetector
+from live.health import HealthState
+from live.metrics import MetricsCollector
 from live.notifier import TelegramNotifier
 from live.scanner import PremarketScanner
 from live.scheduler import TradingScheduler
@@ -45,6 +51,10 @@ class LiveRunner:
         notifier: TelegramNotifier,
         symbols: list[str],
         config: dict,
+        health_state: Optional[HealthState] = None,
+        metrics_collector: Optional[Any] = None,
+        anomaly_detector: Optional[AnomalyDetector] = None,
+        alerts_cfg: Any = None,
     ):
         self.strategy = strategy
         self.broker = broker
@@ -55,11 +65,18 @@ class LiveRunner:
         self.symbols = [s.upper() for s in symbols]
         self.cfg = config
 
+        # Monitoring (alle optional – Runner laeuft auch ohne)
+        self.health: Optional[HealthState] = health_state
+        self.metrics = metrics_collector or MetricsCollector.create(enabled=False)
+        self.anomaly: Optional[AnomalyDetector] = anomaly_detector
+        self.alerts_cfg = alerts_cfg
+
         self.tm = TradeManager(
             trail_after_r=float(config.get("trail_after_r", 1.0)),
             trail_distance_r=float(config.get("trail_distance_r", 0.6)),
             use_trailing=bool(config.get("use_trailing", False)),
             eod_close_time=config.get("eod_close_time"),
+            state=state,
         )
 
         self._scanner: Optional[PremarketScanner] = None
@@ -67,23 +84,41 @@ class LiveRunner:
         self._running = False
         self._pending_exit_next_open: set[str] = set()
         self._daily_trades_count: int = 0
+        self._last_health_status: Optional[str] = None
+        self._last_alert_ts: float = 0.0
+        self._alert_cooldown_s = 60
 
         set_context_service(context)
 
     # ── Lifecycle ──────────────────────────────────────────────────────
 
     async def start(self) -> None:
-        await self.state.init()
+        await self.state.ensure_schema()
         self._running = True
 
         # Account-Snapshot laden
         acct = await self.broker.get_account()
+        equity0 = float(acct["equity"])
         self.ctx.update_account(
-            equity=float(acct["equity"]),
+            equity=equity0,
             cash=float(acct.get("cash", 0)),
             buying_power=float(acct.get("buying_power", 0)),
         )
-        await self.state.update_peak_equity(float(acct["equity"]))
+        peak0 = await self.state.update_peak_equity(equity0)
+        dd0 = 0.0 if peak0 <= 0 else (equity0 - peak0) / peak0 * 100.0
+        await self.state.save_equity_snapshot(
+            strategy=self.strategy.name,
+            ts=datetime.now(timezone.utc),
+            equity=equity0,
+            cash=float(acct.get("cash", 0)),
+            drawdown_pct=dd0,
+            peak_equity=peak0,
+        )
+        if self.health is not None:
+            await self.health.set_broker_status(
+                connected=True,
+                adapter=type(self.broker).__name__,
+            )
 
         # Scheduler aufbauen (None-Zeiten → Job wird übersprungen)
         premarket_t = self.cfg.get("premarket_time", time(9, 0))
@@ -231,7 +266,11 @@ class LiveRunner:
                     qty=qty_closed,
                     order_id=(close_exec.order_id if close_exec else ""),
                 )
-                self.tm.forget(sym)
+                await self.tm.close_trade(
+                    sym, exit_price=exit_price,
+                    exit_ts=datetime.now(timezone.utc),
+                    pnl=pnl, reason="Exit-Next-Open",
+                )
             else:
                 remaining_pending.add(sym)
         self._pending_exit_next_open = remaining_pending
@@ -246,11 +285,12 @@ class LiveRunner:
         self.strategy.reset()
         self.tm.reset()
         self.ctx.clear_reserved_groups()
-        await self.state.reset_day(date.today())
+        await self.state.reset_day(date.today(), strategy=self.strategy.name)
         self._daily_trades_count = 0
 
         # Reserved Groups aus State wiederherstellen (falls Restart mitten am Tag)
-        for g in await self.state.reserved_groups(date.today()):
+        for g in await self.state.reserved_groups(date.today(),
+                                                  strategy=self.strategy.name):
             self.ctx.reserve_group(g)
 
     async def _on_eod_close(self) -> None:
@@ -301,7 +341,11 @@ class LiveRunner:
                 qty=qty,
                 order_id=(close_exec.order_id if close_exec else ""),
             )
-            self.tm.forget(sym)
+            await self.tm.close_trade(
+                sym, exit_price=exit_price,
+                exit_ts=datetime.now(timezone.utc),
+                pnl=pnl, reason="EOD close all",
+            )
 
         if result.get("remaining"):
             await self.notifier.error("eod_close",
@@ -379,6 +423,29 @@ class LiveRunner:
     async def _process_bar(self, bar: Bar) -> None:
         self.ctx.set_now(bar.timestamp)
 
+        # ── Monitoring: Bar-Lag + Heartbeat ──
+        lag_ms = 0.0
+        bar_ts = bar.timestamp
+        if bar_ts is not None:
+            if bar_ts.tzinfo is None:
+                bar_ts = bar_ts.replace(tzinfo=timezone.utc)
+            lag_ms = max(0.0, (datetime.now(timezone.utc) - bar_ts).total_seconds() * 1000.0)
+        if self.health is not None:
+            await self.health.set_last_bar(self.strategy.name, bar_ts, lag_ms)
+            # Alert bei fehlenden Bars während Handelszeiten
+            if self.health.should_alert_on_not_ready():
+                now_ts = _time.time()
+                if now_ts - self._last_alert_ts > self._alert_cooldown_s:
+                    await self.notifier.send_readiness(
+                        "🚨 *Readiness Alert* – Keine aktuellen Kurse während "
+                        f"Handelszeiten. Health-Status: {self.health.overall_status()}"
+                    )
+                    self._last_alert_ts = now_ts
+                    log.warning("runner.health_alert_sent", reason="bar_stream_failure")
+        self.metrics.set_bar_lag(self.strategy.name, lag_ms)
+        if self.anomaly is not None:
+            await self.anomaly.check_heartbeat(self.strategy.name, bar_ts)
+
         # Marktpreis für PaperAdapter (No-Op bei echten Brokern)
         self.broker.update_price(bar.symbol, bar.close)
 
@@ -399,7 +466,6 @@ class LiveRunner:
             for symbol in self.tm.all_symbols()
         }
         broker_positions = await self.broker.get_positions()
-        self.tm.reconcile_with_broker(broker_positions)
         self.ctx.set_open_symbols(list(broker_positions.keys()))
 
         closed_symbols = [
@@ -446,23 +512,141 @@ class LiveRunner:
                 ),
                 order_id=(close_exec.order_id if close_exec else ""),
             )
+            await self.tm.close_trade(
+                sym, exit_price=exit_price,
+                exit_ts=datetime.now(timezone.utc),
+                pnl=pnl, reason=reason, tracked=tracked,
+            )
+
+        # Stale-Cleanup für Trades, deren Close der Runner nicht explizit
+        # verarbeitet hat (z.B. gar kein Eintrag in tracked_before).
+        self.tm.reconcile_with_broker(broker_positions)
 
         # Strategie
         signals = self.strategy.on_bar(bar)
         for sig in signals:
             await self._execute_signal(sig)
 
-        # Account-Update
+        # Account-Update + Monitoring
         acct = await self.broker.get_account()
+        equity = float(acct["equity"])
+        cash = float(acct.get("cash", 0))
         self.ctx.update_account(
-            equity=float(acct["equity"]),
-            cash=float(acct.get("cash", 0)),
+            equity=equity,
+            cash=cash,
             buying_power=float(acct.get("buying_power", 0)),
         )
+
+        # Drawdown + Circuit-Breaker-Alerts
+        peak = await self.state.update_peak_equity(equity)
+        dd_pct = 0.0 if peak <= 0 else (equity - peak) / peak * 100.0
+        positions_count = len(self.ctx.open_symbols)
+        self.metrics.set_equity(self.strategy.name, equity)
+        self.metrics.set_drawdown(self.strategy.name, dd_pct)
+        self.metrics.set_open_positions(self.strategy.name, positions_count)
+        if self.health is not None:
+            await self.health.update_portfolio(
+                equity=equity, cash=cash, drawdown_pct=dd_pct,
+                open_positions=positions_count, peak_equity=peak,
+            )
+        await self._check_drawdown_alerts(dd_pct)
+
+        # Equity-Snapshot + Live-Positions-Spiegelung (Dashboard-Feed)
+        unrealized_total = 0.0
+        for sym, pos in broker_positions.items():
+            upnl = float(getattr(pos, "unrealized_pnl", 0.0) or 0.0)
+            unrealized_total += upnl
+            managed = self.tm.get(sym)
+            held_min: Optional[int] = None
+            if managed is not None and managed.opened_at is not None:
+                try:
+                    now_ts = bar.timestamp
+                    open_ts = managed.opened_at
+                    if now_ts.tzinfo is None:
+                        now_ts = now_ts.replace(tzinfo=timezone.utc)
+                    if open_ts.tzinfo is None:
+                        open_ts = open_ts.replace(tzinfo=timezone.utc)
+                    held_min = max(0, int((now_ts - open_ts).total_seconds() // 60))
+                except Exception:  # noqa: BLE001
+                    held_min = None
+            try:
+                await self.state.update_or_create_position(
+                    strategy=self.strategy.name,
+                    symbol=sym,
+                    side=pos.side,
+                    entry_price=float(pos.entry_price),
+                    qty=float(pos.qty),
+                    stop_price=(managed.current_stop if managed else None),
+                    current_price=float(pos.current_price or bar.close),
+                    unrealized_pnl=upnl,
+                    unrealized_pnl_pct=(
+                        upnl / (float(pos.entry_price) * float(pos.qty)) * 100.0
+                        if pos.entry_price and pos.qty else None
+                    ),
+                    held_minutes=held_min,
+                )
+            except Exception as e:  # noqa: BLE001
+                log.warning("runner.position_persist_failed",
+                            symbol=sym, error=str(e))
+        try:
+            await self.state.save_equity_snapshot(
+                strategy=self.strategy.name,
+                ts=bar.timestamp,
+                equity=equity,
+                cash=cash,
+                drawdown_pct=dd_pct,
+                peak_equity=peak,
+                unrealized_pnl_total=unrealized_total,
+            )
+        except Exception as e:  # noqa: BLE001
+            log.warning("runner.equity_persist_failed", error=str(e))
+
+    async def _check_drawdown_alerts(self, dd_pct: float) -> None:
+        """Feuert Drawdown-Warn/Critical + Circuit-Breaker, wenn Schwellen
+        aus ``alerts_cfg`` ueberschritten werden."""
+        if self.alerts_cfg is None:
+            return
+        warn = float(getattr(self.alerts_cfg, "drawdown_warning_pct", -10.0))
+        crit = float(getattr(self.alerts_cfg, "drawdown_critical_pct", -15.0))
+
+        if dd_pct <= crit:
+            if self.health is not None:
+                await self.health.set_circuit_breaker(True)
+            self.metrics.set_circuit_breaker(self.strategy.name, True)
+            await self.notifier.alert(
+                level=AlertLevel.CRITICAL, event="circuit_break",
+                rate_limit_key="circuit_break", threshold=abs(crit),
+            )
+        elif dd_pct <= warn:
+            await self.notifier.alert(
+                level=AlertLevel.WARNING, event="drawdown_warn",
+                rate_limit_key="drawdown_warn",
+                drawdown=dd_pct, threshold=abs(warn),
+            )
+        else:
+            if self.health is not None:
+                await self.health.set_circuit_breaker(False)
+            self.metrics.set_circuit_breaker(self.strategy.name, False)
 
     async def _execute_signal(self, sig: Signal) -> None:
         if sig.direction == 0:
             return
+
+        # Anomaly-Check vor Ausfuehrung
+        if self.anomaly is not None:
+            events = await self.anomaly.check_signal(sig)
+            if self.anomaly.should_block(events):
+                log.warning("runner.signal_blocked",
+                            symbol=sig.symbol, strategy=sig.strategy,
+                            reason="duplicate_hard_block")
+                self.metrics.record_signal(
+                    sig.strategy,
+                    action=("LONG" if sig.direction > 0 else "SHORT"),
+                    filtered_by="duplicate_guard",
+                )
+                if self.health is not None:
+                    await self.health.record_signal(sig.strategy, filtered=True)
+                return
 
         # ── Core-Limits (gelten für alle Strategien) ──────────────────
         max_daily = int(self.cfg.get("max_daily_trades", 0))
@@ -527,6 +711,7 @@ class LiveRunner:
         acct = await self.broker.get_account()
         equity = float(acct["equity"])
 
+        _t0 = datetime.now(timezone.utc)
         execution = await self.broker.execute_signal(
             sig, account_equity=equity,
             risk_pct=float(self.cfg.get("risk_pct", 0.01)),
@@ -534,15 +719,35 @@ class LiveRunner:
             max_position_value_pct=float(self.cfg.get("max_position_value_pct", 0.25)),
         )
         if not execution:
+            self.metrics.record_signal(
+                sig.strategy,
+                action=("LONG" if sig.direction > 0 else "SHORT"),
+                filtered_by="broker_reject",
+            )
+            if self.health is not None:
+                await self.health.record_signal(sig.strategy, filtered=True)
             return
         self._daily_trades_count += 1
+
+        # Monitoring: Signal + Order-Latenz + Trade
+        latency_ms = max(0.0, (datetime.now(timezone.utc) - _t0).total_seconds() * 1000.0)
+        broker_name = type(self.broker).__name__
+        self.metrics.record_order_latency(broker_name, latency_ms)
+        side_str = "LONG" if sig.direction > 0 else "SHORT"
+        self.metrics.record_signal(sig.strategy, action=side_str, filtered_by="")
+        self.metrics.record_trade_opened(sig.strategy, sig.symbol, side_str)
+        if self.health is not None:
+            await self.health.record_signal(sig.strategy, filtered=False)
+            await self.health.set_broker_status(
+                connected=True, adapter=broker_name, last_order_ms=latency_ms,
+            )
 
         side = "long" if sig.direction > 0 else "short"
         entry = float(sig.metadata.get("entry_price", 0.0))
         stop = float(sig.stop_price or 0.0)
         target = float(sig.target_price) if sig.target_price else None
 
-        # TradeManager
+        # TradeManager + zentrale DB-Persistenz
         managed = ManagedTrade(
             symbol=sig.symbol, side=side, entry=entry,
             stop=stop, target=target,
@@ -551,7 +756,31 @@ class LiveRunner:
             opened_at=sig.timestamp,
             metadata=dict(sig.metadata),
         )
-        self.tm.register(managed)
+        await self.tm.register_and_persist(managed, sig)
+
+        # Signal zur probabilistischen Auswertung spiegeln
+        try:
+            feat_json = (
+                json.dumps(asdict(sig.features), default=str)
+                if sig.features is not None else None
+            )
+        except Exception:  # noqa: BLE001
+            feat_json = None
+        try:
+            await self.state.save_signal(
+                strategy=sig.strategy,
+                symbol=sig.symbol,
+                ts=sig.timestamp,
+                action=side_str,
+                strength=float(sig.strength or 0.0),
+                filtered_by="",
+                mit_passed=True,
+                ev_value=sig.metadata.get("ev_estimate"),
+                features_json=feat_json,
+            )
+        except Exception as e:  # noqa: BLE001
+            log.warning("runner.persist_signal_failed",
+                        symbol=sig.symbol, error=str(e))
 
         # Position am nächsten Open schließen (exit_next_open-Flag)
         if sig.metadata.get("exit_next_open"):
@@ -561,9 +790,10 @@ class LiveRunner:
         group = sig.metadata.get("reserve_group")
         if group:
             self.ctx.reserve_group(group)
-            await self.state.reserve_group(group, sig.timestamp.date()
-                                           if hasattr(sig.timestamp, "date")
-                                           else date.today())
+            day_key = (sig.timestamp.date()
+                       if hasattr(sig.timestamp, "date") else date.today())
+            await self.state.reserve_group(group, day_key,
+                                           strategy=self.strategy.name)
 
         # Notification
         await self.notifier.trade_opened(

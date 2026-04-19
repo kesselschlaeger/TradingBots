@@ -1,14 +1,23 @@
-"""TelegramNotifier – Push-Alerts für Live-Bot.
+"""TelegramNotifier – Push-Alerts fuer Live-Bot.
 
 Async via httpx. Bei fehlendem Bot-Token wird der Notifier zur No-Op-
 Implementation, sodass Tests/Backtests ohne Netzwerk laufen.
+
+Erweiterungen (04/2026):
+  - AlertLevel (INFO/WARNING/CRITICAL)
+  - Template-basierte Messages (keine f-String-Streuung in der Logik)
+  - Rate-Limiter (Token-Bucket pro Symbol + globales Stundenlimit)
+  - ``alert()``/``send_daily_summary()``/``send_trade_alert()`` APIs
 """
 from __future__ import annotations
 
 import os
-from typing import Optional
+import time as _time
+from collections import deque
+from typing import Any, Optional
 
 from core.logging import get_logger
+from core.models import AlertLevel, DailySummary, Position, Trade
 
 log = get_logger(__name__)
 
@@ -19,17 +28,129 @@ except ImportError:
     HTTPX_AVAILABLE = False
 
 
+# ── Templates (zentral – keine f-Strings in der Logik) ───────────────
+
+TEMPLATES: dict[str, str] = {
+    "trade_opened": (
+        "📈 *{strategy}* OPEN {side} {symbol}\n"
+        "Entry: {entry:.2f} | Stop: {stop:.2f} | Size: {qty:g}"
+    ),
+    "trade_closed": (
+        "📉 *{strategy}* CLOSE {symbol}\n"
+        "PnL: {pnl:+.2f} ({pnl_pct:+.1f}%) | Grund: {reason}"
+    ),
+    "stop_loss": (
+        "🛑 Stop-Loss {symbol} @ {price:.2f} | Verlust: {pnl:+.2f}"
+    ),
+    "drawdown_warn": (
+        "⚠️ Drawdown *{drawdown:.1f}%* – Schwelle {threshold:.0f}% erreicht"
+    ),
+    "drawdown_critical": (
+        "🚨 *CRITICAL* Drawdown *{drawdown:.1f}%* – Circuit-Breaker-Schwelle "
+        "{threshold:.0f}%"
+    ),
+    "circuit_break": (
+        "🚨 *CIRCUIT BREAKER AKTIV* – Kein neuer Trade bis Drawdown "
+        "< {threshold:.0f}%"
+    ),
+    "disconnect": (
+        "🔌 Broker-Verbindung verloren ({adapter}) – Reconnect läuft…"
+    ),
+    "reconnected": (
+        "✅ Broker ({adapter}) wieder verbunden nach {seconds}s"
+    ),
+    "anomaly": (
+        "{emoji} *Anomaly: {check}*\n{message}"
+    ),
+    "daily_summary": (
+        "📊 *Tagesbericht {date}*\n"
+        "Equity: ${equity:,.2f} ({equity_change:+.2f}%)\n"
+        "PnL heute: ${pnl:+.2f} ({trades} Trades, {winners} Winner)\n"
+        "Drawdown: {drawdown:.1f}%\n"
+        "Benchmark: {benchmark:+.2f}% | Alpha: {alpha:+.2f}%\n"
+        "Open: {open_positions} | Filtered: {filtered}\n"
+        "Top Winner: {top_winner} | Top Loser: {top_loser}\n"
+        "{cb_note}"
+    ),
+}
+
+_LEVEL_EMOJI = {
+    AlertLevel.INFO: "📊",
+    AlertLevel.WARNING: "⚠️",
+    AlertLevel.CRITICAL: "🚨",
+}
+
+
+# ── Rate-Limiter ─────────────────────────────────────────────────────
+
+class _RateLimiter:
+    """Token-Bucket pro Symbol + globales Stundenlimit."""
+
+    def __init__(self, max_per_symbol_per_minute: int = 1,
+                 max_per_hour: int = 20) -> None:
+        self.max_per_symbol_per_minute = max(1, int(max_per_symbol_per_minute))
+        self.max_per_hour = max(1, int(max_per_hour))
+        self._per_symbol: dict[str, deque[float]] = {}
+        self._global: deque[float] = deque()
+
+    def is_allowed(self, key: str = "") -> bool:
+        now = _time.time()
+        # globales Fenster (1h)
+        while self._global and now - self._global[0] > 3600.0:
+            self._global.popleft()
+        if len(self._global) >= self.max_per_hour:
+            return False
+        if key:
+            bucket = self._per_symbol.setdefault(key, deque())
+            while bucket and now - bucket[0] > 60.0:
+                bucket.popleft()
+            if len(bucket) >= self.max_per_symbol_per_minute:
+                return False
+            bucket.append(now)
+        self._global.append(now)
+        return True
+
+
+# ── Notifier ─────────────────────────────────────────────────────────
+
 class TelegramNotifier:
     """Telegram Bot-API Wrapper mit graceful Degradation."""
 
     def __init__(self, bot_token: Optional[str] = None,
                  chat_id: Optional[str] = None,
+                 health_bot_token: Optional[str] = None,
+                 readiness_bot_token: Optional[str] = None,
+                 health_chat_id: Optional[str] = None,
+                 readiness_chat_id: Optional[str] = None,
                  enabled: bool = True,
                  bot_name: str = "",
                  strategy_name: str = "",
-                 broker_name: str = ""):
+                 broker_name: str = "",
+                 alerts_cfg: Any = None):
         self.bot_token = bot_token or os.getenv("TELEGRAM_BOT_TOKEN", "")
+        self.health_bot_token = (
+            health_bot_token
+            or os.getenv("TELEGRAM_HEALTH_BOT_TOKEN", "")
+            or os.getenv("TELEGRAM_HEALTH_TOKEN", "")
+            or self.bot_token
+        )
+        self.readiness_bot_token = (
+            readiness_bot_token
+            or os.getenv("TELEGRAM_READINESS_BOT_TOKEN", "")
+            or os.getenv("TELEGRAM_READINESS_TOKEN", "")
+            or self.health_bot_token
+        )
         self.chat_id = chat_id or os.getenv("TELEGRAM_CHAT_ID", "")
+        self.health_chat_id = (
+            health_chat_id
+            or os.getenv("TELEGRAM_HEALTH_CHAT_ID", "")
+            or self.chat_id
+        )
+        self.readiness_chat_id = (
+            readiness_chat_id
+            or os.getenv("TELEGRAM_READINESS_CHAT_ID", "")
+            or self.health_chat_id
+        )
         self.bot_name = bot_name.strip() or "FluxTrader"
         self.strategy_name = strategy_name.strip()
         self.broker_name = broker_name.strip()
@@ -41,9 +162,14 @@ class TelegramNotifier:
                         has_chat=bool(self.chat_id),
                         httpx=HTTPX_AVAILABLE)
 
-    @property
-    def _url(self) -> str:
-        return f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
+        self.alerts_cfg = alerts_cfg
+        per_sym = int(getattr(alerts_cfg, "max_per_symbol_per_minute", 1) or 1)
+        per_hour = int(getattr(alerts_cfg, "max_per_hour", 20) or 20)
+        self._limiter = _RateLimiter(per_sym, per_hour)
+
+    @staticmethod
+    def _url_for(bot_token: str) -> str:
+        return f"https://api.telegram.org/bot{bot_token}/sendMessage"
 
     def _decorate_message(self, message: str) -> str:
         header = [f"*Bot:* `{self.bot_name}`"]
@@ -52,19 +178,20 @@ class TelegramNotifier:
             header.append(f"*Context:* `{' | '.join(context_parts)}`")
         return "\n".join(header + ["", message])
 
-    async def send(self, message: str, parse_mode: str = "Markdown") -> bool:
+    async def _send_to_target(self, bot_token: str, chat_id: str, message: str,
+                            parse_mode: str = "Markdown") -> bool:
         if not self.enabled:
             return False
         rendered_message = self._decorate_message(message)
         payload = {
-            "chat_id": self.chat_id,
+            "chat_id": chat_id,
             "text": rendered_message[:4000],
             "parse_mode": parse_mode,
             "disable_web_page_preview": True,
         }
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
-                r = await client.post(self._url, json=payload)
+                r = await client.post(self._url_for(bot_token), json=payload)
                 ok = r.status_code == 200
                 if not ok:
                     log.warning("notifier.failed",
@@ -74,7 +201,120 @@ class TelegramNotifier:
             log.warning("notifier.exception", error=str(e))
             return False
 
-    # ── Convenience-Wrapper ────────────────────────────────────────────
+    async def send(self, message: str, parse_mode: str = "Markdown") -> bool:
+        return await self._send_to_target(
+            self.bot_token,
+            self.chat_id,
+            message,
+            parse_mode,
+        )
+
+    async def send_health(self, message: str,
+                          parse_mode: str = "Markdown") -> bool:
+        return await self._send_to_target(
+            self.health_bot_token,
+            self.health_chat_id,
+            message,
+            parse_mode,
+        )
+
+    async def send_readiness(self, message: str,
+                             parse_mode: str = "Markdown") -> bool:
+        return await self._send_to_target(
+            self.readiness_bot_token,
+            self.readiness_chat_id,
+            message,
+            parse_mode,
+        )
+
+    # ── High-Level API (neu) ─────────────────────────────────────────
+
+    async def alert(self, level: AlertLevel, event: str,
+                    rate_limit_key: str = "", **kwargs: Any) -> bool:
+        """Sende einen Alert mit Rate-Limiter.
+
+        ``event`` muss ein Schluessel in ``TEMPLATES`` sein.
+        ``rate_limit_key`` = Symbol bzw. Event-ID; leer = nur globales Limit.
+        """
+        tpl = TEMPLATES.get(event)
+        if tpl is None:
+            log.warning("notifier.template_missing", event_name=event)
+            return False
+        if not self._limiter.is_allowed(rate_limit_key):
+            log.info("notifier.rate_limited", event_name=event,
+                     key=rate_limit_key, level=level.value)
+            return False
+        try:
+            body = tpl.format(**kwargs)
+        except KeyError as e:
+            log.warning("notifier.template_key_missing",
+                        event_name=event, missing=str(e))
+            return False
+        header = f"{_LEVEL_EMOJI.get(level, '')} "
+        return await self.send(header + body)
+
+    async def send_trade_alert(self, trade: Trade, action: str) -> bool:
+        """Kompakter Trade-Event-Alert (action: "opened" | "closed")."""
+        if action == "opened":
+            return await self.alert(
+                AlertLevel.INFO,
+                "trade_opened",
+                rate_limit_key=trade.symbol,
+                strategy=trade.strategy_id or "?",
+                side=trade.side,
+                symbol=trade.symbol,
+                entry=float(trade.price),
+                stop=float(trade.metadata.get("stop", 0.0)),
+                qty=float(trade.qty),
+            )
+        pnl_pct = 0.0
+        if trade.price > 0 and trade.qty > 0:
+            pnl_pct = (trade.pnl / (trade.price * trade.qty)) * 100.0
+        return await self.alert(
+            AlertLevel.INFO,
+            "trade_closed",
+            rate_limit_key=trade.symbol,
+            strategy=trade.strategy_id or "?",
+            symbol=trade.symbol,
+            pnl=float(trade.pnl),
+            pnl_pct=pnl_pct,
+            reason=trade.reason or "",
+        )
+
+    async def send_position_update(self, positions: list[Position]) -> bool:
+        if not positions:
+            return False
+        lines = ["*Open Positions*"]
+        for p in positions[:20]:
+            lines.append(
+                f"`{p.symbol}` {p.side.upper()} {p.qty:g} @ {p.entry_price:.2f} "
+                f"| PnL ${p.unrealized_pnl:+.2f}"
+            )
+        return await self.send("\n".join(lines))
+
+    async def send_daily_summary(self, summary: DailySummary) -> bool:
+        cb_note = "⚠️ Circuit Breaker aktiv" if summary.circuit_breaker else ""
+        return await self.alert(
+            AlertLevel.INFO,
+            "daily_summary",
+            rate_limit_key="daily_summary",
+            date=summary.date.strftime("%Y-%m-%d"),
+            equity=summary.equity,
+            equity_change=summary.equity_change_pct,
+            pnl=summary.pnl_today,
+            trades=summary.trades_today,
+            winners=summary.winners_today,
+            drawdown=summary.drawdown_pct,
+            benchmark=summary.benchmark_pct,
+            alpha=summary.alpha_pct,
+            open_positions=summary.open_positions,
+            filtered=summary.signals_filtered,
+            top_winner=summary.top_winner or "-",
+            top_loser=summary.top_loser or "-",
+            cb_note=cb_note,
+        )
+
+    # ── Convenience-Wrapper (Backwards-Compat) ───────────────────────
 
     async def trade_opened(self, symbol: str, side: str, qty: float,
                            entry: float, stop: float,
