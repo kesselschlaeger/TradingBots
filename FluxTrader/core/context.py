@@ -111,6 +111,27 @@ class MarketContextService:
     def spy_df(self) -> Optional[pd.DataFrame]:
         return self._spy_df
 
+    def spy_df_asof(self, ts: Optional[datetime]) -> Optional[pd.DataFrame]:
+        """SPY-Historie strikt vor dem aktuellen ET-Handelstag.
+
+        Vermeidet Look-Ahead im Backtest: Während eines Handelstages
+        liefert der Trend-Filter nur Informationen bis zum Vortages-
+        Close. Für Live-Use ist das semantisch identisch (heutige
+        Intraday-Daten fließen ohnehin nicht in den Tages-EMA ein).
+        Fällt auf den vollen Frame zurück, wenn ``ts`` fehlt.
+        """
+        df = self._spy_df
+        if df is None or df.empty:
+            return df
+        if ts is None:
+            return df
+        from core.filters import to_et
+        idx_et = to_et(df.index)
+        cutoff = to_et(pd.Timestamp(ts)).normalize()
+        mask = idx_et.normalize() < cutoff
+        sliced = df.loc[mask]
+        return sliced if not sliced.empty else None
+
     @property
     def vix(self) -> tuple[Optional[float], Optional[float]]:
         return self._vix_spot, self._vix_3m

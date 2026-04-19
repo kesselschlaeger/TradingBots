@@ -214,18 +214,24 @@ async function updateHealth() {
 
 async function updateStrategies() {
   try {
-    const resp = await fetch(`${API_BASE}/strategies/list`);
+    const resp = await fetch(`${API_BASE}/strategies/list?active_only=true`);
     const data = await resp.json();
 
     strategies = data.strategies || [];
 
     // Update bot cards
     const container = document.getElementById('bots-container');
+    if (!strategies.length) {
+      container.innerHTML = '<div class="muted">No active bots detected from live health telemetry.</div>';
+      return;
+    }
     container.innerHTML = strategies.map(bot => `
       <div class="bot-card">
         <div class="bot-card-header">
           <h3>${bot.strategy}</h3>
-          <span class="bot-status-badge running">RUNNING</span>
+          <span class="bot-status-badge ${bot.running ? 'running' : 'stopped'}">
+            ${bot.running ? 'RUNNING' : 'STOPPED'}
+          </span>
         </div>
         <div class="bot-card-stats">
           <div class="bot-card-stat">

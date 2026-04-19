@@ -75,13 +75,15 @@ class TradeManager:
                  use_trailing: bool = False,
                  eod_close_time: Optional[time] = None,
                  market_close: time = time(16, 0),
-                 state: Optional["PersistentState"] = None):
+                 state: Optional["PersistentState"] = None,
+                 log_registers: bool = True):
         self.trail_after_r = trail_after_r
         self.trail_distance_r = trail_distance_r
         self.use_trailing = use_trailing
         self.eod_close_time = eod_close_time
         self.market_close = market_close
         self.state = state
+        self.log_registers = log_registers
         self._trades: dict[str, ManagedTrade] = {}
 
     # ── Register / Remove ─────────────────────────────────────────────
@@ -93,8 +95,9 @@ class TradeManager:
         else:
             trade.lowest = trade.entry
         trade.current_stop = trade.stop
-        log.info("trade.register", symbol=trade.symbol, side=trade.side,
-                 entry=trade.entry, stop=trade.stop, target=trade.target)
+        if self.log_registers:
+            log.info("trade.register", symbol=trade.symbol, side=trade.side,
+                     entry=trade.entry, stop=trade.stop, target=trade.target)
 
     async def register_and_persist(
         self,

@@ -257,7 +257,7 @@ class ORBStrategy(BaseStrategy):
                 trend = cached_trend
             else:
                 trend = trend_filter_from_spy(
-                    self.context.spy_df,
+                    self.context.spy_df_asof(current_time),
                     cfg.get("trend_ema_period", 20),
                 )
                 self._trend_cache[day_key] = trend
@@ -425,7 +425,7 @@ class ORBStrategy(BaseStrategy):
         orb_range_pct = (orb_range / orb_low * 100.0) if orb_low > 0 else 0.0
 
         trend = trend_filter_from_spy(
-            self.context.spy_df,
+            self.context.spy_df_asof(self.context.now),
             cfg.get("trend_ema_period", 20),
         )
         cal_offset = float(cfg.get("mit_calibration_offset", 0.0))

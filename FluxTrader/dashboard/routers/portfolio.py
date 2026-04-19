@@ -16,6 +16,36 @@ from fastapi import APIRouter, Query, Request
 router = APIRouter(tags=["portfolio"])
 
 
+async def _get_active_strategy_names(request: Request) -> set[str]:
+    """Bestimmt aktive Strategien aus Live-Health (lokal oder remote)."""
+    hs = request.app.state.health_state
+    if hs is not None:
+        snap = hs.snapshot()
+        return {
+            str(s.get("name", "")).strip()
+            for s in snap.get("strategies", [])
+            if str(s.get("name", "")).strip()
+        }
+
+    # Standalone-Dashboard: versuche Health-Server des Live-Bots
+    try:
+        import httpx
+
+        health_url = request.app.state.health_server_url
+        async with httpx.AsyncClient(timeout=2.0) as client:
+            resp = await client.get(f"{health_url}/status")
+            if resp.status_code != 200:
+                return set()
+            snap = resp.json()
+            return {
+                str(s.get("name", "")).strip()
+                for s in snap.get("strategies", [])
+                if str(s.get("name", "")).strip()
+            }
+    except Exception:
+        return set()
+
+
 @router.get("/portfolio")
 async def get_portfolio(request: Request) -> dict[str, Any]:
     """Gesamt-Portfolio aus PersistentState + optional HealthState.
@@ -138,7 +168,10 @@ async def get_equity(
 
 
 @router.get("/strategies/list")
-async def list_strategies(request: Request) -> dict[str, Any]:
+async def list_strategies(
+    request: Request,
+    active_only: bool = Query(True),
+) -> dict[str, Any]:
     """Alle aktiven Strategien + ihr aktueller Status.
 
     Pro Strategie:
@@ -148,13 +181,21 @@ async def list_strategies(request: Request) -> dict[str, Any]:
     """
     state = request.app.state.persistent_state
 
+    active_names = await _get_active_strategy_names(request)
     strategies = await state.get_strategies()
     result = []
     for strat in strategies:
         status = await state.get_strategy_status(strat)
+        status["running"] = strat in active_names
         result.append(status)
+
+    # Im Dashboard ist "Active Bots" gewünscht: nur wirklich laufende Bots.
+    if active_only:
+        result = [r for r in result if r.get("running", False)]
 
     return {
         "total_strategies": len(strategies),
+        "active_strategies": len(result),
+        "active_source": "health",
         "strategies": result,
     }

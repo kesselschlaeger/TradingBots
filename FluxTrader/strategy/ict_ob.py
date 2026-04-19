@@ -238,7 +238,7 @@ class IctOrderBlockStrategy(BaseStrategy):
                 trend = ct
             else:
                 trend = trend_filter_from_spy(
-                    self.context.spy_df,
+                    self.context.spy_df_asof(self.context.now),
                     cfg.get("trend_ema_period", 20),
                 )
                 self._trend_cache[day_key] = trend

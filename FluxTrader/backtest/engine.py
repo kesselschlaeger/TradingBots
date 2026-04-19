@@ -25,7 +25,7 @@ import pandas as pd
 from backtest.slippage import CommissionModel, SlippageModel
 from core.context import MarketContextService, set_context_service
 from core.filters import to_et_time
-from core.indicators import compute_indicator_frame
+from core.indicators import compute_indicator_frame, ensure_daily
 from core.logging import get_logger
 from core.models import Bar, OrderRequest, OrderSide, Signal, Trade
 from core.trade_manager import ManagedTrade, TradeManager
@@ -113,6 +113,7 @@ class BarByBarEngine:
             trail_distance_r=config.trail_distance_r,
             use_trailing=config.use_trailing,
             eod_close_time=config.eod_close_time,
+            log_registers=bool(getattr(broker, "log_fills", True)),
         )
         self._equity_curve: list[tuple[datetime, float]] = []
         self._pending_exit_next_open: dict[str, ManagedTrade] = {}
@@ -125,7 +126,10 @@ class BarByBarEngine:
                   vix3m_series: Optional[pd.Series] = None,
                   ) -> BacktestResult:
         if spy_df is not None:
-            self.context.set_spy_df(spy_df)
+            # Trend-Filter arbeitet auf Daily-Basis (EMA-Periode in Tagen).
+            # Intraday-SPY wird einmalig zu Daily aggregiert; spy_df_asof()
+            # stellt pro Bar den Look-Ahead-freien Slice bereit.
+            self.context.set_spy_df(ensure_daily(spy_df))
 
         # ── Variante A: Indikator-Frames einmal vorab berechnen ──────
         precomputed: dict[str, pd.DataFrame] = {}

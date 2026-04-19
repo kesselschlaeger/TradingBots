@@ -248,6 +248,20 @@ def resample_ohlcv(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
     return resampled
 
 
+def ensure_daily(df: pd.DataFrame) -> pd.DataFrame:
+    """Stelle sicher, dass ein OHLCV-DataFrame Daily-Bars enthält.
+
+    Intraday-Frames werden zu Daily aggregiert; bereits-Daily-Frames
+    bleiben idempotent. Nötig z.B. für den SPY-Trend-Filter, dessen
+    EMA-Periode (z.B. 20) sich auf Handelstage bezieht.
+    """
+    if df is None or df.empty:
+        return df
+    if not isinstance(df.index, pd.DatetimeIndex):
+        return df
+    return resample_ohlcv(df, "1D")
+
+
 # ─────────────────────────── ICT / Smart Money Helpers ───────────────────────
 
 
