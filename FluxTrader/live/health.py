@@ -256,7 +256,7 @@ async def start_health_server(health_state: HealthState,
     app.router.add_get("/status", _status)
     app.router.add_get("/metrics/text", _metrics_text)
 
-    runner = web.AppRunner(app)
+    runner = web.AppRunner(app, access_log=None)
     await runner.setup()
     site = web.TCPSite(runner, host=host, port=port)
     await site.start()

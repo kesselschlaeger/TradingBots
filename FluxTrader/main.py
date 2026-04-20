@@ -393,7 +393,7 @@ def cmd_dashboard(cfg: AppConfig, port: int) -> None:
     from dashboard.app import create_app
 
     app = create_app(cfg, health_state=None)
-    uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")
+    uvicorn.run(app, host="0.0.0.0", port=port, log_level="info", access_log=False)
 
 
 # ─────────────────────────── CLI ──────────────────────────────────────────

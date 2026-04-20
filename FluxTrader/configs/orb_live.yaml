@@ -57,9 +57,10 @@ strategy:
     vix_regime_backwd_upper: 1.15
 
 broker:
-  type: alpaca
+  type: ibkr
   paper: true
-  alpaca_data_feed: iex
+  ibkr_client_id: 9
+  ibkr_bot_id: Flux_ORB
 
 data:
   provider: ibkr
@@ -68,4 +69,4 @@ data:
 
 notifications:
   enabled: true
-  bot_name: FLUX_ORB_ALPACA_PAPER
+  bot_name: FLUX_ORB_PAPER

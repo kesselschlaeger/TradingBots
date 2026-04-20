@@ -1,0 +1,109 @@
+# Backtest-Config: Botti MIT Multi-Timeframe-Filter (Daily-Proxy)
+# Provider: yfinance (ohne IBKR-Gateway)
+
+mode: paper
+
+strategy:
+  name: botti
+  symbols:
+    - SPY
+    - QQQ
+    - GLD
+    - XLE
+    - AAPL
+    - TSLA
+    - NVDA
+    - JNJ
+    - META
+    - MU
+    - CRWD
+    - GOOGL
+    - HOOD
+    - PLTR
+    - AMD
+    - RKLB
+  risk_pct: 0.02
+  params:
+    sma_short: 20
+    sma_long: 30
+    use_fast_cross: true
+    fast_cross_type: EMA
+    fast_cross_short: 9
+    fast_cross_long: 21
+    use_early_golden_cross: true
+    early_gc_proximity_pct: 0.02
+    early_gc_rsi_min: 55
+    use_pullback_entry_daily: true
+    pullback_daily_lookback: 15
+    pullback_daily_ema: 20
+    pullback_daily_proximity: 0.015
+    pullback_daily_rsi_min: 50
+
+    use_rsi_filter: true
+    rsi_buy_min: 50
+    rsi_buy_max: 70
+    use_volume_filter: true
+    volume_sma_period: 20
+    use_macd_filter: true
+    macd_fast: 12
+    macd_slow: 26
+    macd_signal_period: 9
+
+    use_mean_reversion: true
+    bb_period: 20
+    bb_std: 2.0
+    mr_rsi_max: 35
+    mr_profit_target_pct: 0.05
+
+    atr_period: 14
+    risk_per_trade: 0.02
+    max_equity_at_risk: 0.80
+    initial_sl_atr_mult: 2.5
+    trailing_atr_mult: 3.0
+    partial_profit_pct: 0.25
+    allow_reentry: true
+    reentry_atr_mult: 1.5
+
+    adx_period: 14
+    adx_threshold: 15
+    vix_high_threshold: 30
+    vix_size_reduction: 0.5
+    max_drawdown_pct: 0.15
+    max_per_sector: 2
+    max_volume_pct: 0.01
+    sector_groups:
+      tech_semi: [NVDA, AMD, MU]
+      tech_large: [AAPL, META, GOOGL]
+      tech_growth: [CRWD, PLTR, HOOD, RKLB]
+      etf_broad: [SPY, QQQ]
+      defensive: [JNJ, GLD]
+      energy: [XLE]
+      ev_space: [TSLA]
+
+    # MTF-Filter AKTIV
+    use_multi_timeframe: true
+    lower_ema_period: 20
+    lower_rsi_min: 50
+    pullback_entry: true
+    mtf_pullback_proximity: 0.015
+    mtf_breakout_lookback: 5
+
+    initial_capital: 10000.0
+
+ml:
+  enabled: false
+
+broker:
+  type: paper
+  paper: true
+
+data:
+  provider: yfinance
+  timeframe: "1D"
+  lookback_days: 365
+
+notifications:
+  enabled: false
+  bot_name: FLUX_BOTTI_BT
+
+benchmark: SPY

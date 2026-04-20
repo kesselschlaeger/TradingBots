@@ -1,11 +1,12 @@
 # Strategien
 
-FluxTrader bringt zwei produktionserprobte Strategien mit.
+FluxTrader bringt drei produktionserprobte Strategien mit.
 
 | Strategie | Timeframe | Style | Broker-Anforderung |
 |---|---|---|---|
 | [ORB](orb.md) | 5-Min Intraday | Trend-Following Breakout | SL + TP (Bracket-Order) |
 | [OBB](obb.md) | Daily | Momentum Swing | Market-Entry, kein SL |
+| [Botti](botti.md) | Daily (+ MTF-Filter) | Trend Following + Mean Reversion | SL + TP (ATR-basiert) |
 
 ## Eigene Strategie entwickeln
 

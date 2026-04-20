@@ -152,14 +152,30 @@ class LiveRunner:
                 pass
 
         # Hauptloop: Bars streamen/pollt
-        await self._bar_loop()
+        try:
+            await self._bar_loop()
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            log.info("runner.interrupted")
+        finally:
+            await self.stop()
 
     async def stop(self) -> None:
+        if not self._running:
+            return
         self._running = False
         if self._scheduler:
             self._scheduler.stop()
         log.info("runner.stopping")
-        await self.notifier.send("*Bot stopped*")
+        try:
+            await self.notifier.send("*Bot stopped*")
+        except Exception as e:  # noqa: BLE001
+            log.warning("runner.notifier_close_error", error=str(e))
+        close_fn = getattr(self.data, "close", None)
+        if close_fn is not None:
+            try:
+                await close_fn()
+            except Exception as e:  # noqa: BLE001
+                log.warning("runner.data_close_error", error=str(e))
 
     # ── Scheduled Callbacks ───────────────────────────────────────────
 

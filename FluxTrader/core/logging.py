@@ -21,6 +21,9 @@ def setup_logging(level: str = "INFO", json_output: bool = False) -> None:
         level=log_level,
     )
 
+    for noisy in ("httpx", "httpcore", "aiohttp.access"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+
     processors: list = [
         structlog.contextvars.merge_contextvars,
         structlog.processors.add_log_level,

@@ -9,7 +9,7 @@ kein separater Backtest-Code, kein Drift.
 graph LR
     YF[YFinanceDataProvider] -->|dict[sym, DataFrame]| E
     CTX[MarketContextService] --> E
-    E[BarByBarEngine] -->|on_bar| STR[ORBStrategy / OBBStrategy]
+    E[BarByBarEngine] -->|on_bar| STR[ORBStrategy / OBBStrategy / BottiStrategy]
     STR -->|Signal| E
     E -->|execute_signal| PA[PaperAdapter]
     PA -->|fills| TL[Trade-Log]
@@ -31,7 +31,13 @@ data:
 
 !!! warning "yfinance Intraday-Limit"
     yfinance liefert Intraday-Bars nur für die letzten ~60 Tage.
-    Für längere Backtests Daily-Bars nutzen (`timeframe: "1Day"`).
+    Für längere Backtests Daily-Bars nutzen (`timeframe: "1D"`).
+
+!!! tip "Botti (Daily-Strategie)"
+    Botti läuft auf `timeframe: "1D"`. yfinance liefert Daily-Bars ohne
+    Zeitlimit — `lookback_days: 365` oder mehr problemlos möglich.
+    Der MTF-Proxy arbeitet ausschließlich auf diesen Daily-Bars, kein
+    separater Intraday-Download nötig.
 
 ### Alpaca Historical Data
 
@@ -47,8 +53,19 @@ Alpaca liefert bis zu 2 Jahre historische 1-Min-Bars (kostenpflichtig ab SIP).
 ## Backtest starten
 
 ```bash
+# ORB (5-Min Intraday)
 python main.py backtest --config configs/orb_backtest.yaml
+
+# Botti Daily – mit MTF-Filter (empfohlen)
+PYTHONIOENCODING=utf-8 python main.py backtest --config configs/botti_backtest_mtf.yaml
+
+# Botti Daily – Baseline ohne MTF (Vergleich)
+PYTHONIOENCODING=utf-8 python main.py backtest --config configs/botti_backtest_nomtf.yaml
 ```
+
+!!! note "Windows-Konsole"
+    `PYTHONIOENCODING=utf-8` ist auf Windows nötig, wenn das Tearsheet
+    Unicode-Zeichen (Pfeile, Sonderzeichen) enthält.
 
 ## Slippage & Commission
 

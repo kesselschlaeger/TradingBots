@@ -53,7 +53,7 @@ def _to_duration_str(start: datetime, end: datetime) -> str:
 
 
 def _normalize_df(raw: pd.DataFrame, start: datetime, end: datetime) -> pd.DataFrame:
-    if raw.empty:
+    if raw is None or raw.empty:
         return pd.DataFrame()
 
     cols = ["date", "open", "high", "low", "close", "volume"]
@@ -190,9 +190,11 @@ class IBKRDataProvider(DataProvider):
             self._ensure_connected()
             contract = Stock(symbol.upper(), "SMART", "USD")
             self.ib.qualifyContracts(contract)
+            end_utc = end.astimezone(timezone.utc) if end.tzinfo else end.replace(tzinfo=timezone.utc)
+            end_dt_str = end_utc.strftime("%Y%m%d-%H:%M:%S")
             bars = self.ib.reqHistoricalData(
                 contract,
-                endDateTime=end,
+                endDateTime=end_dt_str,
                 durationStr=duration,
                 barSizeSetting=bar_size,
                 whatToShow="TRADES",

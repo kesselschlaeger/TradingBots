@@ -73,9 +73,12 @@ live/scanner.py     → PremarketScanner (Alpaca Snapshot-API)
 tools/train_ml.py   → CLI: ML-Model-Training auf historischen Trades
 tools/models/       → Gespeicherte model.pkl + scaler.pkl
 
-configs/base.yaml       → Shared Defaults (wird gemerged)
-configs/botti_pair.yaml → Botti Pair-Trading (SPY/QQQ Kalman Z-Score)
-main.py                 → CLI: live | paper | backtest
+configs/base.yaml              → Shared Defaults (wird gemerged)
+configs/botti.yaml            → Botti Live/Paper (IBKR, Daily + MTF-Filter aktiv)
+configs/botti_backtest_mtf.yaml  → Botti Backtest MIT MTF-Filter (yfinance, broker=paper)
+configs/botti_backtest_nomtf.yaml → Botti Backtest OHNE MTF-Filter (Baseline)
+configs/botti_pair.yaml       → Botti Pair-Trading (SPY/QQQ Kalman Z-Score)
+main.py                       → CLI: live | paper | backtest
 ```
 
 ## Signal-Flow (Kurzfassung)
@@ -88,6 +91,9 @@ DataProvider.get_bars_bulk()
     → strategy.on_bar(bar)
       → context.push_bar(bar)
       → _generate_signals(bar)  ← reine Logik
+        [Botti: _classify_signal() → BUY/BUY_MR/SELL]
+        [Botti: BUY + use_multi_timeframe → _daily_mtf_proxy(df, cfg)]
+        [Botti: BUY_MR → MTF-Filter übersprungen (v6-Konvention)]
     → [Signal] (mit FeatureVector)
     → ml_filter.passes(signal)   ← optionaler ML-Konfidenz-Filter
     → broker.execute_signal(signal, equity, risk_pct)
@@ -126,6 +132,8 @@ macd_hist, z_score (Pair: Spread Z-Score, Einzelsymbol: 0.0), volume_ratio.
   Gesteuert durch `qty_factor` aus MIT-Overlay (0.25–1.0)
 - **OBB**: Fixed-Fraction über `fixed_fraction_size(equity, price, fraction)`
   Signal enthält `qty_hint` im metadata; `execute_signal` prüft das zuerst
+- **Botti**: R-basiert über `position_size()`, VIX-Faktor skaliert Größe bei hohem VIX
+  `botti_trend`-Signal enthält `vix_factor` in metadata
 - **Pair**: ATR-basiert über `execute_pair_signal(signal, equity)`
   Nutzt `qty_pct` und `atr_pct` aus PairSignal/FeatureVector
 
@@ -224,3 +232,11 @@ Niemals `print()` für Diagnose-Output. Immer `log.*`.
 - **Alpaca Feed**: `iex`-Feed hat möglicherweise 15-Min-Delay → für Live-Trading `sip` nutzen
 - **PaperAdapter Lock**: `asyncio.Lock()` verhindert Race Conditions, aber der Lock muss aus
   dem gleichen Event-Loop stammen → bei Test-Isolation `PaperAdapter()` pro Test neu erstellen
+- **Botti Daily-Backtest via IBKR**: IBKR-Gateway muss laufen; für reine Backtests
+  `botti_backtest_mtf.yaml` / `botti_backtest_nomtf.yaml` mit `provider: yfinance` nutzen
+- **Botti RSI im MTF-Proxy**: Monoton steigende Bars (kein Down-Move) → `RSI = NaN`
+  → `_daily_mtf_proxy` gibt `False` zurück. In Tests Sinus-überlagerte Bars nutzen, nicht linear steigende.
+- **Botti MTF-Filter gilt nur für `botti_trend`**, nicht für `botti_mr` (Mean Reversion).
+  Das ist bewusste v6-Konvention: MR-Entries brauchen keinen Intraday-Bestätigungs-Punkt.
+- **Windows-Terminal & Tearsheet**: `PYTHONIOENCODING=utf-8` setzen, sonst `UnicodeEncodeError`
+  bei Unicode-Pfeilen im Tearsheet-Output.
