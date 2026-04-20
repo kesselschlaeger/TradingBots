@@ -50,11 +50,10 @@ strategy:
 #  paper: true
 #  alpaca_data_feed: iex
 broker: 
-  #type: ibkr
-  type: alpaca
+  type: ibkr
   paper: true
-  #ibkr_client_id: 7
-  #ibkr_bot_id: Flux_OBB
+  ibkr_client_id: 19
+  ibkr_bot_id: Flux_OBB
 
 data:
   provider: ibkr

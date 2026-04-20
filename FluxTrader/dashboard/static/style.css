@@ -113,8 +113,10 @@ header h1 {
 .bot-card-header {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  gap: 8px;
   margin-bottom: 10px;
+  cursor: pointer;
+  user-select: none;
 }
 
 .bot-card-header h3 {
@@ -122,6 +124,87 @@ header h1 {
   font-size: 14px;
   font-weight: 600;
   color: #4a8fef;
+  flex: 0 1 auto;
+}
+
+.bot-toggle {
+  color: #8a93a1;
+  font-size: 11px;
+  width: 10px;
+  display: inline-block;
+  transition: color 0.15s;
+}
+
+.bot-card-header:hover .bot-toggle {
+  color: #e6e6e6;
+}
+
+.symbols-badge {
+  font-size: 10px;
+  color: #b7c0cc;
+  background: #262b33;
+  border-radius: 3px;
+  padding: 2px 6px;
+  cursor: help;
+  white-space: nowrap;
+  margin-right: auto;
+}
+
+.symbols-badge:hover {
+  background: #2f3540;
+  color: #e6e6e6;
+}
+
+.bot-symbol-status {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid #262b33;
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.symbol-status-table {
+  width: 100%;
+  font-size: 11px;
+}
+
+.symbol-status-table th {
+  padding: 4px 6px;
+  font-size: 10px;
+}
+
+.symbol-status-table td {
+  padding: 4px 6px;
+  border-bottom: 1px solid #1a1f25;
+}
+
+.status-chip {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-size: 10px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.status-chip.ok {
+  background: #1b5e20;
+  color: #81c784;
+}
+
+.status-chip.info {
+  background: #1a3a5e;
+  color: #4a8fef;
+}
+
+.status-chip.muted {
+  background: #262b33;
+  color: #8a93a1;
+}
+
+.status-chip.warning {
+  background: #5e4a15;
+  color: #f4d77a;
 }
 
 .bot-status-badge {

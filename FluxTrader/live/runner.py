@@ -88,6 +88,15 @@ class LiveRunner:
         self._last_alert_ts: float = 0.0
         self._alert_cooldown_s = 60
 
+        # Symbol-Status-Reporting: Strategie meldet pro-Symbol-Status
+        # (WAIT_ORB, GAP_BLOCK, ...) sync in HealthState.
+        if self.health is not None and hasattr(self.strategy, "set_status_sink"):
+            strat_name = self.strategy.name
+            self.strategy.set_status_sink(
+                lambda sym, code, reason:
+                    self.health.set_symbol_status(strat_name, sym, code, reason)
+            )
+
         set_context_service(context)
 
     # ── Lifecycle ──────────────────────────────────────────────────────

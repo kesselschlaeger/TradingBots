@@ -7,6 +7,88 @@ const REFRESH_INTERVAL = 3000; // 3s
 let equityChart = null;
 let tradeData = [];
 let strategies = [];
+// Persistent UI-State: welche Bot-Cards sind ausgeklappt?
+const expandedBots = new Set();
+
+// ─────────────────────────────────────────────────────────────────────────
+// Symbol-Status Rendering
+// ─────────────────────────────────────────────────────────────────────────
+
+// Code -> { label, cssClass }
+const STATUS_META = {
+  SIGNAL:             { label: 'Signal',          cls: 'ok' },
+  IN_POSITION:        { label: 'In Position',     cls: 'info' },
+  WAIT_BREAKOUT:      { label: 'Wartet Breakout', cls: 'muted' },
+  WAIT_ORB:           { label: 'ORB-Periode',     cls: 'muted' },
+  WEAK_SIGNAL:        { label: 'Zu schwach',      cls: 'muted' },
+  OUTSIDE_HOURS:      { label: 'Außer Handel',    cls: 'muted' },
+  ENTRY_CUTOFF:       { label: 'Nach Cutoff',     cls: 'muted' },
+  GAP_BLOCK:          { label: 'Gap zu hoch',     cls: 'warning' },
+  TREND_BLOCK:        { label: 'Trend-Block',     cls: 'warning' },
+  MIT_BLOCK:          { label: 'MIT-Block',       cls: 'warning' },
+  MIT_OVERLAY_REJECT: { label: 'MIT-Reject',      cls: 'warning' },
+  SHORTS_DISABLED:    { label: 'Shorts aus',      cls: 'warning' },
+  NO_ORB:             { label: 'Keine ORB',       cls: 'warning' },
+  NO_DATA:            { label: 'Keine Daten',     cls: 'muted' },
+};
+
+function statusMeta(code) {
+  return STATUS_META[code] || { label: code, cls: 'muted' };
+}
+
+function formatStatusBadgeSummary(symbolStatus) {
+  const entries = Object.entries(symbolStatus || {});
+  if (entries.length === 0) return '';
+  const counts = {};
+  for (const [, v] of entries) {
+    const c = (v && v.code) || 'UNKNOWN';
+    counts[c] = (counts[c] || 0) + 1;
+  }
+  const parts = Object.entries(counts)
+    .sort((a, b) => b[1] - a[1])
+    .map(([code, n]) => `${statusMeta(code).label}: ${n}`);
+  return `${entries.length} Symbols\n` + parts.join('\n');
+}
+
+function renderSymbolStatusTable(symbolStatus) {
+  const entries = Object.entries(symbolStatus || {});
+  if (entries.length === 0) {
+    return '<div class="muted" style="padding: 8px 0;">Keine Symbol-Status-Daten verfügbar. Bot nicht live oder noch keine Bars verarbeitet.</div>';
+  }
+  // Sortierung: Signal / In Position zuerst, dann nach Symbol
+  const priority = (code) => {
+    if (code === 'SIGNAL') return 0;
+    if (code === 'IN_POSITION') return 1;
+    if (code && code.startsWith('WAIT')) return 2;
+    return 3;
+  };
+  entries.sort((a, b) => {
+    const pa = priority(a[1] && a[1].code);
+    const pb = priority(b[1] && b[1].code);
+    if (pa !== pb) return pa - pb;
+    return a[0].localeCompare(b[0]);
+  });
+  const rows = entries.map(([sym, info]) => {
+    const code = (info && info.code) || '—';
+    const meta = statusMeta(code);
+    const reason = (info && info.reason) || '';
+    const ts = info && info.ts ? new Date(info.ts).toLocaleTimeString() : '—';
+    return `
+      <tr>
+        <td><strong>${sym}</strong></td>
+        <td><span class="status-chip ${meta.cls}">${meta.label}</span></td>
+        <td class="muted">${reason || '—'}</td>
+        <td class="muted">${ts}</td>
+      </tr>`;
+  }).join('');
+  return `
+    <table class="symbol-status-table">
+      <thead>
+        <tr><th>Symbol</th><th>Status</th><th>Detail</th><th>Zeit</th></tr>
+      </thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+}
 
 // ─────────────────────────────────────────────────────────────────────────
 // Main refresh loop
@@ -225,10 +307,21 @@ async function updateStrategies() {
       container.innerHTML = '<div class="muted">No active bots detected from live health telemetry.</div>';
       return;
     }
-    container.innerHTML = strategies.map(bot => `
-      <div class="bot-card">
-        <div class="bot-card-header">
+    container.innerHTML = strategies.map(bot => {
+      const symStatus = bot.symbol_status || {};
+      const symCount = Object.keys(symStatus).length;
+      const expanded = expandedBots.has(bot.strategy);
+      const toggleIcon = expanded ? '▾' : '▸';
+      const summaryTooltip = formatStatusBadgeSummary(symStatus);
+      const symbolsBadge = symCount > 0
+        ? `<span class="symbols-badge" title="${escapeAttr(summaryTooltip)}">${symCount} Symbols</span>`
+        : '';
+      return `
+      <div class="bot-card" data-bot="${bot.strategy}">
+        <div class="bot-card-header" data-toggle="bot" data-bot="${bot.strategy}">
+          <span class="bot-toggle">${toggleIcon}</span>
           <h3>${bot.strategy}</h3>
+          ${symbolsBadge}
           <span class="bot-status-badge ${bot.running ? 'running' : 'stopped'}">
             ${bot.running ? 'RUNNING' : 'STOPPED'}
           </span>
@@ -264,8 +357,10 @@ async function updateStrategies() {
             Updated: ${new Date(bot.last_equity_ts).toLocaleTimeString()}
           </div>
         </div>
+        ${expanded ? `<div class="bot-symbol-status">${renderSymbolStatusTable(symStatus)}</div>` : ''}
       </div>
-    `).join('');
+    `;
+    }).join('');
 
     // Update strategy filter
     const strategyFilter = document.getElementById('trade-filter-strategy');
@@ -410,6 +505,14 @@ function formatPercent(value) {
   return sign + parseFloat(value).toFixed(2) + '%';
 }
 
+function escapeAttr(s) {
+  return String(s || '')
+    .replaceAll('&', '&amp;')
+    .replaceAll('"', '&quot;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;');
+}
+
 // ─────────────────────────────────────────────────────────────────────────
 // Event listeners
 // ─────────────────────────────────────────────────────────────────────────
@@ -420,6 +523,20 @@ document.getElementById('trade-filter-strategy').addEventListener('change', () =
 
 document.getElementById('trade-filter-days').addEventListener('change', () => {
   updateTrades();
+});
+
+// Bot-Card Toggle: Symbol-Status-Tabelle ein-/ausklappen
+document.getElementById('bots-container').addEventListener('click', (ev) => {
+  const header = ev.target.closest('[data-toggle="bot"]');
+  if (!header) return;
+  const bot = header.dataset.bot;
+  if (!bot) return;
+  if (expandedBots.has(bot)) {
+    expandedBots.delete(bot);
+  } else {
+    expandedBots.add(bot);
+  }
+  updateStrategies();
 });
 
 // ─────────────────────────────────────────────────────────────────────────

@@ -10,10 +10,16 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections import deque
-from typing import Optional
+from typing import Callable, Optional
 
 from core.context import MarketContext, MarketContextService, get_context_service
 from core.models import Bar, PairSignal, Signal
+
+
+# Sink-Signatur: (symbol, status_code, reason) -> None.
+# Der LiveRunner bindet dies an HealthState.set_symbol_status (sync).
+# Strategien rufen es via self._record_status(...) in _generate_signals().
+StatusSink = Callable[[str, str, str], None]
 
 # Maximale Bars im Strategie-Buffer (genügt für ATR(14), Volume_MA(20),
 # OBB lookback(50) + Puffer).  Verhindert unbegrenztes Wachstum.
@@ -43,6 +49,7 @@ class BaseStrategy(ABC):
         self._context = context
         max_bars = int(self.config.get("max_bars_buffer", _DEFAULT_MAX_BARS))
         self.bars: deque[Bar] = deque(maxlen=max_bars)
+        self._status_sink: Optional[StatusSink] = None
 
     # ── Public API ──────────────────────────────────────────────────────
 
@@ -80,6 +87,23 @@ class BaseStrategy(ABC):
         if self._context is None:
             self._context = get_context_service()
         return self._context
+
+    # ── Status-Reporting (Null-Object-Pattern) ─────────────────────────
+
+    def set_status_sink(self, sink: Optional[StatusSink]) -> None:
+        """Bindet einen Sink, über den die Strategie pro-Symbol-Status
+        meldet. Ohne Sink ist _record_status ein No-Op (Backtest/Tests)."""
+        self._status_sink = sink
+
+    def _record_status(self, symbol: str, code: str,
+                       reason: str = "") -> None:
+        sink = self._status_sink
+        if sink is None:
+            return
+        try:
+            sink(symbol, code, reason)
+        except Exception:  # noqa: BLE001
+            pass
 
 
 # ─────────────────────────── Pair-Strategy ABC ──────────────────────────────

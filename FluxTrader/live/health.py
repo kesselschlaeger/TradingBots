@@ -59,6 +59,11 @@ class HealthState:
         self._signals_today: dict[str, int] = {}
         self._signals_filtered_today: dict[str, int] = {}
 
+        # Pro-Symbol-Status: {strategy: {symbol: {code, reason, ts}}}
+        # Synchroner Writer (siehe set_symbol_status) – wird von Strategien
+        # innerhalb des Event-Loops aufgerufen, kein Lock nötig.
+        self._symbol_status: dict[str, dict[str, dict[str, Any]]] = {}
+
         self._equity: float = 0.0
         self._cash: float = 0.0
         self._open_positions: int = 0
@@ -117,13 +122,32 @@ class HealthState:
         async with self._lock:
             self._circuit_breaker = bool(active)
 
+    def set_symbol_status(self, strategy: str, symbol: str,
+                          code: str, reason: str = "",
+                          ts: Optional[datetime] = None) -> None:
+        """Synchroner Writer für Pro-Symbol-Status.
+
+        Strategien rufen dies synchron aus _generate_signals() auf.
+        Da der LiveRunner single-threaded im Event-Loop laeuft, ist kein
+        Lock noetig.
+        """
+        bucket = self._symbol_status.setdefault(strategy, {})
+        bucket[symbol.upper()] = {
+            "code": str(code),
+            "reason": str(reason or ""),
+            "ts": _ensure_aware(ts or datetime.now(timezone.utc)).isoformat(),
+        }
+
     # ── Reader (nicht async – immer Momentaufnahme) ───────────────────
 
     def snapshot(self) -> dict[str, Any]:
         now = datetime.now(timezone.utc)
         strategies: list[dict[str, Any]] = []
-        for name in sorted(set(self._last_bar_ts) | set(self._signals_today)
-                            | set(self._signals_filtered_today)):
+        all_names = (set(self._last_bar_ts)
+                     | set(self._signals_today)
+                     | set(self._signals_filtered_today)
+                     | set(self._symbol_status))
+        for name in sorted(all_names):
             ts = self._last_bar_ts.get(name)
             strategies.append({
                 "name": name,
@@ -132,6 +156,7 @@ class HealthState:
                 "signals_today": self._signals_today.get(name, 0),
                 "signals_filtered_today":
                     self._signals_filtered_today.get(name, 0),
+                "symbol_status": self._symbol_status.get(name, {}),
             })
 
         return {

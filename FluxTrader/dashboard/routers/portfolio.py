@@ -178,15 +178,18 @@ async def list_strategies(
     - equity, drawdown_pct, peak_equity
     - open_positions, trades_today, pnl_today
     - last_equity_ts (wann der letzte Snapshot war)
+    - symbol_status (HealthState): {SYMBOL: {code, reason, ts}}
     """
     state = request.app.state.persistent_state
 
     active_names = await _get_active_strategy_names(request)
+    symbol_status_by_strat = await _get_symbol_status_map(request)
     strategies = await state.get_strategies()
     result = []
     for strat in strategies:
         status = await state.get_strategy_status(strat)
         status["running"] = strat in active_names
+        status["symbol_status"] = symbol_status_by_strat.get(strat, {})
         result.append(status)
 
     # Im Dashboard ist "Active Bots" gewünscht: nur wirklich laufende Bots.
@@ -199,3 +202,32 @@ async def list_strategies(
         "active_source": "health",
         "strategies": result,
     }
+
+
+async def _get_symbol_status_map(request: Request) -> dict[str, dict]:
+    """Sammle pro-Symbol-Status pro Strategie aus HealthState.
+
+    Lokal bevorzugt, sonst Remote-Health-Server.
+    """
+    hs = request.app.state.health_state
+    snapshots: list[dict[str, Any]] = []
+    if hs is not None:
+        snapshots = list(hs.snapshot().get("strategies", []))
+    else:
+        try:
+            import httpx
+
+            health_url = request.app.state.health_server_url
+            async with httpx.AsyncClient(timeout=2.0) as client:
+                resp = await client.get(f"{health_url}/status")
+                if resp.status_code == 200:
+                    snapshots = list(resp.json().get("strategies", []))
+        except Exception:
+            snapshots = []
+
+    out: dict[str, dict] = {}
+    for s in snapshots:
+        name = str(s.get("name", "")).strip()
+        if name:
+            out[name] = s.get("symbol_status", {}) or {}
+    return out

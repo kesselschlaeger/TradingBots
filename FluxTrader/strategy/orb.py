@@ -184,6 +184,8 @@ class ORBStrategy(BaseStrategy):
         if full_df is not None:
             cursor = self.context.bar_cursor(symbol)
             if cursor < 5:
+                self._record_status(symbol, "NO_DATA",
+                                    f"warmup cursor={cursor}")
                 return []
             df = full_df.iloc[:cursor + 1]
         else:
@@ -193,19 +195,27 @@ class ORBStrategy(BaseStrategy):
                 or self.context.bars(symbol)
             )
             if df_raw.empty or len(df_raw) < 6:
+                self._record_status(symbol, "NO_DATA",
+                                    f"bars={len(df_raw)}")
                 return []
             df = compute_indicator_frame(df_raw, volume_lookback=20)
 
         # Market-Hours Check (früh prüfen, spart Arbeit)
         if not is_market_hours(current_time):
+            self._record_status(symbol, "OUTSIDE_HOURS",
+                                "außerhalb Handelszeiten")
             return []
         et_time = to_et_time(current_time)
         orb_minutes = int(cfg.get("opening_range_minutes", 30))
         orb_end = cfg.get("orb_end_time", time(10, 0))
         if is_orb_period(current_time, orb_minutes) or et_time < orb_end:
+            self._record_status(symbol, "WAIT_ORB",
+                                f"ORB-Periode, {orb_minutes}m")
             return []
 
         if not entry_cutoff_ok(current_time, cfg.get("entry_cutoff_time")):
+            self._record_status(symbol, "ENTRY_CUTOFF",
+                                "nach Entry-Cutoff")
             return []
 
         # ── Day-Key für Caches (Variante B) ───────────────────────────
@@ -221,6 +231,8 @@ class ORBStrategy(BaseStrategy):
             orb_h, orb_l, orb_r = self._current_day_orb(df, orb_minutes)
             self._orb_cache[orb_cache_key] = (orb_h, orb_l, orb_r)
         if orb_r <= 0:
+            self._record_status(symbol, "NO_ORB",
+                                "ORB-Range nicht berechenbar")
             return []
 
         current_price = float(df["Close"].iloc[-1])
@@ -236,6 +248,8 @@ class ORBStrategy(BaseStrategy):
                 self._gap_cache[gap_key] = (gap_ok, gap_pct)
             if not gap_ok:
                 log.debug("orb.gap_block", symbol=symbol, gap_pct=gap_pct)
+                self._record_status(symbol, "GAP_BLOCK",
+                                    f"gap {gap_pct*100:.2f}%")
                 return []
 
         # ── Volume-Ratio (day-cached) ─────────────────────────────────
@@ -279,15 +293,31 @@ class ORBStrategy(BaseStrategy):
 
         min_strength = float(cfg.get("min_signal_strength", 0.3))
         if side == "" or strength < min_strength:
+            if side == "":
+                self._record_status(
+                    symbol, "WAIT_BREAKOUT",
+                    f"Preis {current_price:.2f} in [{orb_l:.2f}..{orb_h:.2f}]",
+                )
+            else:
+                self._record_status(
+                    symbol, "WEAK_SIGNAL",
+                    f"{side} strength {strength:.2f} < {min_strength:.2f}",
+                )
             return []
 
         # Trend-Gate
         if cfg.get("use_trend_filter", True):
             if side == "long" and not trend["bullish"]:
+                self._record_status(symbol, "TREND_BLOCK",
+                                    "SPY-Trend nicht bullish")
                 return []
             if side == "short" and not trend["bearish"]:
+                self._record_status(symbol, "TREND_BLOCK",
+                                    "SPY-Trend nicht bearish")
                 return []
         if side == "short" and not cfg.get("allow_shorts", True):
+            self._record_status(symbol, "SHORTS_DISABLED",
+                                "Shorts in Config deaktiviert")
             return []
 
         # MIT-Independence-Guard (Cross-Symbol via Context)
@@ -302,6 +332,7 @@ class ORBStrategy(BaseStrategy):
             )
             if blocked:
                 log.debug("orb.mit_blocked", symbol=symbol, reason=reason)
+                self._record_status(symbol, "MIT_BLOCK", reason or "")
                 return []
 
         # Stop + Target berechnen
@@ -324,6 +355,8 @@ class ORBStrategy(BaseStrategy):
             if not overlay_ok:
                 log.debug("orb.mit_overlay_reject",
                           symbol=symbol, reason=overlay_reason)
+                self._record_status(symbol, "MIT_OVERLAY_REJECT",
+                                    overlay_reason or "")
                 return []
 
         direction = 1 if side == "long" else -1
@@ -368,6 +401,7 @@ class ORBStrategy(BaseStrategy):
         signal.metadata["reserve_group"] = correlation_group(
             symbol, cfg.get("mit_correlation_groups", {}),
         )
+        self._record_status(symbol, "SIGNAL", reason)
         return [signal]
 
     # ── Hilfsmethoden ────────────────────────────────────────────────
