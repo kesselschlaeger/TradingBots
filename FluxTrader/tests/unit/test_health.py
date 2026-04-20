@@ -23,12 +23,29 @@ async def test_broker_connected_without_bars_is_ready():
 
 
 @pytest.mark.asyncio
-async def test_stale_bar_marks_unready():
+async def test_stale_bar_marks_unready(monkeypatch):
+    # is_ready akzeptiert alte Bars außerhalb der Handelszeiten, damit
+    # der Runner nachts/am Wochenende nicht als "not ready" gilt. Dieser
+    # Test verifiziert das Verhalten während der Handelszeiten, also
+    # muss is_market_hours() hier True liefern.
+    import live.health as health_mod
+    monkeypatch.setattr(health_mod, "is_market_hours", lambda _dt: True)
     hs = HealthState()
     await hs.set_broker_status(connected=True, adapter="paper")
     old = datetime.now(timezone.utc) - timedelta(minutes=20)
     await hs.set_last_bar("orb", old, lag_ms=1_200_000.0)
     assert hs.is_ready() is False
+
+
+@pytest.mark.asyncio
+async def test_stale_bar_ok_outside_market_hours(monkeypatch):
+    import live.health as health_mod
+    monkeypatch.setattr(health_mod, "is_market_hours", lambda _dt: False)
+    hs = HealthState()
+    await hs.set_broker_status(connected=True, adapter="paper")
+    old = datetime.now(timezone.utc) - timedelta(minutes=20)
+    await hs.set_last_bar("orb", old, lag_ms=1_200_000.0)
+    assert hs.is_ready() is True
 
 
 @pytest.mark.asyncio
