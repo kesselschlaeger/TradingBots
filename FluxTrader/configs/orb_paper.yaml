@@ -24,7 +24,7 @@ broker:
   paper: true
 
 data:
-  provider: alpaca
+  provider: ibkr
   timeframe: "5Min"
   lookback_days: 5
 

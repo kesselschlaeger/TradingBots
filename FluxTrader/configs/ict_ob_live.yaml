@@ -49,7 +49,7 @@ broker:
   alpaca_data_feed: iex
 
 data:
-  provider: alpaca
+  provider: ibkr
   timeframe: "5Min"
   lookback_days: 15            # 15 Tage für ausreichend 4H-Bars
 

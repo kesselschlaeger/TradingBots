@@ -32,7 +32,7 @@ broker:
   paper: true
 
 data:
-  provider: yfinance
+  provider: ibkr
   timeframe: "1Day"
   lookback_days: 105
 

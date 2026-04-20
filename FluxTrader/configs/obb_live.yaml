@@ -57,7 +57,7 @@ broker:
   #ibkr_bot_id: Flux_OBB
 
 data:
-  provider: alpaca
+  provider: ibkr
   timeframe: "1Day"
   lookback_days: 90
 

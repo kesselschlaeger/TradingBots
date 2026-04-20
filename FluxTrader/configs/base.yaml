@@ -18,7 +18,7 @@ broker:
   ibkr_bot_id: FLUX
 
 data:
-  provider: alpaca
+  provider: ibkr
   timeframe: "5Min"
   lookback_days: 5
 

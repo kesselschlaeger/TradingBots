@@ -1,0 +1,35 @@
+import os
+from dotenv import load_dotenv
+load_dotenv('c:\\!\\privat\\TradingBots\\FluxTrader\\.env')
+
+from ib_insync import IB, Stock, util
+import pandas as pd
+
+host = os.getenv('IBKR_HOST')
+port = int(os.getenv('IBKR_PORT'))
+cid  = int(os.getenv('IBKR_CLIENT_ID'))
+
+ib = IB()
+ib.connect(host, port, clientId=cid, timeout=10, readonly=True)
+print("Connected:", ib.isConnected())
+
+contract = Stock('SPY', 'SMART', 'USD')
+qualified = ib.qualifyContracts(contract)
+print("Qualified:", qualified)
+
+bars = ib.reqHistoricalData(
+    qualified[0],
+    endDateTime='',
+    durationStr='1 D',          # nur 1 Tag
+    barSizeSetting='5 mins',
+    whatToShow='TRADES',
+    useRTH=True,
+    formatDate=1
+)
+print("Received bars:", len(bars))
+if bars:
+    df = util.df(bars)
+    print(df.head())
+else:
+    print("Keine Bars erhalten – prüfe Abonnements/Contract.")
+ib.disconnect()
