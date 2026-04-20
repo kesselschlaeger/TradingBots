@@ -96,6 +96,14 @@ BOTTI_DEFAULT_PARAMS: dict = {
     "max_volume_pct": 0.01,
     "sector_groups": {},
 
+    # Multi-Timeframe (Backtest nutzt Daily-Proxy; Live Phase 2: echte Intraday-Bars)
+    "use_multi_timeframe": False,
+    "lower_ema_period": 20,
+    "lower_rsi_min": 50,
+    "pullback_entry": True,
+    "mtf_pullback_proximity": 0.015,
+    "mtf_breakout_lookback": 5,
+
     # ML (Phase 2 - nicht migriert)
     "use_ml": False,
     "ml_prob_threshold": 0.6,
@@ -254,6 +262,15 @@ class BottiStrategy(BaseStrategy):
             return [self._make_mr_signal(bar, df, last, cfg, vix_factor, reason)]
 
         if signal_type == "BUY":
+            # Multi-Timeframe-Filter (Daily-Proxy) – nur für Trend-BUYs.
+            # Mean Reversion ist davon bewusst ausgenommen (v6-Konvention).
+            if cfg.get("use_multi_timeframe", False):
+                ok, mtf_reason = _daily_mtf_proxy(df, cfg)
+                if not ok:
+                    log.debug("botti.mtf_filtered", symbol=symbol,
+                              reason=mtf_reason)
+                    return []
+                reason = f"{reason} | MTF: {mtf_reason}"
             return [self._make_trend_signal(bar, df, last, cfg, vix_factor, reason)]
 
         return []
@@ -558,3 +575,73 @@ def _pullback_signal(df: pd.DataFrame, cfg: dict) -> tuple[str, str]:
 
     ref = "SMA" if touched_sma else f"EMA{ema_p}"
     return "BUY", f"Pullback-Entry -> {ref} | RSI={float(rsi_val):.0f}"
+
+
+def _daily_mtf_proxy(df: pd.DataFrame, cfg: dict) -> tuple[bool, str]:
+    """Backtest-Proxy fuer den Intraday-MTF-Filter aus v6.
+
+    Simuliert den Lower-Timeframe-Check auf Basis des Daily-Bars:
+      1) Pullback-Proxy: Bar-Low <= EMA<n> * (1 + proximity)  (EMA intraday beruehrt)
+      2) Momentum: RSI(14) > lower_rsi_min
+      3) Trigger: MACD-Hist > 0 UND steigend  ODER  Close > max(High der letzten N Bars)
+
+    Alle drei Bedingungen muessen erfuellt sein (bei pullback_entry=True).
+    Bei pullback_entry=False: Close > EMA statt Pullback-Touch.
+
+    Look-ahead-frei: nutzt nur Werte aus ``df`` bis einschliesslich des aktuellen
+    (abgeschlossenen) Daily-Bars. Entry erfolgt zum Close dieses Bars.
+    """
+    if len(df) < 30:
+        return False, "zu wenige Daily-Daten fuer MTF-Proxy"
+
+    ema_p = int(cfg.get("lower_ema_period", 20))
+    proximity = float(cfg.get("mtf_pullback_proximity", 0.015))
+    lookback = int(cfg.get("mtf_breakout_lookback", 5))
+
+    ema_series = ema(df["Close"], ema_p)
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
+    ema_val = float(ema_series.iloc[-1])
+    if not np.isfinite(ema_val) or ema_val <= 0:
+        return False, "EMA nicht verfuegbar"
+
+    # 1) Pullback-Proxy: Low touchierte EMA waehrend der Tageskerze
+    touched_ema = float(last["Low"]) <= ema_val * (1 + proximity)
+
+    # 2) RSI-Momentum
+    rsi_val = last.get("RSI", float("nan"))
+    momentum_ok = (pd.notna(rsi_val)
+                   and float(rsi_val) > float(cfg.get("lower_rsi_min", 50)))
+
+    # 3a) MACD-Histogramm positiv UND steigend
+    mh_now = last.get("MACD_hist", float("nan"))
+    mh_prev = prev.get("MACD_hist", float("nan"))
+    macd_ok = (pd.notna(mh_now) and pd.notna(mh_prev)
+               and float(mh_now) > 0 and float(mh_now) > float(mh_prev))
+
+    # 3b) Breakout ueber Hoch der letzten <lookback> Bars (exklusive aktuell)
+    breakout_ok = False
+    recent_high = float("nan")
+    if len(df) > lookback:
+        recent_high = float(df["High"].iloc[-(lookback + 1):-1].max())
+        breakout_ok = float(last["Close"]) > recent_high
+
+    if cfg.get("pullback_entry", True):
+        if touched_ema and momentum_ok and (macd_ok or breakout_ok):
+            parts = [f"Pullback EMA{ema_p}", f"RSI={float(rsi_val):.0f}"]
+            if macd_ok:
+                parts.append("MACD↑")
+            if breakout_ok:
+                parts.append(f"Breakout>{recent_high:.2f}")
+            return True, " | ".join(parts)
+        if not touched_ema:
+            return False, f"kein Pullback zur EMA{ema_p}"
+        if not momentum_ok:
+            return False, f"RSI {float(rsi_val):.0f} < {cfg.get('lower_rsi_min', 50)}"
+        return False, "kein Trigger (MACD↑ oder Breakout)"
+
+    # pullback_entry=False: Close muss ueber EMA liegen
+    if momentum_ok and float(last["Close"]) > ema_val and (macd_ok or breakout_ok):
+        trigger = "MACD↑" if macd_ok else f"Breakout>{recent_high:.2f}"
+        return True, f"Momentum RSI={float(rsi_val):.0f} | {trigger}"
+    return False, "kein Momentum-Setup"

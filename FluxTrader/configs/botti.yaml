@@ -87,6 +87,14 @@ strategy:
       energy: [XLE]
       ev_space: [TSLA]
 
+    # Multi-Timeframe-Filter (Daily-Proxy fuer Backtest; Live Phase 2: echte Intraday-Bars)
+    use_multi_timeframe: true
+    lower_ema_period: 20
+    lower_rsi_min: 50
+    pullback_entry: true
+    mtf_pullback_proximity: 0.015
+    mtf_breakout_lookback: 5
+
     # Misc
     initial_capital: 10000.0
 
@@ -97,9 +105,10 @@ ml:
   threshold: 0.6
 
 broker:
-  type: paper
+  type: ibkr
   paper: true
-  alpaca_data_feed: iex
+  ibkr_client_id: 8
+  ibkr_bot_id: Flux_BOTTI
 
 data:
   --provider: yfinance
@@ -109,6 +118,7 @@ data:
   lookback_days: 150
 
 notifications:
-  enabled: false
+  enabled: true
+  bot_name: FLUX_BOTTI_PAPER
 
 benchmark: SPY

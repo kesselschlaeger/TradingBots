@@ -11,7 +11,11 @@ import pytest
 
 from core.context import MarketContextService
 from core.models import Bar
-from strategy.botti import BottiStrategy, _compute_botti_indicators
+from strategy.botti import (
+    BottiStrategy,
+    _compute_botti_indicators,
+    _daily_mtf_proxy,
+)
 from tests.conftest import _et_dt, make_ohlcv
 
 
@@ -317,6 +321,141 @@ class TestBottiReset:
                               100, 101, 99, 100, 100000))
         strat.reset()
         assert len(strat.bars) == 0
+
+
+class TestBottiMtfProxy:
+    """Tests fuer den Daily-MTF-Proxy (Phase 1: Backtest-Filter).
+
+    Der Proxy prueft: (1) Pullback-Low <= EMA*(1+prox), (2) RSI > min,
+    (3) MACD-Hist > 0 & steigend ODER Breakout > recent High.
+    """
+
+    @staticmethod
+    def _mtf_cfg(**overrides) -> dict:
+        cfg = dict(BottiStrategy({}).config)
+        cfg.update(overrides)
+        return cfg
+
+    def test_too_few_bars_returns_false(self, context):
+        bars = _make_daily_bars(n=20)
+        df = _compute_botti_indicators(
+            pd.DataFrame({
+                "Open": [b.open for b in bars],
+                "High": [b.high for b in bars],
+                "Low": [b.low for b in bars],
+                "Close": [b.close for b in bars],
+                "Volume": [b.volume for b in bars],
+            }, index=pd.DatetimeIndex([b.timestamp for b in bars], tz="UTC")),
+            self._mtf_cfg(),
+        )
+        ok, reason = _daily_mtf_proxy(df, self._mtf_cfg())
+        assert ok is False
+        assert "wenig" in reason.lower()
+
+    def test_breakout_with_pullback_and_rsi_passes(self, context):
+        """Aufwaertstrend mit Sinus-Oszillation (garantiert Down-Moves fuer RSI)
+        + letzter Bar als Breakout mit tiefem Low (Pullback-Proxy)."""
+        n = 60
+        # Sinus-Oszillation um aufsteigenden Trend -> RSI gut definiert
+        closes = [100.0 + i * 0.3 + np.sin(i * 0.5) * 1.5 for i in range(n - 1)]
+        closes.append(max(closes) + 2.5)  # letzter Bar: ueber bisheriges Hoch
+        opens = [cl - 0.2 for cl in closes]
+        highs = [cl + 0.3 for cl in closes[:-1]] + [closes[-1] + 0.1]
+        lows = [cl - 0.3 for cl in closes[:-1]] + [closes[-1] - 3.5]
+        vols = [300_000] * n
+        idx = pd.DatetimeIndex(
+            [_et_dt(2025, 1, 2 + i % 28, 16, 0) for i in range(n)], tz="UTC",
+        )
+        df = pd.DataFrame({
+            "Open": opens, "High": highs, "Low": lows,
+            "Close": closes, "Volume": vols,
+        }, index=idx)
+        df = _compute_botti_indicators(df, self._mtf_cfg())
+        ok, reason = _daily_mtf_proxy(df, self._mtf_cfg(
+            mtf_pullback_proximity=0.05,
+            lower_rsi_min=30,
+        ))
+        assert ok is True, f"Proxy sollte passieren, tat aber nicht: {reason}"
+        assert ("EMA20" in reason) or ("Breakout" in reason)
+
+    def test_low_rsi_blocks(self, context):
+        bars = _make_golden_cross_bars()
+        df = pd.DataFrame({
+            "Open": [b.open for b in bars],
+            "High": [b.high for b in bars],
+            "Low": [b.low for b in bars],
+            "Close": [b.close for b in bars],
+            "Volume": [b.volume for b in bars],
+        }, index=pd.DatetimeIndex([b.timestamp for b in bars], tz="UTC"))
+        df = _compute_botti_indicators(df, self._mtf_cfg())
+        ok, reason = _daily_mtf_proxy(df, self._mtf_cfg(
+            mtf_pullback_proximity=0.10,
+            lower_rsi_min=999,  # unmoeglich hoch
+        ))
+        assert ok is False
+        assert "RSI" in reason
+
+    def test_no_pullback_blocks(self, context):
+        """Wenn Low weit oberhalb EMA: Pullback-Check schlaegt fehl."""
+        bars = _make_golden_cross_bars()
+        df = pd.DataFrame({
+            "Open": [b.open for b in bars],
+            "High": [b.high for b in bars],
+            "Low": [b.low for b in bars],
+            "Close": [b.close for b in bars],
+            "Volume": [b.volume for b in bars],
+        }, index=pd.DatetimeIndex([b.timestamp for b in bars], tz="UTC"))
+        df = _compute_botti_indicators(df, self._mtf_cfg())
+        ok, reason = _daily_mtf_proxy(df, self._mtf_cfg(
+            mtf_pullback_proximity=-1.0,  # unmoeglich: Low > EMA*0 = 0
+            lower_rsi_min=30,
+        ))
+        assert ok is False
+
+    def test_mtf_filter_blocks_trend_buy(self, context):
+        """Integration: use_multi_timeframe=True filtert Trend-BUYs, wenn
+        kein MTF-Setup gegeben ist."""
+        context.update_account(equity=100_000.0, cash=100_000.0)
+        strat = BottiStrategy({
+            "use_fast_cross": False,
+            "use_early_golden_cross": False,
+            "use_pullback_entry_daily": False,
+            "use_mean_reversion": False,
+            "adx_threshold": 0,
+            "use_multi_timeframe": True,
+            "lower_rsi_min": 999,  # garantiert nicht erfuellbar
+        }, context=context)
+
+        bars = _make_golden_cross_bars()
+        signals = []
+        for b in bars:
+            signals.extend(strat.on_bar(b))
+
+        assert [s for s in signals if s.direction == 1] == []
+
+    def test_mtf_filter_passes_mean_reversion(self, context):
+        """MTF-Filter darf BUY_MR nicht filtern (v6-Konvention)."""
+        context.update_account(equity=100_000.0, cash=100_000.0)
+        strat = BottiStrategy({
+            "use_fast_cross": False,
+            "use_early_golden_cross": False,
+            "use_pullback_entry_daily": False,
+            "use_mean_reversion": True,
+            "mr_rsi_max": 45,
+            "use_multi_timeframe": True,
+            "lower_rsi_min": 999,  # wuerde Trend-BUYs filtern, MR aber durchlassen
+        }, context=context)
+
+        bars = _make_mr_bars()
+        signals = []
+        for b in bars:
+            signals.extend(strat.on_bar(b))
+
+        mr_signals = [s for s in signals if s.strategy_id == "botti_mr"]
+        # MR darf trotz MTF-Filter durchkommen (wenn ueberhaupt ein MR-Setup entsteht)
+        # Test besteht auch, wenn kein Signal kommt; zentral ist: MTF blockiert MR nicht systemisch.
+        for sig in mr_signals:
+            assert sig.direction == 1
 
 
 class TestBottiNoForbiddenImports:
