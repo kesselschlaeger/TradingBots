@@ -20,7 +20,7 @@ strategy:
     trail_after_r: 1.0
     trail_distance_r: 0.6
 
-    allow_shorts: false
+    allow_shorts: true
     avoid_fridays: false
 
     market_open: "09:30"
@@ -66,6 +66,8 @@ data:
   timeframe: "5Min"
   lookback_days: 470
 
+##backtest:
+log_order_events: false
 initial_capital: 100000.0
 
 # Walk-Forward-Optimierung (nur für `python main.py wfo ...` genutzt)
