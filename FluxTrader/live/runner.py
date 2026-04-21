@@ -347,10 +347,29 @@ class LiveRunner:
 
     async def _on_eod_close(self) -> None:
         log.info("runner.eod_close")
-        positions_before = await self.broker.get_positions()
-        result = await self.broker.close_all_positions()
-        attempted = list(result.get("attempted", []))
-        remaining = set(result.get("remaining", []))
+        _all_positions = await self.broker.get_positions()
+        # Multi-Bot: nur eigene Positionen schließen (close_all_positions()
+        # würde den gesamten Account treffen – gefährlich bei gemeinsamem
+        # IBKR-Paper-Account mit mehreren Bots).
+        _own_set = {s.upper() for s in self.symbols} | {s.upper() for s in self.tm.all_symbols()}
+        positions_before = {k: v for k, v in _all_positions.items()
+                            if k.upper() in _own_set}
+        # Eigene Positionen einzeln schließen statt close_all_positions()
+        attempted_list: list[str] = list(positions_before.keys())
+        for sym in attempted_list:
+            try:
+                await self.broker.close_position(sym)
+            except Exception as e:  # noqa: BLE001
+                log.warning("runner.eod_close_position_failed",
+                            symbol=sym, error=str(e))
+        await asyncio.sleep(3)
+        _after = await self.broker.get_positions()
+        remaining_set = {s for s in attempted_list if s in _after}
+        result = {"attempted": attempted_list,
+                  "remaining": list(remaining_set),
+                  "ok": not remaining_set}
+        attempted = attempted_list
+        remaining = remaining_set
         close_execs = await self.broker.get_recent_closes(attempted)
 
         for sym in attempted:
@@ -651,7 +670,14 @@ class LiveRunner:
             symbol: self.tm.get(symbol)
             for symbol in self.tm.all_symbols()
         }
-        broker_positions = await self.broker.get_positions()
+        _all_positions = await self.broker.get_positions()
+        # Multi-Bot auf gemeinsamem Account (z. B. IBKR Paper): nur eigene
+        # Symbole berücksichtigen. Eigene Symbole = Symbolliste dieses Bots
+        # + aktuell vom TradeManager verwaltete (für den Fall, dass ein Symbol
+        # zur Laufzeit nicht mehr in self.symbols steht, aber noch offen ist).
+        _own_set = {s.upper() for s in self.symbols} | {s.upper() for s in self.tm.all_symbols()}
+        broker_positions = {k: v for k, v in _all_positions.items()
+                            if k.upper() in _own_set}
         self.ctx.set_open_symbols(list(broker_positions.keys()))
 
         closed_symbols = [
