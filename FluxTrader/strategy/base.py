@@ -67,6 +67,18 @@ class BaseStrategy(ABC):
             return []
         return self._generate_signals(bar)
 
+    def warmup_bar(self, bar: Bar) -> None:
+        """Puffer befüllen, ohne Signale zu erzeugen.
+
+        Der LiveRunner spielt damit die Session-Historie (heutige +
+        Vortagesbars) in den Buffer, bevor Live-Bars eintreffen. Ohne
+        diesen Warmup könnten Strategien, die auf Period-Levels
+        basieren (z. B. ORB: Opening-Range 09:30–09:50 ET), nie die
+        nötigen Bars sehen, wenn der Runner nach Session-Open startet.
+        """
+        self.bars.append(bar)
+        self.context.push_bar(bar)
+
     @abstractmethod
     def _generate_signals(self, bar: Bar) -> list[Signal]:
         """Kernlogik. Implementiert von Subklassen."""

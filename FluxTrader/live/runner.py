@@ -15,7 +15,7 @@ import json
 import signal as signal_mod
 import time as _time
 from dataclasses import asdict
-from datetime import date, datetime, time, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
 
@@ -163,6 +163,16 @@ class LiveRunner:
         log.info("runner.started", symbols=self.symbols,
                  strategy=self.strategy.name,
                  broker=self.broker.__class__.__name__)
+
+        # Historische Session-Bars in den Strategie-Buffer spielen, bevor
+        # Live-Bars eintreffen. Ohne Warmup könnte die Strategie z. B.
+        # ORB-Levels (Opening-Range 09:30–09:50 ET) nie berechnen, wenn der
+        # Runner nach Session-Open startet, weil stream_bars/_polling nur
+        # neue Bars liefern.
+        try:
+            await self._warmup()
+        except Exception as e:  # noqa: BLE001
+            log.warning("runner.warmup_failed", error=str(e))
 
         # Graceful Shutdown via SIGINT / SIGTERM
         loop = asyncio.get_event_loop()
@@ -403,6 +413,101 @@ class LiveRunner:
             equity=equity,
         )
 
+    # ── Warmup (Historische Session-Bars) ────────────────────────────
+
+    async def _warmup(self) -> None:
+        """Lade historische Bars und SPY-Tageshistorie in den Context.
+
+        Aufruf einmalig vor ``_bar_loop``. Liest die letzten ``warmup_days``
+        per ``DataProvider.get_bars_bulk`` und spielt sie chronologisch in
+        den Strategie-Buffer (über ``strategy.warmup_bar``) – ohne dabei
+        Signale zu erzeugen oder Orders auszulösen.
+
+        SPY (oder ``benchmark``) wird zusätzlich daily-aggregiert in den
+        ``MarketContextService`` gelegt, damit der Trend-Filter live
+        identisch zum Backtest arbeitet.
+        """
+        tf = str(self.cfg.get("timeframe", "5Min"))
+        is_daily = "day" in tf.lower() or "1d" in tf.lower()
+        warmup_days = int(self.cfg.get(
+            "warmup_days", 60 if is_daily else 5,
+        ))
+
+        end = datetime.now(timezone.utc)
+        start = end - timedelta(days=max(1, warmup_days))
+
+        log.info("runner.warmup_start", symbols=self.symbols,
+                 start=start.isoformat(), end=end.isoformat(),
+                 timeframe=tf, days=warmup_days)
+
+        try:
+            data = await self.data.get_bars_bulk(
+                self.symbols, start, end, tf,
+            )
+        except Exception as e:  # noqa: BLE001
+            log.warning("runner.warmup_bulk_failed", error=str(e))
+            return
+
+        # SPY/Benchmark fuer Trend-Filter laden (Daily-aggregiert)
+        benchmark = str(self.cfg.get("benchmark", "SPY")).upper()
+        spy_df = data.get(benchmark)
+        if spy_df is None or spy_df.empty:
+            try:
+                spy_df = await self.data.get_bars(
+                    benchmark, start, end, tf,
+                )
+            except Exception as e:  # noqa: BLE001
+                log.warning("runner.warmup_spy_failed",
+                            benchmark=benchmark, error=str(e))
+                spy_df = None
+        if spy_df is not None and not spy_df.empty:
+            try:
+                from core.indicators import ensure_daily
+                self.ctx.set_spy_df(ensure_daily(spy_df))
+                log.info("runner.warmup_spy_loaded",
+                         benchmark=benchmark, bars=len(spy_df))
+            except Exception as e:  # noqa: BLE001
+                log.warning("runner.warmup_spy_set_failed", error=str(e))
+
+        # Strategie-Buffer befuellen (Bars chronologisch)
+        if not hasattr(self.strategy, "warmup_bar"):
+            log.warning("runner.warmup_no_warmup_bar",
+                        strategy=type(self.strategy).__name__)
+            return
+
+        entries: list[tuple[datetime, str, int]] = []
+        sym_dfs: dict[str, Any] = {}
+        for sym, df in data.items():
+            if df is None or df.empty:
+                continue
+            sym_dfs[sym] = df
+            for i, ts in enumerate(df.index):
+                py_ts = ts.to_pydatetime() if hasattr(ts, "to_pydatetime") else ts
+                if py_ts.tzinfo is None:
+                    py_ts = py_ts.replace(tzinfo=timezone.utc)
+                entries.append((py_ts, sym, i))
+        entries.sort(key=lambda x: x[0])
+
+        for py_ts, sym, idx in entries:
+            row = sym_dfs[sym].iloc[idx]
+            bar = Bar(
+                symbol=sym,
+                timestamp=py_ts,
+                open=float(row["Open"]),
+                high=float(row["High"]),
+                low=float(row["Low"]),
+                close=float(row["Close"]),
+                volume=int(row.get("Volume", 0) or 0),
+            )
+            self.strategy.warmup_bar(bar)
+
+        if entries:
+            self.ctx.set_now(entries[-1][0])
+
+        log.info("runner.warmup_done",
+                 bars_loaded=len(entries),
+                 symbols_loaded=list(sym_dfs.keys()))
+
     # ── Bar-Loop (Polling-Fallback) ──────────────────────────────────
 
     async def _bar_loop(self) -> None:
@@ -419,7 +524,6 @@ class LiveRunner:
             await self._polling_fallback(tf)
 
     async def _polling_fallback(self, tf: str) -> None:
-        from datetime import timedelta
         last_seen: dict[str, datetime] = {}
         is_daily = "day" in tf.lower() or "1d" in tf.lower()
 
@@ -427,7 +531,6 @@ class LiveRunner:
             now = datetime.now(timezone.utc)
             start = now - timedelta(days=5) if is_daily else now - timedelta(minutes=60)
 
-            processed_symbols = set()
             for sym in self.symbols:
                 try:
                     df = await self.data.get_bars(sym, start, now, tf)
@@ -438,28 +541,32 @@ class LiveRunner:
                     continue
 
                 if df.empty:
-                    # Symbole ohne Bars aufzeichnen
                     if self._status_sink:
                         self._status_sink(sym, "NO_DATA", "keine Bars verfügbar")
                     continue
 
-                last_ts = df.index[-1]
-                if hasattr(last_ts, "to_pydatetime"):
-                    last_ts = last_ts.to_pydatetime()
-                if last_seen.get(sym) == last_ts:
-                    # Kein neuer Bar für dieses Symbol
+                # Alle Bars seit letzter Sichtung verarbeiten – nicht nur
+                # den letzten. Sonst gehen Bars verloren, wenn das Poll-
+                # Intervall größer ist als das Bar-Intervall oder wenn
+                # eine kurze Verbindungsstörung aufgetreten ist.
+                cutoff = last_seen.get(sym)
+                if cutoff is not None:
+                    df = df[df.index > cutoff]
+                if df.empty:
                     continue
-                last_seen[sym] = last_ts
-                processed_symbols.add(sym)
 
-                row = df.iloc[-1]
-                bar = Bar(
-                    symbol=sym, timestamp=last_ts,
-                    open=float(row["Open"]), high=float(row["High"]),
-                    low=float(row["Low"]), close=float(row["Close"]),
-                    volume=int(row.get("Volume", 0) or 0),
-                )
-                await self._process_bar(bar)
+                for ts, row in df.iterrows():
+                    py_ts = ts.to_pydatetime() if hasattr(ts, "to_pydatetime") else ts
+                    if py_ts.tzinfo is None:
+                        py_ts = py_ts.replace(tzinfo=timezone.utc)
+                    bar = Bar(
+                        symbol=sym, timestamp=py_ts,
+                        open=float(row["Open"]), high=float(row["High"]),
+                        low=float(row["Low"]), close=float(row["Close"]),
+                        volume=int(row.get("Volume", 0) or 0),
+                    )
+                    await self._process_bar(bar)
+                    last_seen[sym] = py_ts
 
             await asyncio.sleep(int(self.cfg.get("poll_interval_s", 30)))
 

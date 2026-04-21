@@ -173,22 +173,28 @@ class AlpacaDataProvider(DataProvider):
                 df = await self.get_bars(sym, start, end, timeframe)
                 if df.empty:
                     continue
-                last = df.index[-1]
-                if hasattr(last, "to_pydatetime"):
-                    last = last.to_pydatetime()
-                if last.tzinfo is None:
-                    last = pytz.utc.localize(last)
-                if last_seen.get(sym) == last:
+
+                # Alle Bars seit letzter Sichtung yielden – nicht nur den
+                # letzten. Sonst gehen Bars verloren, wenn das Poll-
+                # Intervall größer ist als das Bar-Intervall.
+                cutoff = last_seen.get(sym)
+                if cutoff is not None:
+                    df = df[df.index > cutoff]
+                if df.empty:
                     continue
-                last_seen[sym] = last
-                row = df.iloc[-1]
-                yield Bar(
-                    symbol=sym,
-                    timestamp=last,
-                    open=float(row["Open"]),
-                    high=float(row["High"]),
-                    low=float(row["Low"]),
-                    close=float(row["Close"]),
-                    volume=int(row["Volume"]),
-                )
+
+                for ts, row in df.iterrows():
+                    py_ts = ts.to_pydatetime() if hasattr(ts, "to_pydatetime") else ts
+                    if py_ts.tzinfo is None:
+                        py_ts = pytz.utc.localize(py_ts)
+                    yield Bar(
+                        symbol=sym,
+                        timestamp=py_ts,
+                        open=float(row["Open"]),
+                        high=float(row["High"]),
+                        low=float(row["Low"]),
+                        close=float(row["Close"]),
+                        volume=int(row["Volume"]),
+                    )
+                    last_seen[sym] = py_ts
             await asyncio.sleep(30)
