@@ -12,8 +12,6 @@ broker:
   type: paper
   paper: true
   alpaca_data_feed: iex
-  ibkr_host: "192.168.188.93"
-  ibkr_port: 4002
   ibkr_client_id: 1
   ibkr_bot_id: FLUX
 
