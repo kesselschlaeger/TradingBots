@@ -87,15 +87,27 @@ class LiveRunner:
         self._last_health_status: Optional[str] = None
         self._last_alert_ts: float = 0.0
         self._alert_cooldown_s = 60
+        self._status_sink: Optional[callable] = None
 
         # Symbol-Status-Reporting: Strategie meldet pro-Symbol-Status
         # (WAIT_ORB, GAP_BLOCK, ...) sync in HealthState.
-        if self.health is not None and hasattr(self.strategy, "set_status_sink"):
-            strat_name = self.strategy.name
-            self.strategy.set_status_sink(
-                lambda sym, code, reason:
-                    self.health.set_symbol_status(strat_name, sym, code, reason)
-            )
+        if self.health is not None:
+            if hasattr(self.strategy, "set_status_sink"):
+                strat_name = self.strategy.name
+                log.info("runner.status_sink_installed", strategy=strat_name)
+                def _status_sink(sym: str, code: str, reason: str = "") -> None:
+                    try:
+                        if self.health is not None:
+                            self.health.set_symbol_status(strat_name, sym, code, reason)
+                            log.debug("runner.symbol_status_recorded", strategy=strat_name, symbol=sym, code=code, reason=reason)
+                    except Exception as e:
+                        log.error("runner.symbol_status_error", error=str(e), strategy=strat_name, symbol=sym, code=code)
+                self._status_sink = _status_sink
+                self.strategy.set_status_sink(_status_sink)
+            else:
+                log.warning("runner.strategy_no_set_status_sink", strategy_type=type(self.strategy).__name__)
+        else:
+            log.info("runner.no_health_state")
 
         set_context_service(context)
 
@@ -415,22 +427,30 @@ class LiveRunner:
             now = datetime.now(timezone.utc)
             start = now - timedelta(days=5) if is_daily else now - timedelta(minutes=60)
 
+            processed_symbols = set()
             for sym in self.symbols:
                 try:
                     df = await self.data.get_bars(sym, start, now, tf)
                 except Exception as e:  # noqa: BLE001
                     log.warning("runner.poll_error", symbol=sym, error=str(e))
+                    if self._status_sink:
+                        self._status_sink(sym, "POLL_ERROR", str(e))
                     continue
 
                 if df.empty:
+                    # Symbole ohne Bars aufzeichnen
+                    if self._status_sink:
+                        self._status_sink(sym, "NO_DATA", "keine Bars verfügbar")
                     continue
 
                 last_ts = df.index[-1]
                 if hasattr(last_ts, "to_pydatetime"):
                     last_ts = last_ts.to_pydatetime()
                 if last_seen.get(sym) == last_ts:
+                    # Kein neuer Bar für dieses Symbol
                     continue
                 last_seen[sym] = last_ts
+                processed_symbols.add(sym)
 
                 row = df.iloc[-1]
                 bar = Bar(

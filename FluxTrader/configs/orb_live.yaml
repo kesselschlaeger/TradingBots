@@ -70,3 +70,9 @@ data:
 notifications:
   enabled: true
   bot_name: FLUX_ORB_PAPER
+
+anomaly:
+  # IBKR Paper ohne Live-Market-Data liefert haeufig ~15 Min delayed Bars.
+  # 25 Min toleriert Delayed Feed + 5-Min-Barabschluss, ohne echte Ausfaelle
+  # sofort als Connectivity-Fehler zu markieren.
+  bar_gap_minutes: 25

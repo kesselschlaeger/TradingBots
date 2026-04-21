@@ -203,6 +203,21 @@ def _load_yaml(path: Path) -> dict:
         return yaml.safe_load(f) or {}
 
 
+def _apply_env_overrides(raw: dict, env: EnvSettings) -> dict:
+    out = dict(raw)
+    broker = dict(out.get("broker", {}))
+
+    if env.IBKR_HOST:
+        broker["ibkr_host"] = env.IBKR_HOST
+    if env.IBKR_PORT is not None:
+        broker["ibkr_port"] = env.IBKR_PORT
+
+    if broker:
+        out["broker"] = broker
+
+    return out
+
+
 def load_config(config_path: str | Path) -> AppConfig:
     """Lade YAML-Config.
 
@@ -221,6 +236,7 @@ def load_config(config_path: str | Path) -> AppConfig:
         base = _load_yaml(base_path)
         raw = _deep_merge(base, raw)
 
+    raw = _apply_env_overrides(raw, load_env())
     raw = _coerce_time_fields(raw)
     return AppConfig.model_validate(raw)
 

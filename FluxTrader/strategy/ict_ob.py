@@ -187,9 +187,13 @@ class IctOrderBlockStrategy(BaseStrategy):
         ts = bar.timestamp
 
         if not is_market_hours(ts):
+            self._record_status(symbol, "OUTSIDE_HOURS",
+                                "außerhalb Handelszeiten")
             return []
 
         if not entry_cutoff_ok(ts, cfg.get("entry_cutoff_time")):
+            self._record_status(symbol, "ENTRY_CUTOFF",
+                                "Entry-Cutoff überschritten")
             return []
 
         # ── Build MTF DataFrames ──────────────────────────────────────
@@ -197,10 +201,14 @@ class IctOrderBlockStrategy(BaseStrategy):
         if len(bars_list) < int(cfg.get("min_bars", 250)):
             bars_list = self.context.bars(symbol)
             if len(bars_list) < 50:
+                self._record_status(symbol, "NO_DATA",
+                                    f"nur {len(bars_list)} Bars verfügbar")
                 return []
 
         df_5m = _bars_to_df(bars_list)
         if len(df_5m) < 50:
+            self._record_status(symbol, "NO_DATA",
+                                f"nur {len(df_5m)} 5m-Bars")
             return []
 
         df_15m = resample_ohlcv(df_5m, "15M")
@@ -208,6 +216,10 @@ class IctOrderBlockStrategy(BaseStrategy):
         df_4h = resample_ohlcv(df_5m, "4H")
 
         if len(df_4h) < 8 or len(df_1h) < 15 or len(df_15m) < 20:
+            self._record_status(
+                symbol, "NO_DATA",
+                f"MTF zu kurz (4H={len(df_4h)}, 1H={len(df_1h)}, 15M={len(df_15m)})",
+            )
             return []
 
         current_price = bar.close
@@ -228,6 +240,8 @@ class IctOrderBlockStrategy(BaseStrategy):
                 self._gap_cache[gap_ck] = (gap_ok, gap_pct)
             if not gap_ok:
                 log.debug("ict_ob.gap_block", symbol=symbol, gap_pct=gap_pct)
+                self._record_status(symbol, "GAP_BLOCK",
+                                    f"gap {gap_pct:.2%}")
                 return []
 
         # ── Trend Filter ──────────────────────────────────────────────
@@ -258,10 +272,15 @@ class IctOrderBlockStrategy(BaseStrategy):
             swing_lookback=int(cfg.get("swing_lookback_4h", 3)),
         )
         if not obs_4h:
+            self._record_status(symbol, "NO_OB", "keine 4H Order Blocks")
             return []
 
         valid_obs = self._filter_valid_obs(obs_4h, df_4h, current_price)
         if not valid_obs:
+            self._record_status(
+                symbol, "NO_VALID_OB",
+                f"{len(obs_4h)} OB(s), keine in Preisnähe / alle invalidiert",
+            )
             return []
 
         active_ob = valid_obs[-1]
@@ -269,10 +288,16 @@ class IctOrderBlockStrategy(BaseStrategy):
 
         # Direction must align with trend
         if ob_type == "bullish" and not trend["bullish"]:
+            self._record_status(symbol, "TREND_BLOCK",
+                                "4H bullish OB, aber SPY-Trend nicht bullish")
             return []
         if ob_type == "bearish" and not trend["bearish"]:
+            self._record_status(symbol, "TREND_BLOCK",
+                                "4H bearish OB, aber SPY-Trend nicht bearish")
             return []
         if ob_type == "bearish" and not cfg.get("allow_shorts", True):
+            self._record_status(symbol, "SHORTS_DISABLED",
+                                "bearish OB, aber allow_shorts=False")
             return []
 
         # ── Step 2: 1H Structure Confirmation ─────────────────────────
@@ -305,6 +330,10 @@ class IctOrderBlockStrategy(BaseStrategy):
 
         min_score = float(cfg.get("min_confluence_score", 0.75))
         if score < min_score:
+            self._record_status(
+                symbol, "WEAK_CONFLUENCE",
+                f"Confluence {score:.2f} < {min_score:.2f}",
+            )
             return []
 
         # ── MIT Independence Guard ────────────────────────────────────
@@ -318,11 +347,14 @@ class IctOrderBlockStrategy(BaseStrategy):
             )
             if blocked:
                 log.debug("ict_ob.mit_blocked", symbol=symbol, reason=reason)
+                self._record_status(symbol, "MIT_BLOCK", reason)
                 return []
 
         # ── Stop / Target ─────────────────────────────────────────────
         ob_range = active_ob["high"] - active_ob["low"]
         if ob_range <= 0:
+            self._record_status(symbol, "NO_VALID_OB",
+                                "OB-Range ≤ 0")
             return []
 
         side = "long" if ob_type == "bullish" else "short"
@@ -409,6 +441,7 @@ class IctOrderBlockStrategy(BaseStrategy):
 
         log.info("ict_ob.signal", symbol=symbol, direction=side,
                  strength=strength, confluence=score)
+        self._record_status(symbol, "SIGNAL", reason)
         return [signal]
 
     # ── Helper Methods ─────────────────────────────────────────────────

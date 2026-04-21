@@ -246,6 +246,40 @@ header h1 {
   font-weight: 600;
 }
 
+.bot-telemetry-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.telemetry-pill {
+  background: #141920;
+  border: 1px solid #262b33;
+  border-radius: 6px;
+  padding: 8px;
+}
+
+.telemetry-pill span {
+  display: block;
+  color: #8a93a1;
+  font-size: 10px;
+  text-transform: uppercase;
+  margin-bottom: 4px;
+}
+
+.telemetry-pill strong {
+  color: #e6e6e6;
+  font-size: 12px;
+}
+
+.bot-status-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
 .bot-card-pnl.positive {
   color: #81c784;
 }

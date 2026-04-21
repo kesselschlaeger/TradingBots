@@ -179,17 +179,25 @@ async def list_strategies(
     - open_positions, trades_today, pnl_today
     - last_equity_ts (wann der letzte Snapshot war)
     - symbol_status (HealthState): {SYMBOL: {code, reason, ts}}
+    - last_bar_ts, last_bar_lag_ms, signals_today, signals_filtered_today
     """
     state = request.app.state.persistent_state
 
     active_names = await _get_active_strategy_names(request)
-    symbol_status_by_strat = await _get_symbol_status_map(request)
+    health_by_strat = await _get_strategy_health_map(request)
     strategies = await state.get_strategies()
     result = []
     for strat in strategies:
         status = await state.get_strategy_status(strat)
+        health = health_by_strat.get(strat, {})
         status["running"] = strat in active_names
-        status["symbol_status"] = symbol_status_by_strat.get(strat, {})
+        status["symbol_status"] = health.get("symbol_status", {})
+        status["last_bar_ts"] = health.get("last_bar_ts")
+        status["last_bar_lag_ms"] = health.get("last_bar_lag_ms")
+        status["signals_today"] = int(health.get("signals_today", 0) or 0)
+        status["signals_filtered_today"] = int(
+            health.get("signals_filtered_today", 0) or 0
+        )
         result.append(status)
 
     # Im Dashboard ist "Active Bots" gewünscht: nur wirklich laufende Bots.
@@ -204,11 +212,14 @@ async def list_strategies(
     }
 
 
-async def _get_symbol_status_map(request: Request) -> dict[str, dict]:
-    """Sammle pro-Symbol-Status pro Strategie aus HealthState.
+async def _get_strategy_health_map(request: Request) -> dict[str, dict[str, Any]]:
+    """Sammle Health-Telemetrie pro Strategie aus HealthState.
 
     Lokal bevorzugt, sonst Remote-Health-Server.
     """
+    from core.logging import get_logger
+    
+    log = get_logger(__name__)
     hs = request.app.state.health_state
     snapshots: list[dict[str, Any]] = []
     if hs is not None:
@@ -221,13 +232,25 @@ async def _get_symbol_status_map(request: Request) -> dict[str, dict]:
             async with httpx.AsyncClient(timeout=2.0) as client:
                 resp = await client.get(f"{health_url}/status")
                 if resp.status_code == 200:
-                    snapshots = list(resp.json().get("strategies", []))
-        except Exception:
+                    data = resp.json()
+                    snapshots = list(data.get("strategies", []))
+                    if snapshots:
+                        log.debug("health_map.fetched", count=len(snapshots), url=health_url)
+                else:
+                    log.warning("health_map.bad_status", status=resp.status_code, url=health_url)
+        except Exception as e:
+            log.warning("health_map.fetch_failed", url=request.app.state.health_server_url, error=str(e))
             snapshots = []
 
-    out: dict[str, dict] = {}
+    out: dict[str, dict[str, Any]] = {}
     for s in snapshots:
         name = str(s.get("name", "")).strip()
         if name:
-            out[name] = s.get("symbol_status", {}) or {}
+            out[name] = {
+                "symbol_status": s.get("symbol_status", {}) or {},
+                "last_bar_ts": s.get("last_bar_ts"),
+                "last_bar_lag_ms": s.get("last_bar_lag_ms"),
+                "signals_today": s.get("signals_today", 0),
+                "signals_filtered_today": s.get("signals_filtered_today", 0),
+            }
     return out

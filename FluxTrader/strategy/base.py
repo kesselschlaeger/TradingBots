@@ -120,6 +120,7 @@ class PairStrategy(ABC):
                  context: Optional[MarketContextService] = None):
         self.config = config or {}
         self._context = context
+        self._status_sink: Optional[StatusSink] = None
 
     @property
     @abstractmethod
@@ -149,3 +150,24 @@ class PairStrategy(ABC):
         if self._context is None:
             self._context = get_context_service()
         return self._context
+
+    # ── Status-Reporting (Null-Object-Pattern) ─────────────────────────
+
+    def set_status_sink(self, sink: Optional[StatusSink]) -> None:
+        """Bindet einen Sink für pro-Paar-Status. Ohne Sink No-Op."""
+        self._status_sink = sink
+
+    def _record_status(self, key: str, code: str,
+                       reason: str = "") -> None:
+        sink = self._status_sink
+        if sink is None:
+            return
+        try:
+            sink(key, code, reason)
+        except Exception:  # noqa: BLE001
+            pass
+
+    @property
+    def pair_key(self) -> str:
+        """Kanonischer Key für das Pair im Status-Monitoring, z. B. 'SPY/QQQ'."""
+        return f"{self.symbol_a}/{self.symbol_b}"

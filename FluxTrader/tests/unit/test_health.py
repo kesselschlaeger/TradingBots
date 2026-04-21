@@ -38,6 +38,18 @@ async def test_stale_bar_marks_unready(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_custom_bar_age_threshold_allows_delayed_feed(monkeypatch):
+    import live.health as health_mod
+    monkeypatch.setattr(health_mod, "is_market_hours", lambda _dt: True)
+    hs = HealthState(bar_max_age_seconds=25 * 60)
+    await hs.set_broker_status(connected=True, adapter="ibkr")
+    old = datetime.now(timezone.utc) - timedelta(minutes=20)
+    await hs.set_last_bar("orb", old, lag_ms=1_200_000.0)
+    assert hs.is_ready() is True
+    assert hs.should_alert_on_not_ready() is False
+
+
+@pytest.mark.asyncio
 async def test_stale_bar_ok_outside_market_hours(monkeypatch):
     import live.health as health_mod
     monkeypatch.setattr(health_mod, "is_market_hours", lambda _dt: False)

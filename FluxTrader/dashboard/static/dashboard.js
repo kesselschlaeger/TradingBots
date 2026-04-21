@@ -36,18 +36,51 @@ function statusMeta(code) {
   return STATUS_META[code] || { label: code, cls: 'muted' };
 }
 
+function getStatusCounts(symbolStatus) {
+  const counts = {};
+  for (const [, value] of Object.entries(symbolStatus || {})) {
+    const code = (value && value.code) || 'UNKNOWN';
+    counts[code] = (counts[code] || 0) + 1;
+  }
+  return counts;
+}
+
 function formatStatusBadgeSummary(symbolStatus) {
   const entries = Object.entries(symbolStatus || {});
   if (entries.length === 0) return '';
-  const counts = {};
-  for (const [, v] of entries) {
-    const c = (v && v.code) || 'UNKNOWN';
-    counts[c] = (counts[c] || 0) + 1;
-  }
+  const counts = getStatusCounts(symbolStatus);
   const parts = Object.entries(counts)
     .sort((a, b) => b[1] - a[1])
     .map(([code, n]) => `${statusMeta(code).label}: ${n}`);
   return `${entries.length} Symbols\n` + parts.join('\n');
+}
+
+function renderCompactStatusSummary(symbolStatus) {
+  const counts = Object.entries(getStatusCounts(symbolStatus))
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 3);
+  if (!counts.length) return '<span class="muted">Keine Statusdaten</span>';
+  return counts.map(([code, count]) => {
+    const meta = statusMeta(code);
+    return `<span class="status-chip ${meta.cls}">${meta.label}: ${count}</span>`;
+  }).join(' ');
+}
+
+function formatLagMs(value) {
+  if (value === null || value === undefined) return '—';
+  const ms = Number(value);
+  if (!Number.isFinite(ms)) return '—';
+  if (ms < 1000) return `${ms.toFixed(0)}ms`;
+  return `${(ms / 1000).toFixed(1)}s`;
+}
+
+function formatBarAge(ts) {
+  if (!ts) return '—';
+  const ageSeconds = (Date.now() - new Date(ts).getTime()) / 1000;
+  if (!Number.isFinite(ageSeconds)) return '—';
+  if (ageSeconds < 60) return `${ageSeconds.toFixed(0)}s`;
+  if (ageSeconds < 3600) return `${(ageSeconds / 60).toFixed(1)}m`;
+  return `${(ageSeconds / 3600).toFixed(1)}h`;
 }
 
 function renderSymbolStatusTable(symbolStatus) {
@@ -261,12 +294,21 @@ async function updateHealth() {
     `;
 
     // Strategies Health
-    const strategiesHtml = (data.strategies || []).map(s => `
+    const strategiesHtml = (data.strategies || []).map(s => {
+      const lagMs = s.last_bar_lag_ms;
+      const lagClass = lagMs === null || lagMs === undefined
+        ? 'warning'
+        : (lagMs < 1000 ? 'ok' : 'warning');
+      return `
       <div class="health-card">
         <h4>📡 ${s.name}</h4>
-        <div class="health-item ${s.bar_lag_ms && s.bar_lag_ms < 1000 ? 'ok' : 'warning'}">
+        <div class="health-item ${lagClass}">
           <span>Bar Lag:</span>
-          <span>${s.bar_lag_ms ? s.bar_lag_ms.toFixed(0) + 'ms' : '—'}</span>
+          <span>${formatLagMs(lagMs)}</span>
+        </div>
+        <div class="health-item">
+          <span>Bar Age:</span>
+          <span>${formatBarAge(s.last_bar_ts)}</span>
         </div>
         <div class="health-item">
           <span>Signals:</span>
@@ -280,8 +322,8 @@ async function updateHealth() {
           <span>Last Bar:</span>
           <span class="muted">${s.last_bar_ts ? new Date(s.last_bar_ts).toLocaleTimeString() : '—'}</span>
         </div>
-      </div>
-    `).join('');
+      </div>`;
+    }).join('');
 
     container.innerHTML = brokerCard + cbCard + portfolioCard + strategiesHtml;
   } catch (err) {
@@ -353,8 +395,29 @@ async function updateStrategies() {
             <span>Trades Today:</span>
             <strong>${bot.trades_today}</strong>
           </div>
+          <div class="bot-telemetry-grid">
+            <div class="telemetry-pill">
+              <span>Last Bar</span>
+              <strong>${bot.last_bar_ts ? new Date(bot.last_bar_ts).toLocaleTimeString() : '—'}</strong>
+            </div>
+            <div class="telemetry-pill">
+              <span>Bar Age</span>
+              <strong>${formatBarAge(bot.last_bar_ts)}</strong>
+            </div>
+            <div class="telemetry-pill">
+              <span>Bar Lag</span>
+              <strong>${formatLagMs(bot.last_bar_lag_ms)}</strong>
+            </div>
+            <div class="telemetry-pill">
+              <span>Signals</span>
+              <strong>${bot.signals_today || 0} / ${bot.signals_filtered_today || 0} filtered</strong>
+            </div>
+          </div>
+          <div class="bot-status-summary">
+            ${renderCompactStatusSummary(symStatus)}
+          </div>
           <div class="muted" style="margin-top: 4px;">
-            Updated: ${new Date(bot.last_equity_ts).toLocaleTimeString()}
+            Updated: ${bot.last_equity_ts ? new Date(bot.last_equity_ts).toLocaleTimeString() : '—'}
           </div>
         </div>
         ${expanded ? `<div class="bot-symbol-status">${renderSymbolStatusTable(symStatus)}</div>` : ''}

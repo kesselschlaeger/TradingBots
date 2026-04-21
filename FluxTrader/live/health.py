@@ -46,9 +46,11 @@ class HealthState:
     """
 
     def __init__(self,
-                 on_ready_alert: Optional[Callable[..., Coroutine]] = None) -> None:
+                 on_ready_alert: Optional[Callable[..., Coroutine]] = None,
+                 bar_max_age_seconds: int = _READY_BAR_MAX_AGE_S) -> None:
         self._start_ts = _time.time()
         self._lock = asyncio.Lock()
+        self._bar_max_age_seconds = max(1, int(bar_max_age_seconds))
 
         self._broker_connected: bool = False
         self._broker_adapter: str = ""
@@ -197,7 +199,7 @@ class HealthState:
 
         # Innerhalb Handelszeiten: Bars müssen frisch sein
         for ts in self._last_bar_ts.values():
-            if (now - _ensure_aware(ts)).total_seconds() > _READY_BAR_MAX_AGE_S:
+            if (now - _ensure_aware(ts)).total_seconds() > self._bar_max_age_seconds:
                 return False
         return True
 
@@ -211,7 +213,7 @@ class HealthState:
         if self._broker_connected and self._last_bar_ts:
             now = datetime.now(timezone.utc)
             for ts in self._last_bar_ts.values():
-                if (now - _ensure_aware(ts)).total_seconds() > _READY_BAR_MAX_AGE_S:
+                if (now - _ensure_aware(ts)).total_seconds() > self._bar_max_age_seconds:
                     return True  # Bars zu alt während Handelszeiten → Alert
         return False
 

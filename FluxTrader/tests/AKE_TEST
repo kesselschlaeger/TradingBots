@@ -1,35 +1,17 @@
-import os
-from dotenv import load_dotenv
-load_dotenv('c:\\!\\privat\\TradingBots\\FluxTrader\\.env')
+mport asyncio, threading, time
+from live.health import HealthState
+from core.config import load_config
+from dashboard.app import create_app
 
-from ib_insync import IB, Stock, util
-import pandas as pd
+cfg = load_config("configs/botti.yaml")
+hs = HealthState()
 
-host = os.getenv('IBKR_HOST')
-port = int(os.getenv('IBKR_PORT'))
-cid  = int(os.getenv('IBKR_CLIENT_ID'))
+# Fake-Daten befüllen
+symbols = {"AAPL":"WAIT_BREAKOUT","NVDA":"GAP_BLOCK","SPY":"SIGNAL",
+           "QQQ":"WAIT_ORB","MSFT":"TREND_BLOCK","TSLA":"MIT_BLOCK"}
+for sym, code in symbols.items():
+    hs.set_symbol_status("orb", sym, code, f"Test-Detail für {sym}")
 
-ib = IB()
-ib.connect(host, port, clientId=cid, timeout=10, readonly=True)
-print("Connected:", ib.isConnected())
-
-contract = Stock('SPY', 'SMART', 'USD')
-qualified = ib.qualifyContracts(contract)
-print("Qualified:", qualified)
-
-bars = ib.reqHistoricalData(
-    qualified[0],
-    endDateTime='',
-    durationStr='1 D',          # nur 1 Tag
-    barSizeSetting='5 mins',
-    whatToShow='TRADES',
-    useRTH=True,
-    formatDate=1
-)
-print("Received bars:", len(bars))
-if bars:
-    df = util.df(bars)
-    print(df.head())
-else:
-    print("Keine Bars erhalten – prüfe Abonnements/Contract.")
-ib.disconnect()
+import uvicorn
+app = create_app(cfg, health_state=hs)
+uvicorn.run(app, port=8080)

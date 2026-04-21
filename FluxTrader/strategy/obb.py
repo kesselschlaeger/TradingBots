@@ -134,7 +134,19 @@ class OBBStrategy(BaseStrategy):
             side, direction = "short", -1
             reason = (f"OBB Short: Close {current_close:.2f} < "
                       f"{lookback}-Bar-Low {lookback_low:.2f}")
+        elif not allow_shorts and current_close < lookback_low:
+            self._record_status(
+                symbol, "SHORTS_DISABLED",
+                f"Short-Setup, aber allow_shorts=False "
+                f"(Close {current_close:.2f} < {lookback_low:.2f})",
+            )
+            return []
         else:
+            self._record_status(
+                symbol, "WAIT_BREAKOUT",
+                f"Close {current_close:.2f} in "
+                f"[{lookback_low:.2f}..{lookback_high:.2f}]",
+            )
             return []
 
         strength = min(
@@ -163,6 +175,7 @@ class OBBStrategy(BaseStrategy):
                 "reason": reason,
             },
         )
+        self._record_status(symbol, "SIGNAL", reason)
         return [signal]
 
     # ── Hilfsmethoden ────────────────────────────────────────────────

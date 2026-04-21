@@ -59,9 +59,14 @@ class BottiPairStrategy(PairStrategy):
     ) -> PairSignal:
         spread = bar_b.close - bar_a.close
         self._spread_window.append(spread)
+        key = self.pair_key
 
         # Rolling Std aus internem Window
         if len(self._spread_window) < 3:
+            self._record_status(
+                key, "WAIT_WARMUP",
+                f"Spread-Window {len(self._spread_window)}/3",
+            )
             return self._hold_signal(bar_a, 0.0)
 
         import numpy as np
@@ -75,6 +80,10 @@ class BottiPairStrategy(PairStrategy):
         qty_pct = float(self.config.get("pair_position_pct", 0.05))
 
         if z > z_entry:
+            self._record_status(
+                key, "SIGNAL",
+                f"ENTER long {self.symbol_a} / short {self.symbol_b} | z={z:.2f}",
+            )
             # QQQ outperforms → short QQQ, long SPY
             return PairSignal(
                 strategy=self.name,
@@ -88,6 +97,10 @@ class BottiPairStrategy(PairStrategy):
                 qty_pct=qty_pct,
             )
         if z < -z_entry:
+            self._record_status(
+                key, "SIGNAL",
+                f"ENTER long {self.symbol_b} / short {self.symbol_a} | z={z:.2f}",
+            )
             # SPY outperforms → short SPY, long QQQ
             return PairSignal(
                 strategy=self.name,
@@ -101,6 +114,7 @@ class BottiPairStrategy(PairStrategy):
                 qty_pct=qty_pct,
             )
         if abs(z) < z_exit:
+            self._record_status(key, "SIGNAL", f"EXIT | z={z:.2f}")
             return PairSignal(
                 strategy=self.name,
                 symbol=self.symbol_a,
@@ -113,6 +127,10 @@ class BottiPairStrategy(PairStrategy):
                 qty_pct=qty_pct,
             )
 
+        self._record_status(
+            key, "WAIT_Z",
+            f"z={z:.2f} in [{-z_entry:.2f}..{z_entry:.2f}]",
+        )
         return self._hold_signal(bar_a, z)
 
     def _hold_signal(self, bar: Bar, z: float) -> PairSignal:

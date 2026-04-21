@@ -20,21 +20,21 @@ strategy:
         # zweite Reihe
         "AMD", "MU","WBD","COIN","MRNA","UPST","MRVL","CCL","F","VRT","APP","NCLH","VST",]
 
-  risk_pct: 0.01
+  risk_pct: 0.01  # Risiko pro Trade in % des Eigenkapitals
   params:
-    lookback_bars: 50
-    allow_shorts: true
-    position_size_pct: 0.15
-    use_kelly_sizing: false
+    lookback_bars: 50  # Anzahl historischer Bars für Indikatoren
+    allow_shorts: true  # Leerverkäufe erlauben
+    position_size_pct: 0.15  # Max. Positionsgröße in % des Eigenkapitals
+    use_kelly_sizing: false  # Kelly-Kriterium statt fester % nutzen
 
 broker:
-  type: paper
-  paper: true
+  type: paper  # Broker-Typ: paper, alpaca, ibkr
+  paper: true  # Paper/Simulated Trading verwenden
 
 data:
-  provider: ibkr
-  timeframe: "1Day"
-  lookback_days: 105
-  ibkr_use_rth: false
+  provider: ibkr  # Datenquelle: ibkr, alpaca, yfinance
+  timeframe: "1Day"  # Bar-Timeframe: 1min, 5min, 1hour, 1Day
+  lookback_days: 105  # Historisches Lookback-Fenster in Tagen
+  ibkr_use_rth: false  # Extended Hours (Pre/After-Market) in IBKR-Daten einbeziehen
 
-initial_capital: 30_000.0
+initial_capital: 30_000.0  # Startkapital für Backtest

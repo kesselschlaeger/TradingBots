@@ -215,6 +215,7 @@ class BottiStrategy(BaseStrategy):
         symbol_bars = [b for b in self.bars if b.symbol == symbol]
         df = _bars_to_df(symbol_bars)
         if df.empty or len(df) < int(cfg.get("sma_long", 30)) + 2:
+            self._record_status(symbol, "NO_DATA", "zu wenige Daily-Bars")
             return []
         df = _compute_botti_indicators(df, cfg)
 
@@ -232,6 +233,11 @@ class BottiStrategy(BaseStrategy):
         if drawdown_breaker(equity, peak, float(cfg.get("max_drawdown_pct", 0.15))):
             log.debug("botti.drawdown_breaker", symbol=symbol,
                       equity=equity, peak=peak)
+            dd_pct = (peak - equity) / peak if peak > 0 else 0.0
+            self._record_status(
+                symbol, "DD_BREAKER",
+                f"Drawdown {dd_pct:.1%} ≥ {float(cfg.get('max_drawdown_pct', 0.15)):.1%}",
+            )
             return []
 
         # ── VIX Size Factor ──────────────────────────────────────────
@@ -250,15 +256,21 @@ class BottiStrategy(BaseStrategy):
                 sector_map, int(cfg.get("max_per_sector", 2)),
             ):
                 log.debug("botti.sector_blocked", symbol=symbol)
+                self._record_status(
+                    symbol, "SECTOR_BLOCK",
+                    f"max {int(cfg.get('max_per_sector', 2))} pro Sektor erreicht",
+                )
                 return []
 
         # ── Signal-Logik ─────────────────────────────────────────────
         signal_type, reason = self._classify_signal(df, last, prev, cfg)
 
         if signal_type == "SELL":
+            self._record_status(symbol, "SIGNAL", f"SELL: {reason}")
             return [self._make_exit_signal(bar, reason)]
 
         if signal_type == "BUY_MR":
+            self._record_status(symbol, "SIGNAL", f"BUY_MR: {reason}")
             return [self._make_mr_signal(bar, df, last, cfg, vix_factor, reason)]
 
         if signal_type == "BUY":
@@ -269,10 +281,14 @@ class BottiStrategy(BaseStrategy):
                 if not ok:
                     log.debug("botti.mtf_filtered", symbol=symbol,
                               reason=mtf_reason)
+                    self._record_status(symbol, "MTF_BLOCK", mtf_reason)
                     return []
                 reason = f"{reason} | MTF: {mtf_reason}"
+            self._record_status(symbol, "SIGNAL", f"BUY: {reason}")
             return [self._make_trend_signal(bar, df, last, cfg, vix_factor, reason)]
 
+        # signal_type == "HOLD" – granularer Statuscode
+        self._record_status(symbol, *_hold_status(reason))
         return []
 
     # ── Signal-Klassifikation (pure Logik) ───────────────────────────
@@ -436,6 +452,26 @@ class BottiStrategy(BaseStrategy):
             timestamp=bar.timestamp,
             metadata={"reason": reason},
         )
+
+
+# ─────────────────────────── Status-Code-Mapping ────────────────────────────
+
+def _hold_status(reason: str) -> tuple[str, str]:
+    """Übersetzt die interne HOLD-Begründung in (code, reason) fürs Monitoring."""
+    if not reason:
+        return "WAIT_SETUP", "kein Setup"
+    r = reason.lower()
+    if "no uptrend" in r:
+        return "NO_UPTREND", reason
+    if r.startswith("adx"):
+        return "WEAK_TREND", reason
+    if "rsi" in r and "out of range" in r:
+        return "RSI_BLOCK", reason
+    if "macd" in r:
+        return "MACD_BLOCK", reason
+    if "volume" in r:
+        return "VOLUME_BLOCK", reason
+    return "WAIT_SETUP", reason
 
 
 # ─────────────────────────── Reine Hilfsfunktionen ──────────────────────────
