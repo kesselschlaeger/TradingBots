@@ -88,6 +88,11 @@ class LiveRunner:
         self._last_alert_ts: float = 0.0
         self._alert_cooldown_s = 60
         self._status_sink: Optional[callable] = None
+        # Letzter Warmup-Bar pro Symbol – Bars bis einschließlich dieses
+        # Timestamps wurden bereits still in den Buffer geladen und dürfen
+        # keine Signale auslösen (verhindert Doppelverarbeitung beim ersten
+        # stream_bars-Zyklus, der den gleichen 30-min-Fenster fetcht).
+        self._warmup_last_seen: dict[str, datetime] = {}
 
         # Symbol-Status-Reporting: Strategie meldet pro-Symbol-Status
         # (WAIT_ORB, GAP_BLOCK, ...) sync in HealthState.
@@ -448,26 +453,33 @@ class LiveRunner:
             log.warning("runner.warmup_bulk_failed", error=str(e))
             return
 
-        # SPY/Benchmark fuer Trend-Filter laden (Daily-aggregiert)
-        benchmark = str(self.cfg.get("benchmark", "SPY")).upper()
-        spy_df = data.get(benchmark)
-        if spy_df is None or spy_df.empty:
-            try:
-                spy_df = await self.data.get_bars(
-                    benchmark, start, end, tf,
-                )
-            except Exception as e:  # noqa: BLE001
-                log.warning("runner.warmup_spy_failed",
-                            benchmark=benchmark, error=str(e))
-                spy_df = None
-        if spy_df is not None and not spy_df.empty:
-            try:
-                from core.indicators import ensure_daily
-                self.ctx.set_spy_df(ensure_daily(spy_df))
-                log.info("runner.warmup_spy_loaded",
-                         benchmark=benchmark, bars=len(spy_df))
-            except Exception as e:  # noqa: BLE001
-                log.warning("runner.warmup_spy_set_failed", error=str(e))
+        # SPY/Benchmark nur laden wenn die Strategie-Config explizit
+        # use_trend_filter=True setzt ODER benchmark explizit konfiguriert ist.
+        # Strategien ohne Trend-Filter (z. B. OBB) brauchen kein SPY.
+        needs_spy = (
+            bool(self.cfg.get("use_trend_filter", False))
+            or "benchmark" in self.cfg
+        )
+        if needs_spy:
+            benchmark = str(self.cfg.get("benchmark", "SPY")).upper()
+            spy_df = data.get(benchmark)
+            if spy_df is None or spy_df.empty:
+                try:
+                    spy_df = await self.data.get_bars(
+                        benchmark, start, end, tf,
+                    )
+                except Exception as e:  # noqa: BLE001
+                    log.warning("runner.warmup_spy_failed",
+                                benchmark=benchmark, error=str(e))
+                    spy_df = None
+            if spy_df is not None and not spy_df.empty:
+                try:
+                    from core.indicators import ensure_daily
+                    self.ctx.set_spy_df(ensure_daily(spy_df))
+                    log.info("runner.warmup_spy_loaded",
+                             benchmark=benchmark, bars=len(spy_df))
+                except Exception as e:  # noqa: BLE001
+                    log.warning("runner.warmup_spy_set_failed", error=str(e))
 
         # Strategie-Buffer befuellen (Bars chronologisch)
         if not hasattr(self.strategy, "warmup_bar"):
@@ -500,6 +512,10 @@ class LiveRunner:
                 volume=int(row.get("Volume", 0) or 0),
             )
             self.strategy.warmup_bar(bar)
+            # Letzten Bar-Timestamp je Symbol merken – stream_bars-Zyklus
+            # liefert denselben Zeitraum nochmals; diese Timestamps dienen
+            # als Cutoff, damit kein Warmup-Bar Signal-Generierung auslöst.
+            self._warmup_last_seen[sym] = py_ts
 
         if entries:
             self.ctx.set_now(entries[-1][0])
@@ -524,7 +540,10 @@ class LiveRunner:
             await self._polling_fallback(tf)
 
     async def _polling_fallback(self, tf: str) -> None:
-        last_seen: dict[str, datetime] = {}
+        # Warmup-Cutoffs als Startpunkt verwenden – so wird der Zeitraum
+        # der letzten warmup_days nicht nochmals mit Signal-Generierung
+        # verarbeitet.
+        last_seen: dict[str, datetime] = dict(self._warmup_last_seen)
         is_daily = "day" in tf.lower() or "1d" in tf.lower()
 
         while self._running:
@@ -573,6 +592,21 @@ class LiveRunner:
     # ── Bar-Processing ────────────────────────────────────────────────
 
     async def _process_bar(self, bar: Bar) -> None:
+        # ── Warmup-Duplikat-Guard ─────────────────────────────────────
+        # stream_bars startet mit leerem last_seen und fetcht im ersten
+        # Zyklus denselben Zeitraum wie der Warmup. Bars bis zum letzten
+        # Warmup-Timestamp würden sonst nochmals mit Signal-Generierung
+        # verarbeitet und sofort eine Order auslösen (z. B. SPY als erstes
+        # Symbol in der Liste). Nur Kontext/Preis updaten, kein on_bar.
+        bar_ts_tz = bar.timestamp
+        if bar_ts_tz.tzinfo is None:
+            bar_ts_tz = bar_ts_tz.replace(tzinfo=timezone.utc)
+        warmup_cut = self._warmup_last_seen.get(bar.symbol)
+        if warmup_cut is not None and bar_ts_tz <= warmup_cut:
+            self.ctx.set_now(bar.timestamp)
+            self.broker.update_price(bar.symbol, bar.close)
+            return
+
         self.ctx.set_now(bar.timestamp)
 
         # ── Monitoring: Bar-Lag + Heartbeat ──

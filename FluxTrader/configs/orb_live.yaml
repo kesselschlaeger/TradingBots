@@ -3,7 +3,7 @@ mode: live
 
 strategy:
   name: orb
-  symbols: ["SPY", "QQQ", "IWM", "DIA",           # ETFs – stabiler Kern
+  symbols: ["QQQ", "IWM", "DIA",           # ETFs – stabiler Kern
         "NVDA", "TSLA", "AMD", "AVGO",        # High-Vol AI/Chips (2026 besonders stark)
         "AAPL", "MSFT", "META", "AMZN",       # Big-Tech Klassiker
         "PLTR", "GOOGL", "NFLX",]
