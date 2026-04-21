@@ -215,6 +215,8 @@ class PersistentState:
 
                 # Legacy-daily -> neue Schema-Form migrieren (ohne Datenverlust).
                 await self._migrate_daily(conn)
+                # reserved_groups: strategy-Spalte + neuer PK (ephemere Daten).
+                await self._migrate_reserved_groups(conn)
 
                 for stmt in _SCHEMA_STATEMENTS:
                     await conn.execute(stmt)
@@ -256,6 +258,24 @@ class PersistentState:
             """
         )
         await conn.execute("DROP TABLE daily_legacy")
+
+    async def _migrate_reserved_groups(self, conn: Any) -> None:
+        """reserved_groups ohne strategy-Spalte → mit strategy + neuem PK.
+
+        Die Tabelle enthält nur tagesaktuelle Daten (MIT-Independence-
+        Gruppen) – ein Datenverlust durch DROP/RECREATE ist unkritisch.
+        """
+        cur = await conn.execute("PRAGMA table_info(reserved_groups)")
+        cols = {row[1] for row in await cur.fetchall()}
+        if not cols:
+            return  # Tabelle existiert noch nicht – normaler CREATE-Pfad
+        if "strategy" in cols:
+            return  # bereits migriert
+
+        log.info("state.migrate_reserved_groups_add_strategy")
+        # reserved_groups ist ephemer (täglich gecleart) – einfaches
+        # DROP/RECREATE ohne Datenmigration ist sicher.
+        await conn.execute("DROP TABLE reserved_groups")
 
     async def init(self) -> None:
         """Abwärtskompatibler Alias für ``ensure_schema``."""
