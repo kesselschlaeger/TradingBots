@@ -33,9 +33,25 @@ FAKE_SYMBOLS: dict[str, list[tuple[str, str, str]]] = {
         ("AMZN",  "MIT_OVERLAY_REJECT", "EV 0.21 < Schwelle 0.30"),
     ],
     "botti": [
-        ("AAPL",  "SIGNAL",         "botti_trend BUY, VIX-Faktor 1.0"),
-        ("SPY",   "WAIT_BREAKOUT",  "MR-Setup warten"),
-        ("QQQ",   "GAP_BLOCK",      "gap 2.10%"),
+        ("AAPL",  "SIGNAL",         "BUY: Fast EMA Cross (9/21)"),
+        ("SPY",   "NO_UPTREND",     "SMA20 < SMA30"),
+        ("QQQ",   "DD_BREAKER",     "Drawdown 16.2% ≥ 15.0%"),
+        ("NVDA",  "SECTOR_BLOCK",   "max 2 pro Sektor erreicht"),
+        ("MU",    "RSI_BLOCK",      "RSI 78 out of range"),
+        ("TSLA",  "MTF_BLOCK",      "RSI 42 < 50 (MTF)"),
+    ],
+    "obb": [
+        ("SPY",   "WAIT_BREAKOUT",  "Close 520.10 in [510.00..525.30]"),
+        ("QQQ",   "SIGNAL",         "OBB Long: Close 450.20 > 50-Bar-High 449.80"),
+        ("IWM",   "SHORTS_DISABLED", "Short-Setup, aber allow_shorts=False"),
+    ],
+    "ict_ob_mtf": [
+        ("SPY",   "NO_VALID_OB",    "3 OB(s), keine in Preisnähe"),
+        ("QQQ",   "WEAK_CONFLUENCE", "Confluence 0.50 < 0.75"),
+        ("AAPL",  "SIGNAL",         "ICT OB Bullish +15M_FVG +5M_entry"),
+    ],
+    "botti_pair": [
+        ("SPY/QQQ", "WAIT_Z", "z=-0.84 in [-2.00..2.00]"),
     ],
 }
 

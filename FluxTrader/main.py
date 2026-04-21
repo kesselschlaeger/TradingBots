@@ -355,6 +355,7 @@ async def cmd_live(cfg: AppConfig) -> None:
             context=ctx,
             ml_filter=ml_filter,
             config=cfg.strategy.params,
+            health_state=health_state,
         )
         await pair_engine.run()
     else:

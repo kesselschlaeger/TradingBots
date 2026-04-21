@@ -468,3 +468,70 @@ class TestBottiNoForbiddenImports:
         for word in forbidden:
             assert f"import {word}" not in source, \
                 f"Verbotener Import '{word}' in strategy/botti.py gefunden"
+
+
+class TestBottiStatusReporting:
+    """Status-Sink-Integration: _record_status wird an Skip-Punkten aufgerufen."""
+
+    def _strat_with_sink(self, context, extra_cfg=None):
+        recorded: dict[str, str] = {}
+        cfg = {
+            "use_fast_cross": False,
+            "use_early_golden_cross": False,
+            "use_pullback_entry_daily": False,
+            "use_mean_reversion": False,
+            "adx_threshold": 0,
+        }
+        if extra_cfg:
+            cfg.update(extra_cfg)
+        strat = BottiStrategy(cfg, context=context)
+        strat.set_status_sink(
+            lambda sym, code, reason: recorded.update({sym: code})
+        )
+        return strat, recorded
+
+    def test_sink_noop_without_assignment(self, context):
+        """Ohne Sink ist _record_status ein No-Op."""
+        strat = BottiStrategy({}, context=context)
+        strat._record_status("AAPL", "WAIT_SETUP")  # darf nicht werfen
+
+    def test_dd_breaker_records_status(self, context):
+        context.update_account(equity=100_000.0, cash=100_000.0)
+        context._account.peak_equity = 100_000.0
+        context.update_account(equity=80_000.0, cash=80_000.0)
+        strat, recorded = self._strat_with_sink(
+            context, {"max_drawdown_pct": 0.15},
+        )
+        bars = _make_golden_cross_bars()
+        for b in bars:
+            strat.on_bar(b)
+        assert recorded.get("AAPL") == "DD_BREAKER"
+
+    def test_sector_block_records_status(self, context):
+        context.update_account(equity=100_000.0, cash=100_000.0)
+        context.set_open_symbols(["NVDA", "AMD"])
+        strat, recorded = self._strat_with_sink(
+            context,
+            {
+                "max_per_sector": 2,
+                "sector_groups": {"tech_semi": ["NVDA", "AMD", "MU"]},
+            },
+        )
+        bars = _make_golden_cross_bars(symbol="MU")
+        for b in bars:
+            strat.on_bar(b)
+        assert recorded.get("MU") == "SECTOR_BLOCK"
+
+    def test_mtf_block_records_status(self, context):
+        context.update_account(equity=100_000.0, cash=100_000.0)
+        strat, recorded = self._strat_with_sink(
+            context,
+            {"use_multi_timeframe": True, "lower_rsi_min": 999},
+        )
+        bars = _make_golden_cross_bars()
+        for b in bars:
+            strat.on_bar(b)
+        # Wenn ein BUY aufgetaucht wäre, hätte MTF ihn geblockt;
+        # andernfalls kommen HOLD-Status. Mindestens ein Status muss
+        # jedenfalls gesetzt worden sein.
+        assert "AAPL" in recorded

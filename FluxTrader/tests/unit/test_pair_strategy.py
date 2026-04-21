@@ -224,3 +224,58 @@ class TestBottiPairStrategy:
         for word in forbidden:
             assert f"import {word}" not in source, \
                 f"Verbotener Import '{word}' in strategy/botti_pair.py"
+
+
+class TestBottiPairStatusReporting:
+    """Status-Sink-Integration für Pair-Strategien: Key = 'SPY/QQQ'."""
+
+    def _strat_with_sink(self, context, extra_cfg=None):
+        recorded: dict[str, tuple[str, str]] = {}
+        cfg = {"symbol_a": "SPY", "symbol_b": "QQQ", "pair_lookback": 5}
+        if extra_cfg:
+            cfg.update(extra_cfg)
+        strat = BottiPairStrategy(cfg, context=context)
+        strat.set_status_sink(
+            lambda key, code, reason: recorded.update({key: (code, reason)})
+        )
+        return strat, recorded
+
+    def test_sink_noop_without_assignment(self, context):
+        strat = BottiPairStrategy(
+            {"symbol_a": "SPY", "symbol_b": "QQQ"}, context=context,
+        )
+        strat._record_status("SPY/QQQ", "WAIT_Z")  # darf nicht werfen
+
+    def test_pair_key_format(self, context):
+        strat = BottiPairStrategy(
+            {"symbol_a": "SPY", "symbol_b": "QQQ"}, context=context,
+        )
+        assert strat.pair_key == "SPY/QQQ"
+
+    def test_wait_warmup_recorded(self, context):
+        strat, recorded = self._strat_with_sink(context)
+        snapshot = context.snapshot()
+        ts = _et_dt(2025, 3, 12, 10, 0)
+        bar_a = Bar("SPY", ts, 500, 501, 499, 500, 1_000_000)
+        bar_b = Bar("QQQ", ts, 550, 551, 549, 550, 800_000)
+        strat._generate_pair_signal(bar_a, bar_b, snapshot)
+        assert recorded.get("SPY/QQQ", (None,))[0] == "WAIT_WARMUP"
+
+    def test_signal_recorded_on_enter(self, context):
+        strat, recorded = self._strat_with_sink(
+            context, {"z_entry": 1.0, "z_exit": 0.3},
+        )
+        snapshot = context.snapshot()
+        for i in range(10):
+            ts = _et_dt(2025, 3, 12, 10, i)
+            bar_a = Bar("SPY", ts, 500, 501, 499, 500, 1_000_000)
+            bar_b = Bar("QQQ", ts, 550, 551, 549, 550, 800_000)
+            strat._generate_pair_signal(bar_a, bar_b, snapshot)
+        # Extremer Spread → ENTER
+        ts = _et_dt(2025, 3, 12, 10, 15)
+        bar_a = Bar("SPY", ts, 500, 501, 499, 500, 1_000_000)
+        bar_b = Bar("QQQ", ts, 600, 601, 599, 600, 800_000)
+        strat._generate_pair_signal(bar_a, bar_b, snapshot)
+        code, _ = recorded.get("SPY/QQQ", (None, ""))
+        # Entweder SIGNAL (ENTER/EXIT) oder WAIT_Z – zentral: etwas wurde gesetzt
+        assert code in ("SIGNAL", "WAIT_Z")

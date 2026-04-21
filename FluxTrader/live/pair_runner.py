@@ -23,6 +23,7 @@ from core.models import Bar, PairSignal
 from core.trade_manager import ManagedTrade, TradeManager
 from data.providers.base import DataProvider
 from execution.port import BrokerPort
+from live.health import HealthState
 from strategy.base import PairStrategy
 
 log = get_logger(__name__)
@@ -39,6 +40,7 @@ class PairEngine:
         context: MarketContextService,
         ml_filter: MLFilter,
         config: dict,
+        health_state: Optional[HealthState] = None,
     ):
         self.strategy = strategy
         self.broker = broker
@@ -46,6 +48,7 @@ class PairEngine:
         self.ctx = context
         self.ml_filter = ml_filter
         self.cfg = config
+        self.health: Optional[HealthState] = health_state
 
         self.tm = TradeManager(
             use_trailing=False,
@@ -54,6 +57,15 @@ class PairEngine:
 
         self._running = False
         self._has_position = False
+
+        # Pair-Status-Reporting: Strategie meldet pro-Paar-Status
+        # (WAIT_WARMUP, WAIT_Z, SIGNAL) sync in HealthState.
+        if self.health is not None and hasattr(self.strategy, "set_status_sink"):
+            strat_name = self.strategy.name
+            self.strategy.set_status_sink(
+                lambda key, code, reason:
+                    self.health.set_symbol_status(strat_name, key, code, reason)
+            )
 
     async def run(self) -> None:
         """Hauptloop: pollt Bars für beide Symbole und verarbeitet PairSignals."""
