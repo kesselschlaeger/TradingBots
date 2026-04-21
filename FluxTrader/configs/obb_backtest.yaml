@@ -35,5 +35,6 @@ data:
   provider: ibkr
   timeframe: "1Day"
   lookback_days: 105
+  ibkr_use_rth: false
 
 initial_capital: 30_000.0

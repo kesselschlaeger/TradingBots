@@ -83,6 +83,54 @@ async def test_circuit_breaker_forces_critical():
 
 
 @pytest.mark.asyncio
+async def test_symbol_status_round_trip():
+    """set_symbol_status (sync) erscheint im Snapshot."""
+    hs = HealthState()
+    from datetime import timezone
+    ts = datetime(2026, 4, 21, 14, 0, tzinfo=timezone.utc)
+    hs.set_symbol_status("orb", "AAPL", "WAIT_BREAKOUT",
+                         "Preis 150.00 in [149..151]", ts)
+    hs.set_symbol_status("orb", "NVDA", "GAP_BLOCK", "gap 3.50%")
+
+    snap = hs.snapshot()
+    strats = {s["name"]: s for s in snap["strategies"]}
+    sym = strats["orb"]["symbol_status"]
+    assert sym["AAPL"]["code"] == "WAIT_BREAKOUT"
+    assert "149" in sym["AAPL"]["reason"]
+    assert sym["NVDA"]["code"] == "GAP_BLOCK"
+
+
+@pytest.mark.asyncio
+async def test_symbol_status_overwrite():
+    """Neueres set_symbol_status überschreibt den alten Eintrag."""
+    hs = HealthState()
+    hs.set_symbol_status("orb", "SPY", "WAIT_ORB", "ORB-Periode")
+    hs.set_symbol_status("orb", "SPY", "SIGNAL", "ORB Breakout: 420 > 419")
+
+    snap = hs.snapshot()
+    strats = {s["name"]: s for s in snap["strategies"]}
+    assert strats["orb"]["symbol_status"]["SPY"]["code"] == "SIGNAL"
+
+
+@pytest.mark.asyncio
+async def test_strategy_status_sink_wires_to_health_state():
+    """LiveRunner-Muster: Sink verbindet BaseStrategy mit HealthState."""
+    from strategy.orb import ORBStrategy
+
+    hs = HealthState()
+    strat = ORBStrategy({})
+    strat.set_status_sink(
+        lambda sym, code, reason:
+            hs.set_symbol_status("orb", sym, code, reason)
+    )
+    strat._record_status("AAPL", "TEST_CODE", "detail")
+
+    snap = hs.snapshot()
+    strats = {s["name"]: s for s in snap["strategies"]}
+    assert strats["orb"]["symbol_status"]["AAPL"]["code"] == "TEST_CODE"
+
+
+@pytest.mark.asyncio
 async def test_snapshot_contains_all_sections():
     hs = HealthState()
     await hs.set_broker_status(connected=True, adapter="alpaca", last_order_ms=120.0)

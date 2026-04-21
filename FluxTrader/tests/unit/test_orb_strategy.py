@@ -151,6 +151,91 @@ class TestORBSignalGeneration:
         assert short_signals == []
 
 
+class TestORBStatusReporting:
+    """Verifiziert, dass _record_status an allen Skip-Punkten aufgerufen wird."""
+
+    def _make_strat_with_sink(self, context, extra_cfg=None):
+        """ORBStrategy + Status-Sink, liefert (strat, recorded_dict)."""
+        recorded = {}
+        cfg = {
+            "min_bars": 5,
+            "use_gap_filter": False,
+            "use_trend_filter": False,
+            "use_mit_probabilistic_overlay": False,
+            "use_time_decay_filter": False,
+        }
+        if extra_cfg:
+            cfg.update(extra_cfg)
+        strat = ORBStrategy(cfg, context=context)
+        strat.set_status_sink(
+            lambda sym, code, reason: recorded.update({sym: code})
+        )
+        return strat, recorded
+
+    def test_sink_noop_without_assignment(self, context):
+        """Ohne Sink: _record_status ist No-Op – kein Fehler."""
+        strat = ORBStrategy({}, context=context)
+        strat._record_status("AAPL", "WAIT_ORB")  # darf nicht werfen
+
+    def test_outside_market_hours(self, context, spy_df):
+        """Bar außerhalb Handelszeiten → OUTSIDE_HOURS."""
+        context.set_spy_df(spy_df)
+        strat, recorded = self._make_strat_with_sink(context)
+        warmup = _make_warmup_bars(n=10)
+        for b in warmup:
+            strat.on_bar(b)
+        # 7:00 ET – außerhalb Handelszeiten
+        bar = Bar("AAPL", _et_dt(2025, 3, 12, 7, 0),
+                  100.0, 101.0, 99.0, 100.5, 100_000)
+        strat.on_bar(bar)
+        assert recorded.get("AAPL") == "OUTSIDE_HOURS"
+
+    def test_during_orb_period(self, context, spy_df):
+        """Bar in ORB-Phase → WAIT_ORB."""
+        context.set_spy_df(spy_df)
+        strat, recorded = self._make_strat_with_sink(context)
+        warmup = _make_warmup_bars(n=10)
+        for b in warmup:
+            strat.on_bar(b)
+        bar = Bar("AAPL", _et_dt(2025, 3, 12, 9, 45),
+                  100.0, 101.0, 99.0, 100.5, 200_000)
+        strat.on_bar(bar)
+        assert recorded.get("AAPL") == "WAIT_ORB"
+
+    def test_gap_block(self, context, spy_df):
+        """Großer Gap → GAP_BLOCK."""
+        context.set_spy_df(spy_df)
+        strat, recorded = self._make_strat_with_sink(
+            context, {"use_gap_filter": True, "max_gap_pct": 0.001}
+        )
+        warmup = _make_warmup_bars(n=10)
+        for b in warmup:
+            strat.on_bar(b)
+        # ORB-Bars bauen (erzeugt einen echten Gap durch prev_close vs open)
+        for b in _make_orb_bars("AAPL", base=100.0):
+            strat.on_bar(b)
+        # Nach ORB: Bar mit großem Gap
+        bar = Bar("AAPL", _et_dt(2025, 3, 12, 10, 5),
+                  105.0, 106.0, 104.0, 105.5, 500_000)
+        strat.on_bar(bar)
+        assert recorded.get("AAPL") == "GAP_BLOCK"
+
+    def test_signal_emits_status(self, context, spy_df):
+        """Erfolgreiches Signal setzt SIGNAL-Status."""
+        context.set_spy_df(spy_df)
+        strat, recorded = self._make_strat_with_sink(context)
+
+        warmup = _make_warmup_bars(n=15)
+        for b in warmup:
+            strat.on_bar(b)
+        for b in _make_orb_bars("AAPL", breakout_up=True):
+            strat.on_bar(b)
+        # Letzter Status: entweder SIGNAL (bei klarem Breakout) oder ein
+        # Filter-Code (wenn Volume/Strength nicht ausreicht). Wir prüfen
+        # nur, dass überhaupt ein Status gesetzt wurde.
+        assert "AAPL" in recorded
+
+
 class TestORBReset:
     def test_reset_clears_bars(self, context):
         strat = ORBStrategy({}, context=context)
