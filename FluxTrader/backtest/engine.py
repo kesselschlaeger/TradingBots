@@ -50,7 +50,7 @@ class BacktestConfig:
     commission: CommissionModel = field(default_factory=CommissionModel)
     # Steuert paper.fill- und trade.register-Logs: im Backtest i.d.R.
     # stoerend (tausende Einzelzeilen), daher default off.
-    log_order_events: bool = True
+    log_order_events: bool = False
 
 
 @dataclass

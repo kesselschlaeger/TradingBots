@@ -67,7 +67,7 @@ data:
   lookback_days: 60
 
 ##backtest:
-log_order_events: true
+log_order_events: false
 initial_capital: 10000.0
 
 # Walk-Forward-Optimierung (nur für `python main.py wfo ...` genutzt)
