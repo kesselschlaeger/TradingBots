@@ -6,9 +6,9 @@ Single-Source-of-Truth für:
   - Offene Positionen (``positions``)
   - Signal-Stream (``signals``)
   - Anomaly-Events (``anomaly_events``)
-  - Tages-PnL-/Trade-Counter (``daily``)
-  - Account-Peak (``account``)
-  - Cooldowns (``cooldowns``)
+  - Tages-PnL-/Trade-Counter (``daily`` – read-only, abgeleitet aus trades)
+  - Account-Peak (``account``, strategy-aware)
+  - Cooldowns (``cooldowns``, strategy-aware)
   - Reservierte Gruppen für MIT-Independence (``reserved_groups``)
 
 EINE DB-Datei für ALLE gleichzeitig laufenden Strategien (ORB, OBB,
@@ -21,13 +21,18 @@ Async-Implementation via ``aiosqlite``. Alle Writer-Pfade hängen an
 einem gemeinsamen ``asyncio.Lock`` (aiosqlite serialisiert Connections
 zwar intern, der Lock deckt aber zusätzlich Read-Modify-Write-Sequenzen
 ab, z.B. den UPSERT in ``update_or_create_position``).
+
+Atomare Schreib-Sequenzen: ``open_trade_atomic`` und ``close_trade_atomic``
+bündeln jeweils Trade-INSERT/UPDATE + Position-UPSERT/DELETE + ggf.
+reserved_groups in einer einzigen DB-Transaktion (alles oder nichts).
 """
 from __future__ import annotations
 
 import asyncio
 import json
+import warnings
 from contextlib import asynccontextmanager
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -62,14 +67,18 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
     """,
     """
     CREATE TABLE IF NOT EXISTS account (
-        key TEXT PRIMARY KEY,
-        value REAL
+        key      TEXT NOT NULL,
+        strategy TEXT NOT NULL DEFAULT '',
+        value    REAL,
+        PRIMARY KEY (key, strategy)
     )
     """,
     """
     CREATE TABLE IF NOT EXISTS cooldowns (
-        symbol TEXT PRIMARY KEY,
-        until_ts TEXT NOT NULL
+        symbol   TEXT NOT NULL,
+        strategy TEXT NOT NULL DEFAULT '',
+        until_ts TEXT NOT NULL,
+        PRIMARY KEY (symbol, strategy)
     )
     """,
     """
@@ -118,6 +127,7 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
     """
     CREATE TABLE IF NOT EXISTS positions (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
+        trade_id INTEGER REFERENCES trades(id) ON DELETE SET NULL,
         strategy TEXT NOT NULL,
         symbol TEXT NOT NULL,
         side TEXT,
@@ -178,6 +188,9 @@ _INDEX_STATEMENTS: tuple[str, ...] = (
     "ON anomaly_events(strategy, ts)",
     "CREATE INDEX IF NOT EXISTS idx_daily_strategy_day "
     "ON daily(strategy, day)",
+    # Neuer Index für daily_pnl/trades_today-Queries auf trades-Tabelle
+    "CREATE INDEX IF NOT EXISTS idx_trades_strategy_exit_day "
+    "ON trades(strategy, substr(exit_ts,1,10))",
 )
 
 
@@ -217,6 +230,12 @@ class PersistentState:
                 await self._migrate_daily(conn)
                 # reserved_groups: strategy-Spalte + neuer PK (ephemere Daten).
                 await self._migrate_reserved_groups(conn)
+                # cooldowns: strategy-Spalte hinzufügen (PK → composite).
+                await self._migrate_cooldowns(conn)
+                # account: strategy-Spalte hinzufügen (PK → composite).
+                await self._migrate_account(conn)
+                # positions: trade_id FK hinzufügen.
+                await self._migrate_positions_trade_id(conn)
 
                 for stmt in _SCHEMA_STATEMENTS:
                     await conn.execute(stmt)
@@ -276,6 +295,112 @@ class PersistentState:
         # reserved_groups ist ephemer (täglich gecleart) – einfaches
         # DROP/RECREATE ohne Datenmigration ist sicher.
         await conn.execute("DROP TABLE reserved_groups")
+
+    async def _migrate_cooldowns(self, conn: Any) -> None:
+        """cooldowns (PK=symbol) → (symbol, strategy) ohne Datenverlust."""
+        cur = await conn.execute("PRAGMA table_info(cooldowns)")
+        cols = {row[1] for row in await cur.fetchall()}
+        if not cols:
+            return  # Tabelle existiert noch nicht
+        if "strategy" in cols:
+            return  # bereits migriert
+
+        log.info("state.migrate_cooldowns_add_strategy")
+        await conn.execute("ALTER TABLE cooldowns RENAME TO cooldowns_legacy")
+        await conn.execute(
+            """
+            CREATE TABLE cooldowns (
+                symbol   TEXT NOT NULL,
+                strategy TEXT NOT NULL DEFAULT '',
+                until_ts TEXT NOT NULL,
+                PRIMARY KEY (symbol, strategy)
+            )
+            """
+        )
+        await conn.execute(
+            """
+            INSERT INTO cooldowns (symbol, strategy, until_ts)
+            SELECT symbol, '', until_ts FROM cooldowns_legacy
+            """
+        )
+        await conn.execute("DROP TABLE cooldowns_legacy")
+
+    async def _migrate_account(self, conn: Any) -> None:
+        """account (PK=key) → (key, strategy) ohne Datenverlust."""
+        cur = await conn.execute("PRAGMA table_info(account)")
+        cols = {row[1] for row in await cur.fetchall()}
+        if not cols:
+            return  # Tabelle existiert noch nicht
+        if "strategy" in cols:
+            return  # bereits migriert
+
+        log.info("state.migrate_account_add_strategy")
+        await conn.execute("ALTER TABLE account RENAME TO account_legacy")
+        await conn.execute(
+            """
+            CREATE TABLE account (
+                key      TEXT NOT NULL,
+                strategy TEXT NOT NULL DEFAULT '',
+                value    REAL,
+                PRIMARY KEY (key, strategy)
+            )
+            """
+        )
+        await conn.execute(
+            """
+            INSERT INTO account (key, strategy, value)
+            SELECT key, '', value FROM account_legacy
+            """
+        )
+        await conn.execute("DROP TABLE account_legacy")
+
+    async def _migrate_positions_trade_id(self, conn: Any) -> None:
+        """positions: trade_id-Spalte hinzufügen (FK zu trades)."""
+        cur = await conn.execute("PRAGMA table_info(positions)")
+        cols = {row[1] for row in await cur.fetchall()}
+        if not cols:
+            return  # Tabelle existiert noch nicht
+        if "trade_id" in cols:
+            return  # bereits migriert
+
+        log.info("state.migrate_positions_add_trade_id")
+        # SQLite kann FK nicht inline per ALTER hinzufügen – rebuild.
+        await conn.execute("ALTER TABLE positions RENAME TO positions_legacy")
+        await conn.execute(
+            """
+            CREATE TABLE positions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                trade_id INTEGER REFERENCES trades(id) ON DELETE SET NULL,
+                strategy TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                side TEXT,
+                entry_ts TEXT,
+                entry_price REAL,
+                qty REAL,
+                stop_price REAL,
+                last_update_ts TEXT,
+                current_price REAL,
+                unrealized_pnl REAL,
+                unrealized_pnl_pct REAL,
+                held_minutes INTEGER,
+                UNIQUE (strategy, symbol)
+            )
+            """
+        )
+        await conn.execute(
+            """
+            INSERT INTO positions (
+                id, strategy, symbol, side, entry_ts, entry_price, qty,
+                stop_price, last_update_ts, current_price,
+                unrealized_pnl, unrealized_pnl_pct, held_minutes
+            )
+            SELECT id, strategy, symbol, side, entry_ts, entry_price, qty,
+                   stop_price, last_update_ts, current_price,
+                   unrealized_pnl, unrealized_pnl_pct, held_minutes
+            FROM positions_legacy
+            """
+        )
+        await conn.execute("DROP TABLE positions_legacy")
 
     async def init(self) -> None:
         """Abwärtskompatibler Alias für ``ensure_schema``."""
@@ -433,6 +558,7 @@ class PersistentState:
         unrealized_pnl: Optional[float] = None,
         unrealized_pnl_pct: Optional[float] = None,
         held_minutes: Optional[int] = None,
+        trade_id: Optional[int] = None,
     ) -> None:
         last = _iso(datetime.now(timezone.utc))
         entry_iso = _iso(entry_ts) if entry_ts is not None else None
@@ -447,21 +573,24 @@ class PersistentState:
                     await conn.execute(
                         """
                         INSERT INTO positions (
-                            strategy, symbol, side, entry_ts, entry_price, qty,
-                            stop_price, last_update_ts, current_price,
-                            unrealized_pnl, unrealized_pnl_pct, held_minutes
-                        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+                            trade_id, strategy, symbol, side, entry_ts,
+                            entry_price, qty, stop_price, last_update_ts,
+                            current_price, unrealized_pnl, unrealized_pnl_pct,
+                            held_minutes
+                        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
                         """,
                         (
-                            strategy, symbol, side, entry_iso, entry_price,
-                            qty, stop_price, last, current_price,
-                            unrealized_pnl, unrealized_pnl_pct, held_minutes,
+                            trade_id, strategy, symbol, side, entry_iso,
+                            entry_price, qty, stop_price, last,
+                            current_price, unrealized_pnl,
+                            unrealized_pnl_pct, held_minutes,
                         ),
                     )
                 else:
                     await conn.execute(
                         """
                         UPDATE positions SET
+                            trade_id=COALESCE(?, trade_id),
                             side=COALESCE(?, side),
                             entry_ts=COALESCE(?, entry_ts),
                             entry_price=COALESCE(?, entry_price),
@@ -475,8 +604,8 @@ class PersistentState:
                         WHERE id=?
                         """,
                         (
-                            side, entry_iso, entry_price, qty, stop_price,
-                            last, current_price, unrealized_pnl,
+                            trade_id, side, entry_iso, entry_price, qty,
+                            stop_price, last, current_price, unrealized_pnl,
                             unrealized_pnl_pct, held_minutes, row["id"],
                         ),
                     )
@@ -556,7 +685,8 @@ class PersistentState:
                 await conn.commit()
 
     # ══════════════════════════════════════════════════════════════════
-    # Writer: daily (jetzt strategy-aware)
+    # Writer: daily – DEPRECATED (daily-Tabelle wird nicht mehr befüllt,
+    # alle Reads laufen jetzt direkt über trades-Tabelle)
     # ══════════════════════════════════════════════════════════════════
 
     async def update_daily_record(
@@ -567,68 +697,46 @@ class PersistentState:
         pnl_delta: float = 0.0,
         symbol: Optional[str] = None,
     ) -> None:
-        """Inkrementiert pnl + trades_count für (day, strategy)."""
-        key = day.isoformat()
-        async with self._lock:
-            async with self._conn() as conn:
-                cur = await conn.execute(
-                    "SELECT pnl, trades_count, by_symbol FROM daily "
-                    "WHERE day=? AND strategy=?",
-                    (key, strategy),
-                )
-                row = await cur.fetchone()
-                if row is None:
-                    by_sym = {symbol: 1} if symbol else {}
-                    await conn.execute(
-                        """
-                        INSERT INTO daily(day, strategy, pnl, trades_count, by_symbol)
-                        VALUES (?,?,?,?,?)
-                        """,
-                        (
-                            key, strategy, float(pnl_delta),
-                            1 if symbol else 0,
-                            json.dumps(by_sym),
-                        ),
-                    )
-                else:
-                    by_sym = json.loads(row["by_symbol"] or "{}")
-                    if symbol:
-                        by_sym[symbol] = by_sym.get(symbol, 0) + 1
-                    await conn.execute(
-                        """
-                        UPDATE daily SET pnl=?, trades_count=?, by_symbol=?
-                        WHERE day=? AND strategy=?
-                        """,
-                        (
-                            float(row["pnl"]) + float(pnl_delta),
-                            int(row["trades_count"]) + (1 if symbol else 0),
-                            json.dumps(by_sym), key, strategy,
-                        ),
-                    )
-                await conn.commit()
+        """DEPRECATED – no-op Stub. Daten werden aus trades rekonstruiert."""
+        warnings.warn(
+            "update_daily_record() is deprecated – daily data is now "
+            "derived from the trades table",
+            DeprecationWarning,
+            stacklevel=2,
+        )
 
     # ── Legacy-API (bleibt für Abwärtskompatibilität) ───────────────
 
     async def add_trade(
         self, day: date, symbol: str, pnl: float, strategy: str = "",
     ) -> None:
-        """Legacy-Alias – delegiert an ``update_daily_record``."""
-        await self.update_daily_record(
-            day=day, strategy=strategy, pnl_delta=pnl, symbol=symbol,
+        """DEPRECATED – no-op Stub."""
+        warnings.warn(
+            "add_trade() is deprecated – daily data is now "
+            "derived from the trades table",
+            DeprecationWarning,
+            stacklevel=2,
         )
 
     async def daily_pnl(self, day: date, strategy: Optional[str] = None) -> float:
+        """PnL eines Tages, abgeleitet aus der trades-Tabelle."""
         async with self._conn() as conn:
             if strategy is None:
                 cur = await conn.execute(
-                    "SELECT COALESCE(SUM(pnl),0.0) AS s FROM daily WHERE day=?",
+                    """
+                    SELECT COALESCE(SUM(pnl), 0.0) AS s FROM trades
+                    WHERE exit_ts IS NOT NULL AND substr(exit_ts,1,10)=?
+                    """,
                     (day.isoformat(),),
                 )
             else:
                 cur = await conn.execute(
-                    "SELECT COALESCE(SUM(pnl),0.0) AS s FROM daily "
-                    "WHERE day=? AND strategy=?",
-                    (day.isoformat(), strategy),
+                    """
+                    SELECT COALESCE(SUM(pnl), 0.0) AS s FROM trades
+                    WHERE strategy=? AND exit_ts IS NOT NULL
+                    AND substr(exit_ts,1,10)=?
+                    """,
+                    (strategy, day.isoformat()),
                 )
             row = await cur.fetchone()
             return float(row["s"]) if row else 0.0
@@ -636,51 +744,61 @@ class PersistentState:
     async def trades_today(
         self, day: date, strategy: Optional[str] = None,
     ) -> dict[str, int]:
+        """Trade-Count pro Symbol eines Tages, abgeleitet aus trades-Tabelle."""
         async with self._conn() as conn:
             if strategy is None:
                 cur = await conn.execute(
-                    "SELECT by_symbol FROM daily WHERE day=?",
+                    """
+                    SELECT symbol, COUNT(*) AS cnt FROM trades
+                    WHERE exit_ts IS NOT NULL AND substr(exit_ts,1,10)=?
+                    GROUP BY symbol
+                    """,
                     (day.isoformat(),),
                 )
             else:
                 cur = await conn.execute(
-                    "SELECT by_symbol FROM daily WHERE day=? AND strategy=?",
-                    (day.isoformat(), strategy),
+                    """
+                    SELECT symbol, COUNT(*) AS cnt FROM trades
+                    WHERE strategy=? AND exit_ts IS NOT NULL
+                    AND substr(exit_ts,1,10)=?
+                    GROUP BY symbol
+                    """,
+                    (strategy, day.isoformat()),
                 )
             rows = await cur.fetchall()
-        merged: dict[str, int] = {}
-        for r in rows:
-            part = json.loads(r["by_symbol"] or "{}")
-            for k, v in part.items():
-                merged[k] = merged.get(k, 0) + int(v)
-        return merged
+        return {r["symbol"]: int(r["cnt"]) for r in rows}
 
     # ══════════════════════════════════════════════════════════════════
     # Account-Peak
     # ══════════════════════════════════════════════════════════════════
 
-    async def update_peak_equity(self, equity: float) -> float:
+    async def update_peak_equity(self, equity: float,
+                                strategy: str = "") -> float:
         async with self._lock:
             async with self._conn() as conn:
                 cur = await conn.execute(
-                    "SELECT value FROM account WHERE key='peak_equity'"
+                    "SELECT value FROM account "
+                    "WHERE key='peak_equity' AND strategy=?",
+                    (strategy,),
                 )
                 row = await cur.fetchone()
                 current_peak = float(row["value"]) if row else 0.0
                 new_peak = max(current_peak, float(equity))
                 if new_peak != current_peak:
                     await conn.execute(
-                        "INSERT OR REPLACE INTO account(key, value) "
-                        "VALUES ('peak_equity', ?)",
-                        (new_peak,),
+                        "INSERT OR REPLACE INTO account(key, strategy, value) "
+                        "VALUES ('peak_equity', ?, ?)",
+                        (strategy, new_peak),
                     )
                     await conn.commit()
                 return new_peak
 
-    async def get_peak_equity(self) -> float:
+    async def get_peak_equity(self, strategy: str = "") -> float:
         async with self._conn() as conn:
             cur = await conn.execute(
-                "SELECT value FROM account WHERE key='peak_equity'"
+                "SELECT value FROM account "
+                "WHERE key='peak_equity' AND strategy=?",
+                (strategy,),
             )
             row = await cur.fetchone()
             return float(row["value"]) if row else 0.0
@@ -689,18 +807,24 @@ class PersistentState:
     # Cooldowns
     # ══════════════════════════════════════════════════════════════════
 
-    async def set_cooldown(self, symbol: str, until: datetime) -> None:
+    async def set_cooldown(self, symbol: str, until: datetime,
+                          strategy: str = "") -> None:
         async with self._lock:
             async with self._conn() as conn:
                 await conn.execute(
-                    "INSERT OR REPLACE INTO cooldowns(symbol, until_ts) VALUES (?,?)",
-                    (symbol, until.astimezone(timezone.utc).isoformat()),
+                    "INSERT OR REPLACE INTO cooldowns(symbol, strategy, until_ts) "
+                    "VALUES (?,?,?)",
+                    (symbol, strategy,
+                     until.astimezone(timezone.utc).isoformat()),
                 )
                 await conn.commit()
 
-    async def get_cooldowns(self) -> dict[str, datetime]:
+    async def get_cooldowns(self, strategy: str = "") -> dict[str, datetime]:
         async with self._conn() as conn:
-            cur = await conn.execute("SELECT symbol, until_ts FROM cooldowns")
+            cur = await conn.execute(
+                "SELECT symbol, until_ts FROM cooldowns WHERE strategy=?",
+                (strategy,),
+            )
             rows = await cur.fetchall()
         out: dict[str, datetime] = {}
         for r in rows:
@@ -710,8 +834,9 @@ class PersistentState:
                 continue
         return out
 
-    async def is_in_cooldown(self, symbol: str, now: datetime) -> bool:
-        cools = await self.get_cooldowns()
+    async def is_in_cooldown(self, symbol: str, now: datetime,
+                             strategy: str = "") -> bool:
+        cools = await self.get_cooldowns(strategy=strategy)
         until = cools.get(symbol)
         if until is None:
             return False
@@ -719,8 +844,9 @@ class PersistentState:
             until = until.replace(tzinfo=timezone.utc)
         return now < until
 
-    async def clear_expired_cooldowns(self, now: datetime) -> int:
-        cools = await self.get_cooldowns()
+    async def clear_expired_cooldowns(self, now: datetime,
+                                      strategy: str = "") -> int:
+        cools = await self.get_cooldowns(strategy=strategy)
         expired = [s for s, u in cools.items()
                    if (u.tzinfo or timezone.utc) and now >= u]
         if not expired:
@@ -728,7 +854,11 @@ class PersistentState:
         async with self._lock:
             async with self._conn() as conn:
                 for s in expired:
-                    await conn.execute("DELETE FROM cooldowns WHERE symbol=?", (s,))
+                    await conn.execute(
+                        "DELETE FROM cooldowns "
+                        "WHERE symbol=? AND strategy=?",
+                        (s, strategy),
+                    )
                 await conn.commit()
         return len(expired)
 
@@ -906,6 +1036,265 @@ class PersistentState:
             "open_positions": int(opn["c"]) if opn else 0,
             "trades_today": int(todays["c"]) if todays else 0,
             "pnl_today": float(todays["pnl"]) if todays else 0.0,
+        }
+
+    # ══════════════════════════════════════════════════════════════════
+    # Atomare Write-Sequenzen
+    # ══════════════════════════════════════════════════════════════════
+
+    async def open_trade_atomic(
+        self,
+        *,
+        strategy: str,
+        symbol: str,
+        side: str,
+        entry_ts: datetime | str,
+        entry_price: float,
+        qty: float,
+        stop_price: Optional[float] = None,
+        signal_strength: Optional[float] = None,
+        mit_qty_factor: Optional[float] = None,
+        ev_estimate: Optional[float] = None,
+        group_name: Optional[str] = None,
+        features_json: Optional[str] = None,
+        reason: Optional[str] = None,
+        current_price: Optional[float] = None,
+        reserve_group_name: Optional[str] = None,
+        reserve_day: Optional[date] = None,
+    ) -> int:
+        """Atomare Eröffnung: trades INSERT + positions UPSERT + reserved_groups INSERT
+        in einer einzigen DB-Transaktion. Gibt trade_id zurück.
+        Entweder alles oder nichts – kein Partial-State möglich."""
+        ts = _iso(entry_ts)
+        last = _iso(datetime.now(timezone.utc))
+        c_price = current_price if current_price is not None else float(entry_price)
+
+        async with self._lock:
+            async with self._conn() as conn:
+                # 1) Trade anlegen
+                cur = await conn.execute(
+                    """
+                    INSERT INTO trades (
+                        strategy, symbol, side, entry_ts, entry_price, qty,
+                        stop_price, signal_strength, mit_qty_factor,
+                        ev_estimate, group_name, features_json, reason
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    """,
+                    (
+                        strategy, symbol, side, ts, float(entry_price),
+                        float(qty), stop_price, signal_strength,
+                        mit_qty_factor, ev_estimate, group_name,
+                        features_json, reason,
+                    ),
+                )
+                trade_id = int(cur.lastrowid or 0)
+
+                # 2) Position UPSERT (mit trade_id FK)
+                pos_row = await (
+                    await conn.execute(
+                        "SELECT id FROM positions "
+                        "WHERE strategy=? AND symbol=?",
+                        (strategy, symbol),
+                    )
+                ).fetchone()
+                if pos_row is None:
+                    await conn.execute(
+                        """
+                        INSERT INTO positions (
+                            trade_id, strategy, symbol, side, entry_ts,
+                            entry_price, qty, stop_price, last_update_ts,
+                            current_price, unrealized_pnl,
+                            unrealized_pnl_pct, held_minutes
+                        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+                        """,
+                        (
+                            trade_id, strategy, symbol, side, ts,
+                            float(entry_price), float(qty), stop_price,
+                            last, c_price, 0.0, 0.0, 0,
+                        ),
+                    )
+                else:
+                    await conn.execute(
+                        """
+                        UPDATE positions SET
+                            trade_id=?, side=?, entry_ts=?,
+                            entry_price=?, qty=?, stop_price=?,
+                            last_update_ts=?, current_price=?,
+                            unrealized_pnl=0.0, unrealized_pnl_pct=0.0,
+                            held_minutes=0
+                        WHERE id=?
+                        """,
+                        (
+                            trade_id, side, ts, float(entry_price),
+                            float(qty), stop_price, last, c_price,
+                            pos_row["id"],
+                        ),
+                    )
+
+                # 3) Optionale MIT-Independence Gruppenreservierung
+                if reserve_group_name and reserve_day is not None:
+                    await conn.execute(
+                        """
+                        INSERT OR IGNORE INTO reserved_groups
+                            (group_name, day, strategy)
+                        VALUES (?,?,?)
+                        """,
+                        (reserve_group_name, reserve_day.isoformat(),
+                         strategy),
+                    )
+
+                await conn.commit()
+
+        log.info("state.trade_opened_atomic", id=trade_id,
+                 strategy=strategy, symbol=symbol, side=side)
+        return trade_id
+
+    async def close_trade_atomic(
+        self,
+        *,
+        trade_id: Optional[int] = None,
+        strategy: Optional[str] = None,
+        symbol: Optional[str] = None,
+        exit_ts: datetime | str,
+        exit_price: float,
+        pnl: Optional[float] = None,
+        pnl_pct: Optional[float] = None,
+        reason: Optional[str] = None,
+    ) -> None:
+        """Atomarer Exit: trades UPDATE + positions DELETE in einer Transaktion."""
+        ts = _iso(exit_ts)
+        async with self._lock:
+            async with self._conn() as conn:
+                # 1) Trade finden
+                if trade_id is not None:
+                    row = await (
+                        await conn.execute(
+                            "SELECT id, strategy, symbol FROM trades "
+                            "WHERE id=? AND exit_ts IS NULL",
+                            (int(trade_id),),
+                        )
+                    ).fetchone()
+                else:
+                    row = await (
+                        await conn.execute(
+                            """
+                            SELECT id, strategy, symbol FROM trades
+                            WHERE strategy=? AND symbol=? AND exit_ts IS NULL
+                            ORDER BY entry_ts DESC LIMIT 1
+                            """,
+                            (strategy or "", symbol or ""),
+                        )
+                    ).fetchone()
+                if row is None:
+                    log.warning("state.close_trade_atomic_no_match",
+                                trade_id=trade_id, strategy=strategy,
+                                symbol=symbol)
+                    return
+
+                tid = int(row["id"])
+                strat = row["strategy"]
+                sym = row["symbol"]
+
+                # 2) Trade schließen
+                await conn.execute(
+                    """
+                    UPDATE trades
+                    SET exit_ts=?, exit_price=?, pnl=?, pnl_pct=?, reason=?
+                    WHERE id=?
+                    """,
+                    (ts, float(exit_price), pnl, pnl_pct, reason, tid),
+                )
+
+                # 3) Position entfernen
+                await conn.execute(
+                    "DELETE FROM positions "
+                    "WHERE strategy=? AND symbol=?",
+                    (strat, sym),
+                )
+
+                await conn.commit()
+
+        log.info("state.trade_closed_atomic", id=tid, pnl=pnl,
+                 reason=reason)
+
+    # ══════════════════════════════════════════════════════════════════
+    # Monitoring-Integration (Read-Cache Quelle)
+    # ══════════════════════════════════════════════════════════════════
+
+    async def get_health_snapshot(self, strategy: str) -> dict[str, Any]:
+        """Liefert alle Monitoring-Daten für eine Strategie in einem Roundtrip.
+        Wird von HealthState/MetricsCollector als Cache-Quelle genutzt (≤5s TTL).
+        """
+        today = datetime.now(timezone.utc).date().isoformat()
+        one_hour_ago = _iso(
+            datetime.now(timezone.utc) - timedelta(hours=1)
+        )
+        async with self._conn() as conn:
+            # Equity + Drawdown
+            eq = await (
+                await conn.execute(
+                    "SELECT equity, cash, drawdown_pct, peak_equity, ts "
+                    "FROM equity_snapshots WHERE strategy=? "
+                    "ORDER BY ts DESC LIMIT 1",
+                    (strategy,),
+                )
+            ).fetchone()
+
+            # Open positions count
+            opn = await (
+                await conn.execute(
+                    "SELECT COUNT(*) AS c FROM positions WHERE strategy=?",
+                    (strategy,),
+                )
+            ).fetchone()
+
+            # Trades + PnL today
+            td = await (
+                await conn.execute(
+                    """
+                    SELECT COUNT(*) AS c, COALESCE(SUM(pnl), 0.0) AS pnl
+                    FROM trades WHERE strategy=? AND exit_ts IS NOT NULL
+                    AND substr(exit_ts,1,10)=?
+                    """,
+                    (strategy, today),
+                )
+            ).fetchone()
+
+            # Signals last hour
+            sigs = await (
+                await conn.execute(
+                    """
+                    SELECT COUNT(*) AS c FROM signals
+                    WHERE strategy=? AND ts >= ?
+                    """,
+                    (strategy, one_hour_ago),
+                )
+            ).fetchone()
+
+            # Anomalies last hour
+            anom = await (
+                await conn.execute(
+                    """
+                    SELECT COUNT(*) AS c FROM anomaly_events
+                    WHERE strategy=? AND ts >= ?
+                    """,
+                    (strategy, one_hour_ago),
+                )
+            ).fetchone()
+
+        return {
+            "strategy": strategy,
+            "equity": float(eq["equity"]) if eq else None,
+            "cash": float(eq["cash"]) if eq else None,
+            "drawdown_pct": float(eq["drawdown_pct"]) if eq else None,
+            "peak_equity": float(eq["peak_equity"]) if eq else None,
+            "last_equity_ts": eq["ts"] if eq else None,
+            "last_bar_ts": eq["ts"] if eq else None,
+            "open_positions": int(opn["c"]) if opn else 0,
+            "trades_today": int(td["c"]) if td else 0,
+            "pnl_today": float(td["pnl"]) if td else 0.0,
+            "signals_last_hour": int(sigs["c"]) if sigs else 0,
+            "anomalies_last_hour": int(anom["c"]) if anom else 0,
         }
 
     # ══════════════════════════════════════════════════════════════════

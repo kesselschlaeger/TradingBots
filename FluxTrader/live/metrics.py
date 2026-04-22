@@ -49,6 +49,7 @@ class _NoOpCollector:
     def set_bar_lag(self, *_a: Any, **_k: Any) -> None: ...
     def set_circuit_breaker(self, *_a: Any, **_k: Any) -> None: ...
     def set_wfo_sharpe(self, *_a: Any, **_k: Any) -> None: ...
+    def update_from_health_snapshot(self, *_a: Any, **_k: Any) -> None: ...
 
     def generate_text(self) -> str:
         return "# prometheus_client not installed or metrics disabled\n"
@@ -196,6 +197,25 @@ class MetricsCollector:
 
     def set_wfo_sharpe(self, strategy: str, window: str, value: float) -> None:
         self._wfo_sharpe.labels(strategy=strategy, window=window).set(float(value))
+
+    # ── DB-Cache Update ──────────────────────────────────────────────
+
+    def update_from_health_snapshot(self, snapshot: dict[str, Any]) -> None:
+        """Aktualisiert Portfolio-Gauges aus einem get_health_snapshot()-Dict.
+
+        Wird vom Runner nach refresh_from_db aufgerufen, damit die
+        Prometheus-Metriken konsistent aus SQLite stammen.
+        """
+        strategy = snapshot.get("strategy", "")
+        if snapshot.get("equity") is not None:
+            self._equity.labels(strategy=strategy).set(
+                float(snapshot["equity"]))
+        if snapshot.get("drawdown_pct") is not None:
+            self._drawdown.labels(strategy=strategy).set(
+                float(snapshot["drawdown_pct"]))
+        if snapshot.get("open_positions") is not None:
+            self._positions.labels(strategy=strategy).set(
+                int(snapshot["open_positions"]))
 
     # ── Export ───────────────────────────────────────────────────────
 

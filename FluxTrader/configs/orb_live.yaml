@@ -59,7 +59,7 @@ strategy:
 broker:
   type: ibkr
   paper: true
-  ibkr_client_id: 9
+  ibkr_client_id: 11
   ibkr_bot_id: Flux_ORB
 
 data:
@@ -69,7 +69,7 @@ data:
 
 notifications:
   enabled: true
-  bot_name: FLUX_ORB_PAPER
+  bot_name: FLUX_ORB
 
 anomaly:
   # IBKR Paper ohne Live-Market-Data liefert haeufig ~15 Min delayed Bars.

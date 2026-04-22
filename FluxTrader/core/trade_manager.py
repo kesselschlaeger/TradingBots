@@ -111,7 +111,10 @@ class TradeManager:
         für probabilistische Auswertungen (Kelly, MIT-Overlay, EV).
         Gibt die neue Trade-ID zurück (als ``trade.metadata['trade_id']``
         hinterlegt), damit ``close_trade`` denselben Datensatz aktua-
-        lisiert."""
+        lisiert.
+
+        Nutzt ``open_trade_atomic`` für atomare Trade+Position+Group
+        Persistierung in einer einzigen DB-Transaktion."""
         self.register(trade)
         if self.state is None:
             return None
@@ -137,8 +140,15 @@ class TradeManager:
         group_name = meta.get("reserve_group") or sig_meta.get("reserve_group")
         reason = meta.get("reason") or sig_meta.get("reason")
 
+        # Reservierungsdaten für MIT-Independence
+        reserve_group_name = group_name
+        reserve_day = None
+        if reserve_group_name:
+            from datetime import date as _date
+            reserve_day = trade.opened_at.date() if hasattr(trade.opened_at, "date") else _date.today()
+
         try:
-            trade_id = await self.state.save_trade(
+            trade_id = await self.state.open_trade_atomic(
                 strategy=trade.strategy_id,
                 symbol=trade.symbol,
                 side=trade.side,
@@ -152,6 +162,9 @@ class TradeManager:
                 group_name=group_name,
                 features_json=sig_features_json,
                 reason=reason,
+                current_price=trade.entry,
+                reserve_group_name=reserve_group_name,
+                reserve_day=reserve_day,
             )
         except Exception as e:  # noqa: BLE001
             log.warning("trade.persist_open_failed",
@@ -159,24 +172,6 @@ class TradeManager:
             return None
 
         trade.metadata["trade_id"] = trade_id
-        # Offene Position spiegeln (Dashboard).
-        try:
-            await self.state.update_or_create_position(
-                strategy=trade.strategy_id,
-                symbol=trade.symbol,
-                side=trade.side,
-                entry_ts=trade.opened_at,
-                entry_price=trade.entry,
-                qty=trade.qty,
-                stop_price=trade.stop,
-                current_price=trade.entry,
-                unrealized_pnl=0.0,
-                unrealized_pnl_pct=0.0,
-                held_minutes=0,
-            )
-        except Exception as e:  # noqa: BLE001
-            log.warning("trade.persist_position_failed",
-                        symbol=trade.symbol, error=str(e))
         return trade_id
 
     def forget(self, symbol: str) -> None:
@@ -196,6 +191,9 @@ class TradeManager:
         Position aus ``positions`` und entfernt ihn aus dem In-Memory-
         TradeManager.
 
+        Nutzt ``close_trade_atomic`` für atomare Trade-Close + Position-
+        DELETE in einer einzigen DB-Transaktion.
+
         ``tracked`` kann explizit übergeben werden, falls der Trade
         zuvor bereits aus dem In-Memory-State entfernt wurde
         (z.B. durch ``reconcile_with_broker``)."""
@@ -212,7 +210,7 @@ class TradeManager:
 
         if self.state is not None:
             try:
-                await self.state.close_trade(
+                await self.state.close_trade_atomic(
                     trade_id=trade_id,
                     strategy=strategy,
                     symbol=symbol,
@@ -225,21 +223,6 @@ class TradeManager:
             except Exception as e:  # noqa: BLE001
                 log.warning("trade.persist_close_failed",
                             symbol=symbol, error=str(e))
-            if strategy:
-                try:
-                    await self.state.remove_position(strategy, symbol)
-                except Exception as e:  # noqa: BLE001
-                    log.warning("trade.remove_position_failed",
-                                symbol=symbol, error=str(e))
-                if pnl is not None:
-                    try:
-                        await self.state.update_daily_record(
-                            day=ts.date(), strategy=strategy,
-                            pnl_delta=float(pnl), symbol=symbol,
-                        )
-                    except Exception as e:  # noqa: BLE001
-                        log.warning("trade.daily_update_failed",
-                                    symbol=symbol, error=str(e))
 
         self.forget(symbol)
 

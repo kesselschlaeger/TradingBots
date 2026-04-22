@@ -6,6 +6,12 @@ Minimaler async HTTP-Server via ``aiohttp`` (mit Fallback auf stdlib
 Broker-Adaptern gefuettert (Writer/Reader-Trennung analog zu
 ``MarketContextService``).
 
+Portfolio-Daten (Equity, Drawdown, Positions, PnL) werden seit dem
+state.py-Refactoring ausschliesslich per ``get_health_snapshot()`` aus
+SQLite gelesen (≤5s TTL-Cache). HealthState ist damit ein reiner
+Read-Cache fuer Portfolio-Metriken. Nur Bar-Lag, Broker-Status und
+Circuit-Breaker kommen weiterhin als In-Memory-Writer vom LiveRunner.
+
 Endpunkte:
   GET /health         Liveness (immer 200 solange der Task laeuft)
   GET /ready          Readiness (Broker connected + letzter Bar < 10 Min)
@@ -18,10 +24,13 @@ import asyncio
 import json
 import time as _time
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Coroutine, Optional
+from typing import Any, Callable, Coroutine, Optional, TYPE_CHECKING
 
 from core.logging import get_logger
 from core.filters import is_market_hours
+
+if TYPE_CHECKING:  # pragma: no cover
+    from live.state import PersistentState
 
 log = get_logger(__name__)
 
@@ -47,7 +56,9 @@ class HealthState:
 
     def __init__(self,
                  on_ready_alert: Optional[Callable[..., Coroutine]] = None,
-                 bar_max_age_seconds: int = _READY_BAR_MAX_AGE_S) -> None:
+                 bar_max_age_seconds: int = _READY_BAR_MAX_AGE_S,
+                 persistent_state: Optional["PersistentState"] = None,
+                 cache_ttl_seconds: float = 5.0) -> None:
         self._start_ts = _time.time()
         self._lock = asyncio.Lock()
         self._bar_max_age_seconds = max(1, int(bar_max_age_seconds))
@@ -76,6 +87,51 @@ class HealthState:
         self._on_ready_alert = on_ready_alert  # Callback für Alerts
         self._last_alert_ts: Optional[float] = None
         self._alert_cooldown_s = 60  # Verhindert Alert-Spam
+
+        # Read-Cache: Portfolio-Daten werden aus SQLite gelesen (TTL-Cache).
+        self._persistent_state = persistent_state
+        self._cache_ttl = max(0.1, float(cache_ttl_seconds))
+        self._db_cache: dict[str, dict[str, Any]] = {}  # strategy → snapshot
+        self._db_cache_ts: dict[str, float] = {}  # strategy → monotonic ts
+
+    # ── DB-Cache (Read-Only) ──────────────────────────────────────────
+
+    async def refresh_from_db(self, strategy: str) -> Optional[dict[str, Any]]:
+        """Liest den Health-Snapshot aus SQLite (≤TTL-Cache).
+
+        Gibt den gecachten/frischen Snapshot zurück oder None falls kein
+        PersistentState konfiguriert ist.
+        """
+        if self._persistent_state is None:
+            return None
+        now = _time.monotonic()
+        cached_ts = self._db_cache_ts.get(strategy, 0.0)
+        if (now - cached_ts) < self._cache_ttl:
+            return self._db_cache.get(strategy)
+
+        try:
+            snap = await self._persistent_state.get_health_snapshot(strategy)
+        except Exception as e:  # noqa: BLE001
+            log.warning("health.db_refresh_failed", strategy=strategy,
+                        error=str(e))
+            return self._db_cache.get(strategy)
+
+        self._db_cache[strategy] = snap
+        self._db_cache_ts[strategy] = now
+
+        # Portfolio-Felder aus DB-Cache in In-Memory-State übernehmen
+        async with self._lock:
+            if snap.get("equity") is not None:
+                self._equity = float(snap["equity"])
+            if snap.get("cash") is not None:
+                self._cash = float(snap["cash"])
+            if snap.get("drawdown_pct") is not None:
+                self._drawdown_pct = float(snap["drawdown_pct"])
+            if snap.get("peak_equity") is not None:
+                self._peak_equity = float(snap["peak_equity"])
+            if snap.get("open_positions") is not None:
+                self._open_positions = int(snap["open_positions"])
+        return snap
 
     # ── Writer ────────────────────────────────────────────────────────
 
@@ -111,6 +167,14 @@ class HealthState:
                                drawdown_pct: float,
                                open_positions: Optional[int] = None,
                                peak_equity: Optional[float] = None) -> None:
+        """Update Portfolio-Daten.
+
+        Wenn ein PersistentState konfiguriert ist, ist dies ein No-Op
+        (Portfolio-Daten kommen dann via refresh_from_db aus SQLite).
+        Ohne PersistentState bleibt das alte Verhalten erhalten.
+        """
+        if self._persistent_state is not None:
+            return  # Portfolio kommt aus DB-Cache
         async with self._lock:
             self._equity = float(equity)
             self._cash = float(cash)

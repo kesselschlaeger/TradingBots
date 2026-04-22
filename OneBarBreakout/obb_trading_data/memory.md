@@ -36,3 +36,9 @@
 
 **2026-04-16 13:25** AMD SELL 19 @ 258.06 | 1-Bar Exit (Morning OPG)
 
+**2026-04-22 19:59** SOXL BUY 47 @ 105.74 | OBB Long: Close 105.74 > 50-Bar-High 99.95 (+5.79%)
+
+**2026-04-22 19:59** TQQQ BUY 83 @ 60.04 | OBB Long: Close 60.04 > 50-Bar-High 58.97 (+1.81%)
+
+**2026-04-22 19:59** MSTR BUY 28 @ 178.43 | OBB Long: Close 178.43 > 50-Bar-High 173.15 (+3.05%)
+
