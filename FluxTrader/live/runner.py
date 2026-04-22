@@ -19,7 +19,7 @@ from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
 
-from core.context import MarketContextService, set_context_service
+from core.context import MarketContextService
 from core.logging import get_logger
 from core.models import AlertLevel, Bar, OrderRequest, OrderSide, Signal
 from core.trade_manager import ManagedTrade, TradeManager
@@ -59,7 +59,7 @@ class LiveRunner:
         self.strategy = strategy
         self.broker = broker
         self.data = data_provider
-        self.ctx = context
+        self._context = context
         self.state = state
         self.notifier = notifier
         self.symbols = [s.upper() for s in symbols]
@@ -114,8 +114,6 @@ class LiveRunner:
         else:
             log.info("runner.no_health_state")
 
-        set_context_service(context)
-
     # ── Lifecycle ──────────────────────────────────────────────────────
 
     async def start(self) -> None:
@@ -125,7 +123,7 @@ class LiveRunner:
         # Account-Snapshot laden
         acct = await self.broker.get_account()
         equity0 = float(acct["equity"])
-        self.ctx.update_account(
+        self._context.update_account(
             equity=equity0,
             cash=float(acct.get("cash", 0)),
             buying_power=float(acct.get("buying_power", 0)),
@@ -336,14 +334,14 @@ class LiveRunner:
 
         self.strategy.reset()
         self.tm.reset()
-        self.ctx.clear_reserved_groups()
+        self._context.clear_reserved_groups()
         await self.state.reset_day(date.today(), strategy=self.strategy.name)
         self._daily_trades_count = 0
 
         # Reserved Groups aus State wiederherstellen (falls Restart mitten am Tag)
         for g in await self.state.reserved_groups(date.today(),
                                                   strategy=self.strategy.name):
-            self.ctx.reserve_group(g)
+            self._context.reserve_group(g)
 
     async def _on_eod_close(self) -> None:
         log.info("runner.eod_close")
@@ -503,7 +501,7 @@ class LiveRunner:
             if spy_df is not None and not spy_df.empty:
                 try:
                     from core.indicators import ensure_daily
-                    self.ctx.set_spy_df(ensure_daily(spy_df))
+                    self._context.set_spy_df(ensure_daily(spy_df))
                     log.info("runner.warmup_spy_loaded",
                              benchmark=benchmark,
                              daily_bars=len(spy_df),
@@ -548,7 +546,7 @@ class LiveRunner:
             self._warmup_last_seen[sym] = py_ts
 
         if entries:
-            self.ctx.set_now(entries[-1][0])
+            self._context.set_now(entries[-1][0])
 
         log.info("runner.warmup_done",
                  bars_loaded=len(entries),
@@ -633,11 +631,11 @@ class LiveRunner:
             bar_ts_tz = bar_ts_tz.replace(tzinfo=timezone.utc)
         warmup_cut = self._warmup_last_seen.get(bar.symbol)
         if warmup_cut is not None and bar_ts_tz <= warmup_cut:
-            self.ctx.set_now(bar.timestamp)
+            self._context.set_now(bar.timestamp)
             self.broker.update_price(bar.symbol, bar.close)
             return
 
-        self.ctx.set_now(bar.timestamp)
+        self._context.set_now(bar.timestamp)
 
         # ── Monitoring: Bar-Lag + Heartbeat ──
         lag_ms = 0.0
@@ -689,7 +687,7 @@ class LiveRunner:
         _own_set = {s.upper() for s in self.symbols} | {s.upper() for s in self.tm.all_symbols()}
         broker_positions = {k: v for k, v in _all_positions.items()
                             if k.upper() in _own_set}
-        self.ctx.set_open_symbols(list(broker_positions.keys()))
+        self._context.set_open_symbols(list(broker_positions.keys()))
 
         closed_symbols = [
             symbol for symbol in tracked_before
@@ -754,7 +752,7 @@ class LiveRunner:
         acct = await self.broker.get_account()
         equity = float(acct["equity"])
         cash = float(acct.get("cash", 0))
-        self.ctx.update_account(
+        self._context.update_account(
             equity=equity,
             cash=cash,
             buying_power=float(acct.get("buying_power", 0)),
@@ -763,7 +761,7 @@ class LiveRunner:
         # Drawdown + Circuit-Breaker-Alerts
         peak = await self.state.update_peak_equity(equity)
         dd_pct = 0.0 if peak <= 0 else (equity - peak) / peak * 100.0
-        positions_count = len(self.ctx.open_symbols)
+        positions_count = len(self._context.open_symbols)
         self.metrics.set_equity(self.strategy.name, equity)
         self.metrics.set_drawdown(self.strategy.name, dd_pct)
         self.metrics.set_open_positions(self.strategy.name, positions_count)
@@ -881,10 +879,10 @@ class LiveRunner:
             return
 
         max_concurrent = int(self.cfg.get("max_concurrent_positions", 0))
-        if max_concurrent > 0 and len(self.ctx.open_symbols) >= max_concurrent:
+        if max_concurrent > 0 and len(self._context.open_symbols) >= max_concurrent:
             log.info("runner.max_concurrent_positions_reached",
                      symbol=sig.symbol,
-                     open_positions=len(self.ctx.open_symbols),
+                     open_positions=len(self._context.open_symbols),
                      limit=max_concurrent)
             return
 
@@ -1012,7 +1010,7 @@ class LiveRunner:
         # Context: Reserve Group
         group = sig.metadata.get("reserve_group")
         if group:
-            self.ctx.reserve_group(group)
+            self._context.reserve_group(group)
             day_key = (sig.timestamp.date()
                        if hasattr(sig.timestamp, "date") else date.today())
             await self.state.reserve_group(group, day_key,

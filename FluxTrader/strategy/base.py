@@ -46,7 +46,7 @@ class BaseStrategy(ABC):
     def __init__(self, config: dict,
                  context: Optional[MarketContextService] = None):
         self.config = config or {}
-        self._context = context
+        self._context = context or get_context_service()
         max_bars = int(self.config.get("max_bars_buffer", _DEFAULT_MAX_BARS))
         self.bars: deque[Bar] = deque(maxlen=max_bars)
         self._status_sink: Optional[StatusSink] = None
@@ -131,7 +131,7 @@ class PairStrategy(ABC):
     def __init__(self, config: dict,
                  context: Optional[MarketContextService] = None):
         self.config = config or {}
-        self._context = context
+        self._context = context or get_context_service()
         self._status_sink: Optional[StatusSink] = None
 
     @property

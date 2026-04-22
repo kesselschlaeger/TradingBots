@@ -311,7 +311,6 @@ async def cmd_live(cfg: AppConfig) -> None:
 
     env = load_env()
     ctx = MarketContextService(initial_capital=cfg.initial_capital)
-    set_context_service(ctx)
 
     strategy = _build_strategy(cfg, ctx)
     broker = _build_broker(cfg)

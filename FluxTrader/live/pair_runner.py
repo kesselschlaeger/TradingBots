@@ -45,7 +45,7 @@ class PairEngine:
         self.strategy = strategy
         self.broker = broker
         self.data = data_provider
-        self.ctx = context
+        self._context = context
         self.ml_filter = ml_filter
         self.cfg = config
         self.health: Optional[HealthState] = health_state
@@ -106,11 +106,11 @@ class PairEngine:
 
     async def run_bar(self, bar_a: Bar, bar_b: Bar) -> Optional[PairSignal]:
         """Verarbeite ein synchrones Bar-Paar."""
-        self.ctx.set_now(bar_a.timestamp)
+        self._context.set_now(bar_a.timestamp)
         self.broker.update_price(bar_a.symbol, bar_a.close)
         self.broker.update_price(bar_b.symbol, bar_b.close)
 
-        snapshot = self.ctx.snapshot()
+        snapshot = self._context.snapshot()
         signal = self.strategy._generate_pair_signal(bar_a, bar_b, snapshot)
 
         if signal.action == "HOLD":
