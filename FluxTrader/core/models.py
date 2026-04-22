@@ -140,6 +140,69 @@ class Trade:
     metadata: dict = field(default_factory=dict)
 
 
+# ── EnrichedTrade (Backtest-Report / Export) ─────────────────────────────
+
+
+@dataclass
+class EnrichedTrade:
+    """Ein vollständiger Trade (Entry + Exit) als eine Zeile.
+
+    Wird von BarByBarEngine nach jedem Trade-Close befüllt.
+    Basis für CSV-Export, Excel-Export und Exit-Reason-Statistik.
+    """
+
+    # ── Identifikation ────────────────────────────────────────────────
+    trade_id: str                          # UUID, eindeutig pro Trade
+    strategy: str                          # "botti", "orb", etc.
+    symbol: str
+
+    # ── Entry ─────────────────────────────────────────────────────────
+    entry_date: datetime
+    entry_price: float
+    shares: int
+    entry_reason: str                      # Signal.metadata["reason"]
+    entry_signal: str                      # Signal.action: "BUY" etc.
+    stop_at_entry: float                   # initialer Stop-Loss-Preis
+    initial_risk_r: float                  # |entry_price - stop_at_entry|
+    initial_risk_usd: float                # shares * initial_risk_r
+    atr_at_entry: float
+    vix_at_entry: float                    # VIX-Spot zum Entry-Zeitpunkt
+    equity_at_entry: float                 # Portfolio-Equity bei Entry
+
+    # ── Exit ──────────────────────────────────────────────────────────
+    exit_date: datetime
+    exit_price: float
+    exit_reason: str                       # stop_loss | take_profit | …
+    hold_days: int                         # Kalendertage
+    hold_trading_days: int                 # Handelstage (exkl. WE)
+
+    # ── PnL & Performance ─────────────────────────────────────────────
+    pnl_gross: float                       # vor Kosten
+    pnl_net: float                         # nach Kommission + Slippage
+    pnl_pct: float                         # pnl_net / (entry * shares)
+    r_multiple: float                      # pnl_net / initial_risk_usd
+    commission: float
+    slippage: float
+
+    # ── Signal-Qualität ───────────────────────────────────────────────
+    strength: float                        # Signal.strength, sonst 0.0
+    ml_confidence: float                   # MLFilter-Wert, 0.5 default
+
+    # ── MAE / MFE ─────────────────────────────────────────────────────
+    mae_pct: float                         # Max Adverse Excursion in %
+    mfe_pct: float                         # Max Favorable Excursion in %
+    mae_r: float                           # MAE in R-Einheiten
+    mfe_r: float                           # MFE in R-Einheiten
+
+    # ── Marktkontext ──────────────────────────────────────────────────
+    benchmark_return_pct: float            # SPY-Return über Haltedauer
+    alpha_pct: float                       # pnl_pct - benchmark_return
+
+    # ── Partial / Re-Entry ────────────────────────────────────────────
+    is_partial: bool = False
+    parent_trade_id: Optional[str] = None
+
+
 # ── Monitoring / Alerts ──────────────────────────────────────────────────
 
 

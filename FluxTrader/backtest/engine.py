@@ -15,6 +15,7 @@ Optimierungen (gegenüber naiver Implementierung):
 from __future__ import annotations
 
 import asyncio
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, time
 from typing import Optional
@@ -27,7 +28,7 @@ from core.context import MarketContextService, set_context_service
 from core.filters import to_et_time
 from core.indicators import compute_indicator_frame, ensure_daily
 from core.logging import get_logger
-from core.models import Bar, OrderRequest, OrderSide, Signal, Trade
+from core.models import Bar, EnrichedTrade, OrderRequest, OrderSide, Signal, Trade
 from core.trade_manager import ManagedTrade, TradeManager
 from execution.paper_adapter import PaperAdapter
 from strategy.base import BaseStrategy
@@ -49,7 +50,7 @@ class BacktestConfig:
     commission: CommissionModel = field(default_factory=CommissionModel)
     # Steuert paper.fill- und trade.register-Logs: im Backtest i.d.R.
     # stoerend (tausende Einzelzeilen), daher default off.
-    log_order_events: bool = False
+    log_order_events: bool = True
 
 
 @dataclass
@@ -59,6 +60,7 @@ class BacktestResult:
     final_equity: float
     initial_capital: float
     bars_processed: int
+    enriched_trades: list[EnrichedTrade] = field(default_factory=list)
     start_ts: Optional[datetime] = None
     end_ts: Optional[datetime] = None
     strategy_name: str = ""
@@ -99,6 +101,24 @@ def _build_timeline(
     return entries, sym_arrays
 
 
+# ── Exit-Reason-Mapping ──────────────────────────────────────────────────
+
+_EXIT_REASON_MAP = {
+    "STOP": "stop_loss",
+    "TARGET": "take_profit",
+    "EOD": "eod",
+    "OBB_NEXT_OPEN": "next_open",
+    "MANUAL": "manual",
+}
+
+
+def _resolve_exit_reason(raw_reason: str, managed: Optional[ManagedTrade]) -> str:
+    """Mapped Engine-Reason auf menschenlesbaren Exit-Grund."""
+    if raw_reason == "STOP" and managed and managed.trailed:
+        return "trailing_stop"
+    return _EXIT_REASON_MAP.get(raw_reason, raw_reason.lower())
+
+
 class BarByBarEngine:
     """Backtest-Engine für eine einzelne Strategie.
 
@@ -134,6 +154,13 @@ class BarByBarEngine:
         self._pending_exit_next_open: dict[str, ManagedTrade] = {}
         set_context_service(context)
 
+        # ── EnrichedTrade-Tracking ──────────────────────────────────
+        # Key: symbol (nur eine Position pro Symbol gleichzeitig)
+        self._trade_tracking: dict[str, dict] = {}
+        self._enriched_trades: list[EnrichedTrade] = []
+        # SPY-Close-Index für Benchmark-Berechnung (wird in run() befüllt)
+        self._spy_closes: Optional[pd.Series] = None
+
     async def run(self,
                   data: dict[str, pd.DataFrame],
                   spy_df: Optional[pd.DataFrame] = None,
@@ -145,6 +172,17 @@ class BarByBarEngine:
             # Intraday-SPY wird einmalig zu Daily aggregiert; spy_df_asof()
             # stellt pro Bar den Look-Ahead-freien Slice bereit.
             self.context.set_spy_df(ensure_daily(spy_df))
+
+        # SPY-Closes für Benchmark-Return (Original-Timeframe)
+        if spy_df is not None and "Close" in spy_df.columns:
+            self._spy_closes = spy_df["Close"]
+        elif "SPY" in data and "Close" in data["SPY"].columns:
+            self._spy_closes = data["SPY"]["Close"]
+        else:
+            self._spy_closes = None
+            if spy_df is None:
+                log.warning("backtest.no_spy_data",
+                            hint="benchmark_return_pct wird 0.0")
 
         # ── Variante A: Indikator-Frames einmal vorab berechnen ──────
         precomputed: dict[str, pd.DataFrame] = {}
@@ -196,8 +234,8 @@ class BarByBarEngine:
             # Cursor setzen (Strategie liest precomputed frame bis hierhin)
             self.context.set_bar_cursor(sym, ridx)
             self.context.set_now(py_ts)
-            # Broker nutzt Bar-Zeit f\u00fcr Trade.timestamp / filled_at statt
-            # wall-clock -- wichtig f\u00fcr Tearsheet und Equity-Curve.
+            # Broker nutzt Bar-Zeit für Trade.timestamp / filled_at statt
+            # wall-clock -- wichtig für Tearsheet und Equity-Curve.
             self.broker.set_sim_clock(py_ts)
             self._update_vix(py_ts, vix_series, vix3m_series)
 
@@ -206,6 +244,9 @@ class BarByBarEngine:
             if last_day is not None and day != last_day:
                 self.context.clear_reserved_groups()
             last_day = day
+
+            # ── MAE/MFE-Update für offenen Trade dieses Symbols ──────
+            self._update_trade_tracking(sym, bar)
 
             # 1) Pending OBB-Exit am nächsten Open (inline, kein await)
             pending = self._pending_exit_next_open.pop(sym, None)
@@ -244,7 +285,12 @@ class BarByBarEngine:
             )
             self._equity_curve.append((py_ts, equity))
 
-        # Final close (selten, async OK)
+        # Verbleibende offene Positionen schließen (EnrichedTrade!)
+        for sym in list(self._trade_tracking.keys()):
+            price = self.broker._market_prices.get(sym, 0.0)
+            if price > 0:
+                self._flatten_sync(sym, price, "MANUAL")
+        # Safety-Net: falls PaperAdapter noch Positionen hat
         await self.broker.close_all_positions()
         final_account = await self.broker.get_account()
 
@@ -259,10 +305,172 @@ class BarByBarEngine:
             final_equity=float(final_account["equity"]),
             initial_capital=self.cfg.initial_capital,
             bars_processed=n_bars,
+            enriched_trades=list(self._enriched_trades),
             start_ts=start_ts,
             end_ts=end_ts,
             **meta,
         )
+
+    # ── MAE/MFE-Tracking pro offenen Trade ──────────────────────────────
+
+    def _start_trade_tracking(
+        self, symbol: str, trade_id: str, entry_price: float,
+        entry_ts: datetime, shares: int, stop: float, side: str,
+        sig: Signal, equity: float,
+    ) -> None:
+        """Initialisiert MAE/MFE-Tracking bei Trade-Eröffnung."""
+        spy_close = self._spy_close_at(entry_ts)
+        self._trade_tracking[symbol] = {
+            "trade_id": trade_id,
+            "entry_price": entry_price,
+            "entry_ts": entry_ts,
+            "shares": shares,
+            "stop": stop,
+            "side": side,
+            "min_price": entry_price,
+            "max_price": entry_price,
+            "spy_entry_close": spy_close,
+            "equity_at_entry": equity,
+            "signal": sig,
+        }
+
+    def _update_trade_tracking(self, symbol: str, bar: Bar) -> None:
+        """Update High/Low-Extrema für MAE/MFE-Berechnung."""
+        tracking = self._trade_tracking.get(symbol)
+        if tracking is None:
+            return
+        tracking["min_price"] = min(tracking["min_price"], bar.low)
+        tracking["max_price"] = max(tracking["max_price"], bar.high)
+
+    def _build_enriched_trade(
+        self, symbol: str, exit_price: float, exit_ts: datetime,
+        exit_reason: str, pnl_net: float, commission: float,
+    ) -> Optional[EnrichedTrade]:
+        """Assembliert EnrichedTrade aus Tracking-Daten + ManagedTrade."""
+        tracking = self._trade_tracking.get(symbol)
+        if tracking is None:
+            return None
+
+        entry_price = tracking["entry_price"]
+        shares = tracking["shares"]
+        stop = tracking["stop"]
+        side = tracking["side"]
+        entry_ts = tracking["entry_ts"]
+        sig: Signal = tracking["signal"]
+
+        initial_risk_r = abs(entry_price - stop) if stop > 0 else 0.0
+        initial_risk_usd = shares * initial_risk_r
+
+        # PnL brutto (ohne Kosten)
+        if side == "long":
+            pnl_gross = (exit_price - entry_price) * shares
+        else:
+            pnl_gross = (entry_price - exit_price) * shares
+
+        cost_basis = entry_price * shares
+        pnl_pct = (pnl_net / cost_basis * 100.0) if cost_basis > 0 else 0.0
+        r_multiple = (pnl_net / initial_risk_usd) if initial_risk_usd > 0 else 0.0
+
+        slippage_total = pnl_gross - pnl_net - commission
+        if slippage_total < 0:
+            slippage_total = 0.0
+
+        # Haltedauer
+        hold_days = max((exit_ts.date() - entry_ts.date()).days, 0) \
+            if hasattr(exit_ts, "date") and hasattr(entry_ts, "date") else 0
+        hold_trading_days = int(np.busday_count(
+            entry_ts.date(), exit_ts.date(),
+        )) if hold_days > 0 else 0
+
+        # MAE / MFE
+        min_p = tracking["min_price"]
+        max_p = tracking["max_price"]
+        if side == "long":
+            mae_pct = ((min_p - entry_price) / entry_price * 100.0
+                       if entry_price > 0 else 0.0)
+            mfe_pct = ((max_p - entry_price) / entry_price * 100.0
+                       if entry_price > 0 else 0.0)
+        else:
+            mae_pct = ((entry_price - max_p) / entry_price * 100.0
+                       if entry_price > 0 else 0.0)
+            mfe_pct = ((entry_price - min_p) / entry_price * 100.0
+                       if entry_price > 0 else 0.0)
+        mae_r = (abs(mae_pct / 100.0 * entry_price) * shares / initial_risk_usd
+                 if initial_risk_usd > 0 else 0.0)
+        mfe_r = (abs(mfe_pct / 100.0 * entry_price) * shares / initial_risk_usd
+                 if initial_risk_usd > 0 else 0.0)
+        # MAE ist negativ (adverse), MFE ist positiv (favorable)
+        if mae_pct > 0:
+            mae_pct = 0.0
+            mae_r = 0.0
+        if mfe_pct < 0:
+            mfe_pct = 0.0
+            mfe_r = 0.0
+
+        # Benchmark-Return
+        spy_entry = tracking["spy_entry_close"]
+        spy_exit = self._spy_close_at(exit_ts)
+        if spy_entry and spy_exit and spy_entry > 0:
+            benchmark_return_pct = (spy_exit - spy_entry) / spy_entry * 100.0
+        else:
+            benchmark_return_pct = 0.0
+        alpha_pct = pnl_pct - benchmark_return_pct
+
+        # Signal-Metadaten
+        entry_reason = sig.metadata.get("reason", "")
+        entry_signal_action = sig.metadata.get("action", "")
+        if not entry_signal_action:
+            entry_signal_action = "BUY" if sig.direction > 0 else "SELL"
+        atr_val = float(sig.metadata.get("atr_at_entry",
+                        sig.metadata.get("atr", 0.0)))
+        vix_val = tracking.get("vix_at_entry", 0.0)
+        strength = float(getattr(sig, "strength", 0.0))
+
+        return EnrichedTrade(
+            trade_id=tracking["trade_id"],
+            strategy=sig.strategy,
+            symbol=symbol,
+            entry_date=entry_ts,
+            entry_price=entry_price,
+            shares=shares,
+            entry_reason=entry_reason,
+            entry_signal=entry_signal_action,
+            stop_at_entry=stop,
+            initial_risk_r=initial_risk_r,
+            initial_risk_usd=initial_risk_usd,
+            atr_at_entry=atr_val,
+            vix_at_entry=vix_val,
+            equity_at_entry=tracking["equity_at_entry"],
+            exit_date=exit_ts,
+            exit_price=exit_price,
+            exit_reason=exit_reason,
+            hold_days=hold_days,
+            hold_trading_days=hold_trading_days,
+            pnl_gross=pnl_gross,
+            pnl_net=pnl_net,
+            pnl_pct=pnl_pct,
+            r_multiple=r_multiple,
+            commission=commission,
+            slippage=slippage_total,
+            strength=strength,
+            ml_confidence=0.5,
+            mae_pct=mae_pct,
+            mfe_pct=mfe_pct,
+            mae_r=mae_r,
+            mfe_r=mfe_r,
+            benchmark_return_pct=benchmark_return_pct,
+            alpha_pct=alpha_pct,
+        )
+
+    def _spy_close_at(self, ts: datetime) -> Optional[float]:
+        """SPY-Close zum Zeitpunkt ts (look-ahead-frei via asof)."""
+        if self._spy_closes is None or self._spy_closes.empty:
+            return None
+        try:
+            val = self._spy_closes.asof(ts)
+            return float(val) if not (isinstance(val, float) and np.isnan(val)) else None
+        except (KeyError, ValueError, TypeError):
+            return None
 
     # ── Sync-Hilfsmethoden (Variante D: kein async im Hot-Loop) ──────
 
@@ -324,11 +532,15 @@ class BarByBarEngine:
         if group:
             self.context.reserve_group(group)
 
+        # Tatsächlichen Fill-Preis aus Broker lesen
+        order_obj = self.broker._orders.get(order_id)
+        filled_price = order_obj.filled_price if order_obj else bar.close
+
         # Im TradeManager registrieren
         trade_side = "long" if sig.direction > 0 else "short"
         managed = ManagedTrade(
             symbol=sig.symbol, side=trade_side,
-            entry=float(sig.metadata.get("entry_price", bar.close)),
+            entry=filled_price,
             stop=float(sig.stop_price or 0.0),
             target=float(sig.target_price) if sig.target_price else None,
             qty=float(self._last_position_qty_sync(sig.symbol)),
@@ -340,19 +552,69 @@ class BarByBarEngine:
         if sig.metadata.get("exit_next_open"):
             self._pending_exit_next_open[sig.symbol] = managed
 
+        # ── EnrichedTrade-Tracking starten ────────────────────────
+        trade_id = uuid.uuid4().hex[:16]
+        vix_spot = self.context._vix_spot
+        self._trade_tracking[sig.symbol] = {
+            "trade_id": trade_id,
+            "entry_price": filled_price,
+            "entry_ts": bar.timestamp,
+            "shares": int(managed.qty),
+            "stop": float(sig.stop_price or 0.0),
+            "side": trade_side,
+            "min_price": min(bar.low, filled_price),
+            "max_price": max(bar.high, filled_price),
+            "spy_entry_close": self._spy_close_at(bar.timestamp),
+            "equity_at_entry": equity,
+            "signal": sig,
+            "vix_at_entry": float(vix_spot) if vix_spot is not None else 0.0,
+        }
+
     def _flatten_sync(self, symbol: str, price: float, reason: str) -> None:
         pos = self.broker.get_position_sync(symbol)
+        managed = self.tm.get(symbol)
+        tracking = self._trade_tracking.get(symbol)
+
         if pos is None:
             self.tm.forget(symbol)
+            self._trade_tracking.pop(symbol, None)
             return
+
         side = OrderSide.SELL if pos.side == "long" else OrderSide.BUY
         exec_price = self.cfg.slippage.apply(price, side)
         self.broker.set_market_price(symbol, exec_price)
+
+        trade_log_before = len(self.broker._trade_log)
         self.broker.submit_order_sync(OrderRequest(
             symbol=symbol, side=side, qty=int(pos.qty),
             order_type="market",
             client_order_id=f"close|{reason}|{symbol}",
         ))
+
+        # PnL + Commission aus dem Trade-Log lesen
+        pnl_net = 0.0
+        commission = 0.0
+        if len(self.broker._trade_log) > trade_log_before:
+            close_trade = self.broker._trade_log[-1]
+            pnl_net = float(close_trade.pnl)
+            commission = float(close_trade.fees)
+
+        # EnrichedTrade assemblieren (VOR tm.forget!)
+        exit_label = _resolve_exit_reason(reason, managed)
+        exit_ts = self.broker._now()
+        if tracking is not None:
+            enriched = self._build_enriched_trade(
+                symbol=symbol,
+                exit_price=exec_price,
+                exit_ts=exit_ts,
+                exit_reason=exit_label,
+                pnl_net=pnl_net,
+                commission=commission,
+            )
+            if enriched is not None:
+                self._enriched_trades.append(enriched)
+            self._trade_tracking.pop(symbol, None)
+
         self.tm.forget(symbol)
         self._pending_exit_next_open.pop(symbol, None)
         self.context.set_open_symbols(

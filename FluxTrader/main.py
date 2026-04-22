@@ -121,7 +121,13 @@ def _build_data_provider(cfg: AppConfig):
 
 async def cmd_backtest(cfg: AppConfig) -> None:
     from backtest.engine import BacktestConfig, BarByBarEngine
-    from backtest.report import build_tearsheet, format_tearsheet
+    from backtest.report import (
+        build_exit_reason_stats,
+        build_tearsheet,
+        export_trades,
+        format_exit_reason_stats,
+        format_tearsheet,
+    )
     from execution.paper_adapter import PaperAdapter
 
     ctx = MarketContextService(initial_capital=cfg.initial_capital)
@@ -178,9 +184,33 @@ async def cmd_backtest(cfg: AppConfig) -> None:
         strategy_name=result.strategy_name,
         allow_shorts=result.allow_shorts,
         mit_enabled=result.mit_enabled,
+        enriched_trades=result.enriched_trades or None,
     ))
     print(f"Bars processed: {result.bars_processed}")
     print(f"Trades: {len(result.trades)}")
+
+    # ── Exit-Reason-Statistik ────────────────────────────────────────
+    exp = cfg.backtest_export
+    if exp.show_exit_stats and result.enriched_trades:
+        stats_df = build_exit_reason_stats(result.enriched_trades)
+        if not stats_df.empty:
+            print()
+            print(format_exit_reason_stats(
+                stats_df, total_trades=len(result.enriched_trades),
+            ))
+
+    # ── Trade-Export (CSV / Excel) ───────────────────────────────────
+    if exp.export_trades != "none" and result.enriched_trades:
+        ts_stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        base_name = f"{cfg.strategy.name}_backtest_{ts_stamp}"
+        paths = export_trades(
+            result.enriched_trades,
+            output_dir=Path(exp.export_dir),
+            fmt=exp.export_trades,
+            filename_base=base_name,
+        )
+        for p in paths:
+            print(f"Export: {p}")
 
 
 def cmd_wfo(cfg: AppConfig) -> None:
@@ -412,10 +442,21 @@ def main() -> None:
     parser.add_argument("--log-json", action="store_true")
     parser.add_argument("--port", type=int, default=None,
                         help="Port fuer dashboard-Kommando (Default aus Config)")
+    parser.add_argument("--export-trades", default=None,
+                        choices=["csv", "excel", "both"],
+                        help="Trade-Export-Format (nur backtest)")
+    parser.add_argument("--export-dir", default=None,
+                        help="Zielverzeichnis fuer Trade-Export")
     args = parser.parse_args()
 
     setup_logging(level=args.log_level.upper(), json_output=args.log_json)
     cfg = load_config(args.config)
+
+    # CLI-Overrides für Backtest-Export
+    if args.export_trades:
+        cfg.backtest_export.export_trades = args.export_trades
+    if args.export_dir:
+        cfg.backtest_export.export_dir = Path(args.export_dir)
 
     if args.command in ("live", "paper"):
         asyncio.run(cmd_live(cfg))

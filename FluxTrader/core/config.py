@@ -110,6 +110,15 @@ class AnomalyConfig(BaseModel):
     )
 
 
+class BacktestExportConfig(BaseModel):
+    """Trade-Export-Optionen für den Backtest-Modus."""
+    model_config = ConfigDict(extra="allow")
+
+    export_trades: str = "none"          # "none" | "csv" | "excel" | "both"
+    export_dir: Path = Path("trading_data/exports")
+    show_exit_stats: bool = True         # Exit-Reason-Tabelle in Konsole
+
+
 class AppConfig(BaseModel):
     """Wurzel-Konfiguration. extra='allow' -> unbekannte Keys werden durchgereicht."""
     model_config = ConfigDict(extra="allow")
@@ -122,6 +131,9 @@ class AppConfig(BaseModel):
     monitoring: MonitoringConfig = Field(default_factory=MonitoringConfig)
     alerts: AlertsConfig = Field(default_factory=AlertsConfig)
     anomaly: AnomalyConfig = Field(default_factory=AnomalyConfig)
+    backtest_export: BacktestExportConfig = Field(
+        default_factory=BacktestExportConfig,
+    )
     initial_capital: float = 10_000.0
     currency: str = "USD"
     benchmark: str = "SPY"

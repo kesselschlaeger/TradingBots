@@ -37,7 +37,7 @@ strategy:
     time_decay_brackets: [[30, 1.0], [90, 0.85], [180, 0.65]]
     time_decay_late_factor: 0.40
 
-    use_mit_probabilistic_overlay: true
+    use_mit_probabilistic_overlay: false
     mit_ev_threshold_r: 0.30
     mit_kelly_fraction: 0.50
     mit_min_strength: 0.25
