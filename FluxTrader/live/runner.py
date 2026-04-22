@@ -472,31 +472,42 @@ class LiveRunner:
             log.warning("runner.warmup_bulk_failed", error=str(e))
             return
 
-        # SPY/Benchmark nur laden wenn die Strategie-Config explizit
-        # use_trend_filter=True setzt ODER benchmark explizit konfiguriert ist.
-        # Strategien ohne Trend-Filter (z. B. OBB) brauchen kein SPY.
+        # SPY/Benchmark nur laden wenn use_trend_filter=True ODER benchmark
+        # explizit gesetzt ist. OBB und andere filterlose Strategien brauchen
+        # kein SPY.
         needs_spy = (
             bool(self.cfg.get("use_trend_filter", False))
             or "benchmark" in self.cfg
         )
         if needs_spy:
             benchmark = str(self.cfg.get("benchmark", "SPY")).upper()
-            spy_df = data.get(benchmark)
-            if spy_df is None or spy_df.empty:
-                try:
-                    spy_df = await self.data.get_bars(
-                        benchmark, start, end, tf,
-                    )
-                except Exception as e:  # noqa: BLE001
-                    log.warning("runner.warmup_spy_failed",
-                                benchmark=benchmark, error=str(e))
-                    spy_df = None
+
+            # Für den EMA-Trend-Filter werden mindestens trend_ema_period
+            # Daily-Bars benötigt. warmup_days (typisch 5) reicht nach
+            # Resampling von 5-Min auf Daily nicht aus (5 Tage → 5 Bars,
+            # EMA(20) nicht sinnvoll). Daher: immer mit Daily-Timeframe
+            # und eigenem Lookback laden.
+            ema_period = int(self.cfg.get("trend_ema_period", 20))
+            spy_daily_days = max(warmup_days, ema_period + 15)
+            spy_start = end - timedelta(days=spy_daily_days)
+
+            spy_df = None
+            try:
+                spy_df = await self.data.get_bars(
+                    benchmark, spy_start, end, "1Day",
+                )
+            except Exception as e:  # noqa: BLE001
+                log.warning("runner.warmup_spy_failed",
+                            benchmark=benchmark, error=str(e))
+
             if spy_df is not None and not spy_df.empty:
                 try:
                     from core.indicators import ensure_daily
                     self.ctx.set_spy_df(ensure_daily(spy_df))
                     log.info("runner.warmup_spy_loaded",
-                             benchmark=benchmark, bars=len(spy_df))
+                             benchmark=benchmark,
+                             daily_bars=len(spy_df),
+                             lookback_days=spy_daily_days)
                 except Exception as e:  # noqa: BLE001
                     log.warning("runner.warmup_spy_set_failed", error=str(e))
 
