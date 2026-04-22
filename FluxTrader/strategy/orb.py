@@ -321,8 +321,8 @@ class ORBStrategy(BaseStrategy):
             return []
 
         # MIT-Independence-Guard (Cross-Symbol via Context)
-        if (cfg.get("use_mit_probabilistic_overlay", False)
-                and cfg.get("use_mit_independence_guard", True)):
+        # Läuft unabhängig vom MIT-Overlay — verhindert korrelierte Positionen
+        if cfg.get("use_mit_independence_guard", True):
             groups = cfg.get("mit_correlation_groups", {})
             blocked, reason = mit_independence_blocked(
                 symbol,
