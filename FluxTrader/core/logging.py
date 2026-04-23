@@ -24,6 +24,14 @@ def setup_logging(level: str = "INFO", json_output: bool = False) -> None:
     for noisy in ("httpx", "httpcore", "aiohttp.access"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
 
+    # ib_insync.wrapper emittiert je Tick updatePortfolio-/position-Blöcke
+    # auf INFO – in einem Live-Lauf ergibt das mehrere identische Dumps pro
+    # Minute. ib_insync.ib auf WARNING hebt Verbindungs-Noise (managedAccounts,
+    # error 2104/2106 Farm-Connection-OK) raus; echte Fehler bleiben sichtbar.
+    for noisy in ("ib_insync", "ib_insync.wrapper", "ib_insync.ib",
+                  "ib_insync.client", "ib_insync.ticker"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+
     processors: list = [
         structlog.contextvars.merge_contextvars,
         structlog.processors.add_log_level,

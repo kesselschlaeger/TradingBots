@@ -100,6 +100,9 @@ class IBKRDataProvider(DataProvider):
         port: Optional[int] = None,
         client_id: Optional[int] = None,
         use_rth: bool = True,
+        fetch_timeout_s: float = 45.0,
+        pacing_sleep_s: float = 0.3,
+        max_retries: int = 2,
     ):
         if not IBKR_AVAILABLE:
             raise RuntimeError("ib_insync fehlt – pip install ib_insync")
@@ -114,6 +117,13 @@ class IBKRDataProvider(DataProvider):
                 client_id = int(os.getenv("IBKR_CLIENT_ID", "1")) + 100
         self._client_id = client_id
         self._use_rth = use_rth
+        self._fetch_timeout_s = float(
+            os.getenv("IBKR_DATA_TIMEOUT_S", fetch_timeout_s)
+        )
+        self._pacing_sleep_s = float(
+            os.getenv("IBKR_DATA_PACING_S", pacing_sleep_s)
+        )
+        self._max_retries = int(os.getenv("IBKR_DATA_MAX_RETRIES", max_retries))
 
         self.ib = IB()
         try:
@@ -166,15 +176,18 @@ class IBKRDataProvider(DataProvider):
             log.warning("ibkr_data.reconnect")
             self._connect_sync()
 
-    async def _run(self, func, *args, **kwargs):
+    async def _run(self, func, *args, timeout: Optional[float] = None, **kwargs):
         loop = asyncio.get_event_loop()
+        effective_timeout = timeout if timeout is not None else self._fetch_timeout_s
 
         def call():
             self._ensure_thread_event_loop()
             self._ensure_connected()
             return func(*args, **kwargs)
 
-        return await loop.run_in_executor(None, call)
+        return await asyncio.wait_for(
+            loop.run_in_executor(None, call), timeout=effective_timeout
+        )
 
     async def get_bars(
         self,
@@ -204,12 +217,38 @@ class IBKRDataProvider(DataProvider):
             )
             return util.df(bars)
 
-        try:
-            raw = await self._run(_fetch)
-            return _normalize_df(raw, start, end)
-        except Exception as e:  # noqa: BLE001
-            log.warning("ibkr_data.fetch_failed", symbol=symbol, error=str(e))
-            return pd.DataFrame()
+        # Retry mit exponentiellem Backoff. IBKR-Pacing-Hits äußern sich als
+        # Timeout (Antwort wird gequeued). Ein zweiter Versuch nach kurzer
+        # Pause kommt fast immer durch.
+        last_err: Optional[str] = None
+        for attempt in range(self._max_retries + 1):
+            try:
+                raw = await self._run(_fetch)
+                return _normalize_df(raw, start, end)
+            except asyncio.TimeoutError:
+                last_err = "timeout"
+                if attempt < self._max_retries:
+                    backoff = self._pacing_sleep_s * (2 ** attempt) + 1.0
+                    log.warning(
+                        "ibkr_data.fetch_timeout_retry",
+                        symbol=symbol,
+                        attempt=attempt + 1,
+                        backoff_s=round(backoff, 2),
+                        timeout_s=self._fetch_timeout_s,
+                    )
+                    await asyncio.sleep(backoff)
+                    continue
+                log.warning(
+                    "ibkr_data.fetch_timeout",
+                    symbol=symbol,
+                    timeout_s=self._fetch_timeout_s,
+                    attempts=attempt + 1,
+                )
+                return pd.DataFrame()
+            except Exception as e:  # noqa: BLE001
+                log.warning("ibkr_data.fetch_failed", symbol=symbol, error=str(e))
+                return pd.DataFrame()
+        return pd.DataFrame()
 
     async def get_bars_bulk(
         self,
@@ -219,7 +258,12 @@ class IBKRDataProvider(DataProvider):
         timeframe: str = "5Min",
     ) -> dict[str, pd.DataFrame]:
         result: dict[str, pd.DataFrame] = {}
-        for sym in symbols:
+        for idx, sym in enumerate(symbols):
+            # Pacing-Sleep zwischen Requests: IBKR limitiert Historical-Data
+            # (Richtwert ≤60 Requests/10 min bei Intraday-Bars). Ohne Pause
+            # kommt es bei längeren Watchlists zu Timeouts durch Request-Queueing.
+            if idx > 0 and self._pacing_sleep_s > 0:
+                await asyncio.sleep(self._pacing_sleep_s)
             df = await self.get_bars(sym, start, end, timeframe)
             if not df.empty:
                 result[sym] = df
@@ -259,7 +303,11 @@ class IBKRDataProvider(DataProvider):
             end = datetime.now(timezone.utc)
             start = end - timedelta(minutes=30)
             for sym in symbols:
-                df = await self.get_bars(sym, start, end, timeframe)
+                try:
+                    df = await self.get_bars(sym, start, end, timeframe)
+                except Exception as e:  # noqa: BLE001
+                    log.warning("ibkr_data.stream_symbol_error", symbol=sym, error=str(e))
+                    continue
                 if df.empty:
                     continue
 
