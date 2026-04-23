@@ -103,6 +103,9 @@ class TradeManager:
         self,
         trade: ManagedTrade,
         signal: Optional["BaseSignal"] = None,
+        bot_name: Optional[str] = None,
+        broker_order_id: Optional[str] = None,
+        order_reference: Optional[str] = None,
     ) -> Optional[int]:
         """Registriert + persistiert den Trade in der zentralen DB.
 
@@ -139,6 +142,11 @@ class TradeManager:
         )
         group_name = meta.get("reserve_group") or sig_meta.get("reserve_group")
         reason = meta.get("reason") or sig_meta.get("reason")
+        entry_signal = (
+            sig_meta.get("entry_signal")
+            or sig_meta.get("signal")
+            or ("LONG" if trade.side == "long" else "SHORT")
+        )
 
         # Reservierungsdaten für MIT-Independence
         reserve_group_name = group_name
@@ -150,6 +158,7 @@ class TradeManager:
         try:
             trade_id = await self.state.open_trade_atomic(
                 strategy=trade.strategy_id,
+                bot_name=bot_name,
                 symbol=trade.symbol,
                 side=trade.side,
                 entry_ts=trade.opened_at,
@@ -163,6 +172,9 @@ class TradeManager:
                 features_json=sig_features_json,
                 reason=reason,
                 current_price=trade.entry,
+                entry_signal=str(entry_signal),
+                broker_order_id=(str(broker_order_id) if broker_order_id else None),
+                order_reference=(str(order_reference) if order_reference else None),
                 reserve_group_name=reserve_group_name,
                 reserve_day=reserve_day,
             )

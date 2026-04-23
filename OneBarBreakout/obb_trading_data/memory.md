@@ -42,3 +42,19 @@
 
 **2026-04-22 19:59** MSTR BUY 28 @ 178.43 | OBB Long: Close 178.43 > 50-Bar-High 173.15 (+3.05%)
 
+**2026-04-23 13:30** AMD SELL 15 @ 300.55 | 1-Bar Exit (Morning DAY)
+
+**2026-04-23 13:30** AVGO SELL 11 @ 421.36 | 1-Bar Exit (Morning DAY)
+
+**2026-04-23 13:30** MRVL SELL 29 @ 158.78 | 1-Bar Exit (Morning DAY)
+
+**2026-04-23 13:30** MSTR SELL 26 @ 176.17 | 1-Bar Exit (Morning DAY)
+
+**2026-04-23 13:30** MU SELL 18 @ 479.02 | 1-Bar Exit (Morning DAY)
+
+**2026-04-23 13:30** SNDK SELL 4 @ 943.47 | 1-Bar Exit (Morning DAY)
+
+**2026-04-23 13:30** SOXL SELL 44 @ 108.34 | 1-Bar Exit (Morning DAY)
+
+**2026-04-23 13:30** TQQQ SELL 78 @ 59.52 | 1-Bar Exit (Morning DAY)
+

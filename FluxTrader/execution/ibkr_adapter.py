@@ -222,10 +222,19 @@ class IBKRAdapter(BrokerPort):
                     or getattr(p, "unrealizedPnl", None)
                     or 0.0
                 )
+                entry_price = float(p.avgCost)
+                abs_qty = abs(qty)
+                if abs_qty > 0:
+                    if side == "long":
+                        current_price = entry_price + (float(unrealized) / abs_qty)
+                    else:
+                        current_price = entry_price - (float(unrealized) / abs_qty)
+                else:
+                    current_price = entry_price
                 out[sym] = Position(
                     symbol=sym, qty=abs(qty), side=side,
-                    entry_price=float(p.avgCost),
-                    current_price=float(p.avgCost),
+                    entry_price=entry_price,
+                    current_price=float(current_price),
                     unrealized_pnl=float(unrealized),
                 )
             return out

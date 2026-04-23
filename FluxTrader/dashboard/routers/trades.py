@@ -17,6 +17,7 @@ router = APIRouter(tags=["trades"])
 async def list_trades(
     request: Request,
     strategy: Optional[str] = None,
+    bot_name: Optional[str] = None,
     symbol: Optional[str] = None,
     since: Optional[str] = Query(None, description="YYYY-MM-DD"),
     until: Optional[str] = Query(None, description="YYYY-MM-DD"),
@@ -58,6 +59,7 @@ async def list_trades(
 
     trades = await state.get_trades(
         strategy=strategy if strategy else None,
+        bot_name=bot_name if bot_name else None,
         symbol=symbol if symbol else None,
         since=start_date,
         until=end_date,
@@ -71,6 +73,7 @@ async def list_trades(
         result.append({
             "id": t.get("id"),
             "strategy": t.get("strategy"),
+            "bot_name": t.get("bot_name") or t.get("strategy"),
             "symbol": t.get("symbol"),
             "side": t.get("side"),
             "entry_ts": t.get("entry_ts"),

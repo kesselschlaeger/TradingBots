@@ -24,6 +24,7 @@ from core.trade_manager import ManagedTrade, TradeManager
 from data.providers.base import DataProvider
 from execution.port import BrokerPort
 from live.health import HealthState
+from live.state import PersistentState
 from strategy.base import PairStrategy
 
 log = get_logger(__name__)
@@ -39,6 +40,7 @@ class PairEngine:
         data_provider: DataProvider,
         context: MarketContextService,
         ml_filter: MLFilter,
+        state: PersistentState,
         config: dict,
         health_state: Optional[HealthState] = None,
     ):
@@ -47,8 +49,10 @@ class PairEngine:
         self.data = data_provider
         self._context = context
         self.ml_filter = ml_filter
+        self.state = state
         self.cfg = config
         self.health: Optional[HealthState] = health_state
+        self._adapter_name = type(broker).__name__.replace("Adapter", "").lower()
 
         self.tm = TradeManager(
             use_trailing=False,
@@ -94,6 +98,34 @@ class PairEngine:
                 last_ts = bar_a.timestamp
 
                 await self.run_bar(bar_a, bar_b)
+                lag_ms = max(
+                    0.0,
+                    (datetime.now(timezone.utc) - bar_a.timestamp.astimezone(timezone.utc)).total_seconds() * 1000.0,
+                ) if bar_a.timestamp.tzinfo is not None else max(
+                    0.0,
+                    (datetime.now(timezone.utc) - bar_a.timestamp.replace(tzinfo=timezone.utc)).total_seconds() * 1000.0,
+                )
+
+                if self.health is not None:
+                    await self.health.set_last_bar(self.strategy.name, bar_a.timestamp, lag_ms)
+
+                await self.state.upsert_bot_heartbeat(
+                    strategy=self.strategy.name,
+                    bot_name=self.strategy.name,
+                    last_bar_ts=bar_a.timestamp,
+                    last_bar_lag_ms=lag_ms,
+                    broker_connected=(
+                        self.health.is_broker_connected() if self.health is not None else True
+                    ),
+                    broker_adapter=self._adapter_name,
+                    circuit_breaker=(
+                        self.health.is_circuit_breaker_active() if self.health is not None else False
+                    ),
+                    symbol_status=(
+                        self.health.get_symbol_status(self.strategy.name)
+                        if self.health is not None else {}
+                    ),
+                )
 
             except asyncio.CancelledError:
                 break
@@ -101,6 +133,17 @@ class PairEngine:
                 log.error("pair_engine.error", error=str(e))
 
             await asyncio.sleep(poll_interval)
+
+        try:
+            await self.state.upsert_bot_heartbeat(
+                strategy=self.strategy.name,
+                bot_name=self.strategy.name,
+                broker_connected=False,
+                circuit_breaker=False,
+                broker_adapter=self._adapter_name,
+            )
+        except Exception as e:  # noqa: BLE001
+            log.warning("pair_engine.heartbeat_shutdown_failed", error=str(e))
 
         log.info("pair_engine.stopped")
 

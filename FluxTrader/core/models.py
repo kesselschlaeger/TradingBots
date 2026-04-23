@@ -297,6 +297,10 @@ class PositionRecord(BaseModel):
     unrealized_pnl: Optional[float] = None
     unrealized_pnl_pct: Optional[float] = None
     held_minutes: Optional[int] = None
+    entry_signal: Optional[str] = None
+    entry_reason: Optional[str] = None
+    broker_order_id: Optional[str] = None
+    order_reference: Optional[str] = None
 
 
 class SignalRecord(BaseModel):

@@ -94,6 +94,7 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
     CREATE TABLE IF NOT EXISTS trades (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         strategy TEXT NOT NULL,
+        bot_name TEXT,
         symbol TEXT NOT NULL,
         side TEXT NOT NULL,
         entry_ts TEXT NOT NULL,
@@ -140,6 +141,10 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
         unrealized_pnl REAL,
         unrealized_pnl_pct REAL,
         held_minutes INTEGER,
+        entry_signal TEXT,
+        entry_reason TEXT,
+        broker_order_id TEXT,
+        order_reference TEXT,
         UNIQUE (strategy, symbol)
     )
     """,
@@ -169,6 +174,19 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
         context_json TEXT
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS bot_heartbeat (
+        strategy TEXT PRIMARY KEY,
+        bot_name TEXT,
+        last_bar_ts TEXT,
+        last_bar_lag_ms REAL,
+        broker_connected INTEGER NOT NULL DEFAULT 0,
+        broker_adapter TEXT NOT NULL DEFAULT '',
+        circuit_breaker INTEGER NOT NULL DEFAULT 0,
+        symbol_status_json TEXT NOT NULL DEFAULT '{}',
+        updated_at TEXT NOT NULL
+    )
+    """,
 )
 
 _INDEX_STATEMENTS: tuple[str, ...] = (
@@ -188,6 +206,8 @@ _INDEX_STATEMENTS: tuple[str, ...] = (
     "ON anomaly_events(strategy, ts)",
     "CREATE INDEX IF NOT EXISTS idx_daily_strategy_day "
     "ON daily(strategy, day)",
+    "CREATE INDEX IF NOT EXISTS idx_bot_heartbeat_updated_at "
+    "ON bot_heartbeat(updated_at)",
     # Neuer Index für daily_pnl/trades_today-Queries auf trades-Tabelle
     "CREATE INDEX IF NOT EXISTS idx_trades_strategy_exit_day "
     "ON trades(strategy, substr(exit_ts,1,10))",
@@ -236,6 +256,11 @@ class PersistentState:
                 await self._migrate_account(conn)
                 # positions: trade_id FK hinzufügen.
                 await self._migrate_positions_trade_id(conn)
+                # positions: Zusatz-Metadaten (Signal/Reason/Refs) hinzufügen.
+                await self._migrate_positions_metadata(conn)
+                # trades/bot_heartbeat: bot_name-Spalte hinzufügen.
+                await self._migrate_trade_bot_name(conn)
+                await self._migrate_heartbeat_bot_name(conn)
 
                 for stmt in _SCHEMA_STATEMENTS:
                     await conn.execute(stmt)
@@ -383,6 +408,10 @@ class PersistentState:
                 unrealized_pnl REAL,
                 unrealized_pnl_pct REAL,
                 held_minutes INTEGER,
+                entry_signal TEXT,
+                entry_reason TEXT,
+                broker_order_id TEXT,
+                order_reference TEXT,
                 UNIQUE (strategy, symbol)
             )
             """
@@ -392,15 +421,47 @@ class PersistentState:
             INSERT INTO positions (
                 id, strategy, symbol, side, entry_ts, entry_price, qty,
                 stop_price, last_update_ts, current_price,
-                unrealized_pnl, unrealized_pnl_pct, held_minutes
+                unrealized_pnl, unrealized_pnl_pct, held_minutes,
+                entry_signal, entry_reason, broker_order_id, order_reference
             )
             SELECT id, strategy, symbol, side, entry_ts, entry_price, qty,
                    stop_price, last_update_ts, current_price,
-                   unrealized_pnl, unrealized_pnl_pct, held_minutes
+                   unrealized_pnl, unrealized_pnl_pct, held_minutes,
+                   NULL, NULL, NULL, NULL
             FROM positions_legacy
             """
         )
         await conn.execute("DROP TABLE positions_legacy")
+
+    async def _migrate_positions_metadata(self, conn: Any) -> None:
+        """positions: zusätzliche Entry-Metadaten-Spalten ergänzen."""
+        cur = await conn.execute("PRAGMA table_info(positions)")
+        cols = {row[1] for row in await cur.fetchall()}
+        if not cols:
+            return
+
+        if "entry_signal" not in cols:
+            await conn.execute("ALTER TABLE positions ADD COLUMN entry_signal TEXT")
+        if "entry_reason" not in cols:
+            await conn.execute("ALTER TABLE positions ADD COLUMN entry_reason TEXT")
+        if "broker_order_id" not in cols:
+            await conn.execute("ALTER TABLE positions ADD COLUMN broker_order_id TEXT")
+        if "order_reference" not in cols:
+            await conn.execute("ALTER TABLE positions ADD COLUMN order_reference TEXT")
+
+    async def _migrate_trade_bot_name(self, conn: Any) -> None:
+        """trades: bot_name-Spalte ergänzen."""
+        cur = await conn.execute("PRAGMA table_info(trades)")
+        cols = {row[1] for row in await cur.fetchall()}
+        if cols and "bot_name" not in cols:
+            await conn.execute("ALTER TABLE trades ADD COLUMN bot_name TEXT")
+
+    async def _migrate_heartbeat_bot_name(self, conn: Any) -> None:
+        """bot_heartbeat: bot_name-Spalte ergänzen."""
+        cur = await conn.execute("PRAGMA table_info(bot_heartbeat)")
+        cols = {row[1] for row in await cur.fetchall()}
+        if cols and "bot_name" not in cols:
+            await conn.execute("ALTER TABLE bot_heartbeat ADD COLUMN bot_name TEXT")
 
     async def init(self) -> None:
         """Abwärtskompatibler Alias für ``ensure_schema``."""
@@ -417,6 +478,7 @@ class PersistentState:
         self,
         *,
         strategy: str,
+        bot_name: Optional[str] = None,
         symbol: str,
         side: str,
         entry_ts: datetime | str,
@@ -437,13 +499,13 @@ class PersistentState:
                 cur = await conn.execute(
                     """
                     INSERT INTO trades (
-                        strategy, symbol, side, entry_ts, entry_price, qty,
+                        strategy, bot_name, symbol, side, entry_ts, entry_price, qty,
                         stop_price, signal_strength, mit_qty_factor,
                         ev_estimate, group_name, features_json, reason
-                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                     """,
                     (
-                        strategy, symbol, side, ts, float(entry_price),
+                        strategy, bot_name, symbol, side, ts, float(entry_price),
                         float(qty), stop_price, signal_strength,
                         mit_qty_factor, ev_estimate, group_name,
                         features_json, reason,
@@ -559,6 +621,10 @@ class PersistentState:
         unrealized_pnl_pct: Optional[float] = None,
         held_minutes: Optional[int] = None,
         trade_id: Optional[int] = None,
+        entry_signal: Optional[str] = None,
+        entry_reason: Optional[str] = None,
+        broker_order_id: Optional[str] = None,
+        order_reference: Optional[str] = None,
     ) -> None:
         last = _iso(datetime.now(timezone.utc))
         entry_iso = _iso(entry_ts) if entry_ts is not None else None
@@ -576,14 +642,17 @@ class PersistentState:
                             trade_id, strategy, symbol, side, entry_ts,
                             entry_price, qty, stop_price, last_update_ts,
                             current_price, unrealized_pnl, unrealized_pnl_pct,
-                            held_minutes
-                        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+                            held_minutes, entry_signal, entry_reason,
+                            broker_order_id, order_reference
+                        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                         """,
                         (
                             trade_id, strategy, symbol, side, entry_iso,
                             entry_price, qty, stop_price, last,
                             current_price, unrealized_pnl,
                             unrealized_pnl_pct, held_minutes,
+                            entry_signal, entry_reason,
+                            broker_order_id, order_reference,
                         ),
                     )
                 else:
@@ -600,13 +669,20 @@ class PersistentState:
                             current_price=COALESCE(?, current_price),
                             unrealized_pnl=COALESCE(?, unrealized_pnl),
                             unrealized_pnl_pct=COALESCE(?, unrealized_pnl_pct),
-                            held_minutes=COALESCE(?, held_minutes)
+                            held_minutes=COALESCE(?, held_minutes),
+                            entry_signal=COALESCE(?, entry_signal),
+                            entry_reason=COALESCE(?, entry_reason),
+                            broker_order_id=COALESCE(?, broker_order_id),
+                            order_reference=COALESCE(?, order_reference)
                         WHERE id=?
                         """,
                         (
                             trade_id, side, entry_iso, entry_price, qty,
                             stop_price, last, current_price, unrealized_pnl,
-                            unrealized_pnl_pct, held_minutes, row["id"],
+                            unrealized_pnl_pct, held_minutes,
+                            entry_signal, entry_reason,
+                            broker_order_id, order_reference,
+                            row["id"],
                         ),
                     )
                 await conn.commit()
@@ -655,6 +731,60 @@ class PersistentState:
                 )
                 await conn.commit()
                 return int(cur.lastrowid or 0)
+
+    async def upsert_bot_heartbeat(
+        self,
+        *,
+        strategy: str,
+        bot_name: str = "",
+        last_bar_ts: Optional[datetime | str] = None,
+        last_bar_lag_ms: Optional[float] = None,
+        broker_connected: bool = False,
+        broker_adapter: str = "",
+        circuit_breaker: bool = False,
+        symbol_status: Optional[dict] = None,
+    ) -> None:
+        """UPSERT der Heartbeat-Zeile fuer eine Strategie."""
+        last_bar_ts_iso: Optional[str] = None
+        if last_bar_ts is not None:
+            if isinstance(last_bar_ts, str):
+                last_bar_ts_iso = last_bar_ts
+            else:
+                last_bar_ts_iso = _iso(last_bar_ts)
+        status_json = "{}"
+        if symbol_status is not None:
+            try:
+                status_json = json.dumps(symbol_status, default=str)
+            except (TypeError, ValueError):
+                status_json = "{}"
+
+        async with self._conn() as conn:
+            await conn.execute(
+                """
+                INSERT OR REPLACE INTO bot_heartbeat (
+                    strategy,
+                    bot_name,
+                    last_bar_ts,
+                    last_bar_lag_ms,
+                    broker_connected,
+                    broker_adapter,
+                    circuit_breaker,
+                    symbol_status_json,
+                    updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                """,
+                (
+                    strategy,
+                    str(bot_name or ""),
+                    last_bar_ts_iso,
+                    float(last_bar_lag_ms) if last_bar_lag_ms is not None else None,
+                    int(bool(broker_connected)),
+                    str(broker_adapter or ""),
+                    int(bool(circuit_breaker)),
+                    status_json,
+                ),
+            )
+            await conn.commit()
 
     # ══════════════════════════════════════════════════════════════════
     # Writer: anomaly_events
@@ -922,6 +1052,7 @@ class PersistentState:
         self,
         *,
         strategy: Optional[str] = None,
+        bot_name: Optional[str] = None,
         symbol: Optional[str] = None,
         since: Optional[datetime | str] = None,
         until: Optional[datetime | str] = None,
@@ -932,6 +1063,8 @@ class PersistentState:
         params: list[Any] = []
         if strategy:
             where.append("strategy=?"); params.append(strategy)
+        if bot_name:
+            where.append("COALESCE(bot_name, strategy)=?"); params.append(bot_name)
         if symbol:
             where.append("symbol=?"); params.append(symbol)
         if since is not None:
@@ -982,6 +1115,45 @@ class PersistentState:
             rows = await cur.fetchall()
         return list(reversed([dict(r) for r in rows]))
 
+    async def get_bot_heartbeats(
+        self,
+        active_only: bool = False,
+        active_threshold_seconds: int = 180,
+    ) -> list[dict[str, Any]]:
+        """Liest Heartbeat-Zeilen, optional gefiltert auf aktive Bots."""
+        sql = "SELECT * FROM bot_heartbeat"
+        params: list[Any] = []
+        if active_only:
+            threshold = max(1, int(active_threshold_seconds))
+            sql += " WHERE updated_at > datetime('now', ?)"
+            params.append(f"-{threshold} seconds")
+        sql += " ORDER BY updated_at DESC"
+
+        try:
+            async with self._conn() as conn:
+                cur = await conn.execute(sql, params)
+                rows = await cur.fetchall()
+        except Exception:
+            return []
+
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            raw_status = item.get("symbol_status_json")
+            status: dict[str, Any] = {}
+            if raw_status:
+                try:
+                    parsed = json.loads(raw_status)
+                    if isinstance(parsed, dict):
+                        status = parsed
+                except (TypeError, ValueError):
+                    status = {}
+            item["broker_connected"] = bool(item.get("broker_connected", 0))
+            item["circuit_breaker"] = bool(item.get("circuit_breaker", 0))
+            item["symbol_status"] = status
+            out.append(item)
+        return out
+
     async def get_strategies(self) -> list[str]:
         """Liefert alle Strategien, die Trades oder Equity-Einträge haben."""
         async with self._conn() as conn:
@@ -991,6 +1163,7 @@ class PersistentState:
                     SELECT strategy FROM trades
                     UNION SELECT strategy FROM equity_snapshots
                     UNION SELECT strategy FROM positions
+                    UNION SELECT strategy FROM bot_heartbeat
                 ) WHERE strategy IS NOT NULL AND strategy <> ''
                 """
             )
@@ -1003,6 +1176,12 @@ class PersistentState:
         """Aggregierter Bot-Status für das Dashboard."""
         today = datetime.now(timezone.utc).date()
         async with self._conn() as conn:
+            heartbeat = await (
+                await conn.execute(
+                    "SELECT bot_name FROM bot_heartbeat WHERE strategy=?",
+                    (strategy,),
+                )
+            ).fetchone()
             eq = await (
                 await conn.execute(
                     "SELECT equity, drawdown_pct, peak_equity, ts "
@@ -1029,6 +1208,10 @@ class PersistentState:
             ).fetchone()
         return {
             "strategy": strategy,
+            "bot_name": (
+                heartbeat["bot_name"] if heartbeat and heartbeat["bot_name"]
+                else strategy
+            ),
             "equity": float(eq["equity"]) if eq else None,
             "drawdown_pct": float(eq["drawdown_pct"]) if eq else None,
             "peak_equity": float(eq["peak_equity"]) if eq else None,
@@ -1046,6 +1229,7 @@ class PersistentState:
         self,
         *,
         strategy: str,
+        bot_name: Optional[str] = None,
         symbol: str,
         side: str,
         entry_ts: datetime | str,
@@ -1059,6 +1243,9 @@ class PersistentState:
         features_json: Optional[str] = None,
         reason: Optional[str] = None,
         current_price: Optional[float] = None,
+        entry_signal: Optional[str] = None,
+        broker_order_id: Optional[str] = None,
+        order_reference: Optional[str] = None,
         reserve_group_name: Optional[str] = None,
         reserve_day: Optional[date] = None,
     ) -> int:
@@ -1075,13 +1262,13 @@ class PersistentState:
                 cur = await conn.execute(
                     """
                     INSERT INTO trades (
-                        strategy, symbol, side, entry_ts, entry_price, qty,
+                        strategy, bot_name, symbol, side, entry_ts, entry_price, qty,
                         stop_price, signal_strength, mit_qty_factor,
                         ev_estimate, group_name, features_json, reason
-                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                     """,
                     (
-                        strategy, symbol, side, ts, float(entry_price),
+                        strategy, bot_name, symbol, side, ts, float(entry_price),
                         float(qty), stop_price, signal_strength,
                         mit_qty_factor, ev_estimate, group_name,
                         features_json, reason,
@@ -1104,13 +1291,17 @@ class PersistentState:
                             trade_id, strategy, symbol, side, entry_ts,
                             entry_price, qty, stop_price, last_update_ts,
                             current_price, unrealized_pnl,
-                            unrealized_pnl_pct, held_minutes
-                        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+                            unrealized_pnl_pct, held_minutes,
+                            entry_signal, entry_reason,
+                            broker_order_id, order_reference
+                        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                         """,
                         (
                             trade_id, strategy, symbol, side, ts,
                             float(entry_price), float(qty), stop_price,
                             last, c_price, 0.0, 0.0, 0,
+                            entry_signal, reason,
+                            broker_order_id, order_reference,
                         ),
                     )
                 else:
@@ -1121,12 +1312,18 @@ class PersistentState:
                             entry_price=?, qty=?, stop_price=?,
                             last_update_ts=?, current_price=?,
                             unrealized_pnl=0.0, unrealized_pnl_pct=0.0,
-                            held_minutes=0
+                            held_minutes=0,
+                            entry_signal=COALESCE(?, entry_signal),
+                            entry_reason=COALESCE(?, entry_reason),
+                            broker_order_id=COALESCE(?, broker_order_id),
+                            order_reference=COALESCE(?, order_reference)
                         WHERE id=?
                         """,
                         (
                             trade_id, side, ts, float(entry_price),
                             float(qty), stop_price, last, c_price,
+                            entry_signal, reason,
+                            broker_order_id, order_reference,
                             pos_row["id"],
                         ),
                     )
@@ -1260,14 +1457,24 @@ class PersistentState:
                 )
             ).fetchone()
 
-            # Signals last hour
+            # Signals today (alle) + gefilterte heute
             sigs = await (
                 await conn.execute(
                     """
                     SELECT COUNT(*) AS c FROM signals
-                    WHERE strategy=? AND ts >= ?
+                    WHERE strategy=? AND substr(ts,1,10)=?
                     """,
-                    (strategy, one_hour_ago),
+                    (strategy, today),
+                )
+            ).fetchone()
+            sigs_filtered = await (
+                await conn.execute(
+                    """
+                    SELECT COUNT(*) AS c FROM signals
+                    WHERE strategy=? AND substr(ts,1,10)=?
+                    AND filtered_by IS NOT NULL AND filtered_by != ''
+                    """,
+                    (strategy, today),
                 )
             ).fetchone()
 
@@ -1282,18 +1489,57 @@ class PersistentState:
                 )
             ).fetchone()
 
+            heartbeat = None
+            try:
+                heartbeat = await (
+                    await conn.execute(
+                        "SELECT * FROM bot_heartbeat WHERE strategy=?",
+                        (strategy,),
+                    )
+                ).fetchone()
+            except Exception:
+                heartbeat = None
+
+        symbol_status: dict[str, Any] = {}
+        if heartbeat and heartbeat["symbol_status_json"]:
+            try:
+                parsed = json.loads(heartbeat["symbol_status_json"])
+                if isinstance(parsed, dict):
+                    symbol_status = parsed
+            except (TypeError, ValueError):
+                symbol_status = {}
+
         return {
             "strategy": strategy,
+            "bot_name": (
+                heartbeat["bot_name"] if heartbeat and heartbeat["bot_name"]
+                else strategy
+            ),
             "equity": float(eq["equity"]) if eq else None,
             "cash": float(eq["cash"]) if eq else None,
             "drawdown_pct": float(eq["drawdown_pct"]) if eq else None,
             "peak_equity": float(eq["peak_equity"]) if eq else None,
             "last_equity_ts": eq["ts"] if eq else None,
-            "last_bar_ts": eq["ts"] if eq else None,
+            "last_bar_ts": heartbeat["last_bar_ts"] if heartbeat else None,
+            "last_bar_lag_ms": (
+                float(heartbeat["last_bar_lag_ms"])
+                if heartbeat and heartbeat["last_bar_lag_ms"] is not None
+                else None
+            ),
+            "broker_connected": (
+                bool(heartbeat["broker_connected"]) if heartbeat else False
+            ),
+            "broker_adapter": heartbeat["broker_adapter"] if heartbeat else "",
+            "circuit_breaker": (
+                bool(heartbeat["circuit_breaker"]) if heartbeat else False
+            ),
+            "symbol_status": symbol_status,
+            "bot_last_seen": heartbeat["updated_at"] if heartbeat else None,
             "open_positions": int(opn["c"]) if opn else 0,
             "trades_today": int(td["c"]) if td else 0,
             "pnl_today": float(td["pnl"]) if td else 0.0,
-            "signals_last_hour": int(sigs["c"]) if sigs else 0,
+            "signals_today": int(sigs["c"]) if sigs else 0,
+            "signals_filtered_today": int(sigs_filtered["c"]) if sigs_filtered else 0,
             "anomalies_last_hour": int(anom["c"]) if anom else 0,
         }
 

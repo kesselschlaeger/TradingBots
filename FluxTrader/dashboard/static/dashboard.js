@@ -7,6 +7,7 @@ const REFRESH_INTERVAL = 3000; // 3s
 let equityChart = null;
 let tradeData = [];
 let strategies = [];
+let selectedTradeStrategy = '';
 // Persistent UI-State: welche Bot-Cards sind ausgeklappt?
 const expandedBots = new Set();
 
@@ -376,7 +377,7 @@ async function updateStrategies() {
       <div class="bot-card" data-bot="${bot.strategy}">
         <div class="bot-card-header" data-toggle="bot" data-bot="${bot.strategy}">
           <span class="bot-toggle">${toggleIcon}</span>
-          <h3>${bot.strategy}</h3>
+          <h3>${bot.bot_name || bot.strategy}</h3>
           ${symbolsBadge}
           <span class="bot-status-badge ${bot.running ? 'running' : 'stopped'}">
             ${bot.running ? 'RUNNING' : 'STOPPED'}
@@ -441,10 +442,15 @@ async function updateStrategies() {
 
     // Update strategy filter
     const strategyFilter = document.getElementById('trade-filter-strategy');
-    const currentValue = strategyFilter.value;
-    strategyFilter.innerHTML = '<option value="">All Strategies</option>' +
-      strategies.map(s => `<option value="${s.strategy}">${s.strategy}</option>`).join('');
+    const currentValue = selectedTradeStrategy || strategyFilter.value || '';
+    const botNames = [...new Set(strategies.map(s => s.bot_name || s.strategy).filter(Boolean))];
+    if (currentValue && !botNames.includes(currentValue)) {
+      botNames.push(currentValue);
+    }
+    strategyFilter.innerHTML = '<option value="">All Bots</option>' +
+      botNames.map(name => `<option value="${name}">${name}</option>`).join('');
     strategyFilter.value = currentValue;
+    selectedTradeStrategy = strategyFilter.value || '';
   } catch (err) {
     console.error('Strategies update failed:', err);
   }
@@ -461,20 +467,25 @@ async function updatePositions() {
 
     const tbody = document.getElementById('positions-body');
     if (!positions || positions.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="6" class="muted">No open positions</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="11" class="muted">No open positions</td></tr>';
       return;
     }
 
     tbody.innerHTML = positions.map(pos => `
       <tr>
+        <td><strong>${pos.bot || pos.strategy || '—'}</strong></td>
         <td><strong>${pos.symbol}</strong></td>
         <td>${pos.qty.toFixed(1)}</td>
         <td>${formatCurrency(pos.entry_price)}</td>
         <td>${formatCurrency(pos.current_price)}</td>
+        <td>${pos.entry_signal || '—'}</td>
+        <td class="muted">${pos.entry_reason || '—'}</td>
         <td class="${pos.unrealized_pnl >= 0 ? 'pnl-positive' : 'pnl-negative'}">
           ${formatCurrency(pos.unrealized_pnl)} (${formatPercent(pos.unrealized_pnl_pct)})
         </td>
+        <td>${formatDateTime(pos.order_ts)}</td>
         <td>${pos.held_minutes || 0}m</td>
+        <td class="muted">${pos.order_reference || pos.broker_order_id || '—'}</td>
       </tr>
     `).join('');
   } catch (err) {
@@ -488,13 +499,14 @@ async function updatePositions() {
 
 async function updateTrades() {
   try {
-    const strategy = document.getElementById('trade-filter-strategy').value;
+    const strategyFilter = document.getElementById('trade-filter-strategy');
+    const strategy = selectedTradeStrategy || strategyFilter.value || '';
     const days = document.getElementById('trade-filter-days').value || 30;
 
     const url = new URL(`${API_BASE}/trades`, window.location);
     url.searchParams.append('only_closed', 'true');
     url.searchParams.append('limit', 100);
-    if (strategy) url.searchParams.append('strategy', strategy);
+    if (strategy) url.searchParams.append('bot_name', strategy);
 
     const resp = await fetch(url);
     tradeData = await resp.json();
@@ -517,7 +529,7 @@ function updateTradesTable() {
   tbody.innerHTML = tradeData.map(trade => `
     <tr>
       <td>${new Date(trade.entry_ts).toLocaleDateString()}</td>
-      <td><strong>${trade.strategy}</strong></td>
+      <td><strong>${trade.bot_name || trade.strategy}</strong></td>
       <td><strong>${trade.symbol}</strong></td>
       <td>${trade.side.toUpperCase()}</td>
       <td>${formatCurrency(trade.entry_price)}</td>
@@ -582,6 +594,13 @@ function formatPercent(value) {
   return sign + parseFloat(value).toFixed(2) + '%';
 }
 
+function formatDateTime(value) {
+  if (!value) return '—';
+  const dt = new Date(value);
+  if (Number.isNaN(dt.getTime())) return '—';
+  return dt.toLocaleString();
+}
+
 function escapeAttr(s) {
   return String(s || '')
     .replaceAll('&', '&amp;')
@@ -595,6 +614,7 @@ function escapeAttr(s) {
 // ─────────────────────────────────────────────────────────────────────────
 
 document.getElementById('trade-filter-strategy').addEventListener('change', () => {
+  selectedTradeStrategy = document.getElementById('trade-filter-strategy').value || '';
   updateTrades();
 });
 

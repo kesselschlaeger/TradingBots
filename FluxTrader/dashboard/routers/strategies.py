@@ -6,7 +6,7 @@ aus PersistentState.
 """
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any
 
 from fastapi import APIRouter, Request
 
@@ -49,11 +49,8 @@ async def strategies_health(request: Request) -> dict[str, Any]:
     """Detaillierter Health-Check pro Strategie.
 
     Versucht zuerst den lokalen HealthState (Live-Mode in selben Prozess),
-    falls nicht vorhanden, holt Daten vom Health-Server (Live-Bot auf
-    localhost:8090).
+    fallback ist SQLite.
     """
-    import httpx
-
     hs = request.app.state.health_state
 
     # Fallback 1: Lokaler HealthState (selber Prozess)
@@ -70,23 +67,37 @@ async def strategies_health(request: Request) -> dict[str, Any]:
             "timestamp": snap.get("timestamp"),
         }
 
-    # Fallback 2: Remote Health-Server (Live-Bot in anderem Prozess)
+    # Fallback 2: SQLite
     try:
-        health_url = request.app.state.health_server_url
-        async with httpx.AsyncClient(timeout=2.0) as client:
-            resp = await client.get(f"{health_url}/status")
-            if resp.status_code == 200:
-                snap = resp.json()
-                return {
-                    "available": True,
-                    "source": "remote",
-                    "portfolio": snap.get("portfolio", {}),
-                    "strategies": snap.get("strategies", []),
-                    "broker": snap.get("broker", {}),
-                    "circuit_breaker": snap.get("circuit_breaker_active", False),
-                    "health_score": snap.get("health_score", 0),
-                    "timestamp": snap.get("timestamp"),
-                }
+        state = request.app.state.persistent_state
+        strategies = await state.get_strategies()
+        items = []
+        circuit_breaker_active = False
+        for strat in strategies:
+            snap = await state.get_health_snapshot(strat)
+            circuit_breaker_active = (
+                circuit_breaker_active
+                or bool(snap.get("circuit_breaker", False))
+            )
+            items.append({
+                "name": strat,
+                "last_bar_ts": snap.get("last_bar_ts"),
+                "last_bar_lag_ms": snap.get("last_bar_lag_ms"),
+                "signals_today": snap.get("signals_today", 0),
+                "signals_filtered_today": snap.get("signals_filtered_today", 0),
+                "symbol_status": snap.get("symbol_status", {}),
+            })
+
+        return {
+            "available": bool(items),
+            "source": "db",
+            "portfolio": {},
+            "strategies": items,
+            "broker": {},
+            "circuit_breaker": circuit_breaker_active,
+            "health_score": 0,
+            "timestamp": None,
+        }
     except Exception:
         pass
 

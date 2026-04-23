@@ -61,6 +61,7 @@ class LiveRunner:
         self.data = data_provider
         self._context = context
         self.state = state
+        self._adapter_name = type(broker).__name__.replace("Adapter", "").lower()
         self.notifier = notifier
         self.symbols = [s.upper() for s in symbols]
         self.cfg = config
@@ -88,6 +89,11 @@ class LiveRunner:
         self._last_alert_ts: float = 0.0
         self._alert_cooldown_s = 60
         self._status_sink: Optional[callable] = None
+        # Lock verhindert concurrent Ausführung von _on_eod_close (Scheduler +
+        # Bar-Level-Check können simultan feuern). Locked() → laufender Call
+        # wird übersprungen statt zu warten; so bleibt der Bar-Loop frei.
+        self._eod_close_lock = asyncio.Lock()
+        self._eod_close_done: bool = False
         # Letzter Warmup-Bar pro Symbol – Bars bis einschließlich dieses
         # Timestamps wurden bereits still in den Buffer geladen und dürfen
         # keine Signale auslösen (verhindert Doppelverarbeitung beim ersten
@@ -128,7 +134,7 @@ class LiveRunner:
             cash=float(acct.get("cash", 0)),
             buying_power=float(acct.get("buying_power", 0)),
         )
-        peak0 = await self.state.update_peak_equity(equity0)
+        peak0 = await self.state.update_peak_equity(equity0, strategy=self.strategy.name)
         dd0 = 0.0 if peak0 <= 0 else (equity0 - peak0) / peak0 * 100.0
         await self.state.save_equity_snapshot(
             strategy=self.strategy.name,
@@ -197,6 +203,18 @@ class LiveRunner:
         if not self._running:
             return
         self._running = False
+
+        try:
+            await self.state.upsert_bot_heartbeat(
+                strategy=self.strategy.name,
+                bot_name=self.notifier.bot_name,
+                broker_connected=False,
+                circuit_breaker=False,
+                broker_adapter=self._adapter_name,
+            )
+        except Exception as e:  # noqa: BLE001
+            log.warning("runner.heartbeat_shutdown_failed", error=str(e))
+
         if self._scheduler:
             self._scheduler.stop()
         log.info("runner.stopping")
@@ -337,6 +355,7 @@ class LiveRunner:
         self._context.clear_reserved_groups()
         await self.state.reset_day(date.today(), strategy=self.strategy.name)
         self._daily_trades_count = 0
+        self._eod_close_done = False
 
         # Reserved Groups aus State wiederherstellen (falls Restart mitten am Tag)
         for g in await self.state.reserved_groups(date.today(),
@@ -344,83 +363,95 @@ class LiveRunner:
             self._context.reserve_group(g)
 
     async def _on_eod_close(self) -> None:
-        log.info("runner.eod_close")
-        _all_positions = await self.broker.get_positions()
-        # Multi-Bot: nur eigene Positionen schließen (close_all_positions()
-        # würde den gesamten Account treffen – gefährlich bei gemeinsamem
-        # IBKR-Paper-Account mit mehreren Bots).
-        _own_set = {s.upper() for s in self.symbols} | {s.upper() for s in self.tm.all_symbols()}
-        positions_before = {k: v for k, v in _all_positions.items()
-                            if k.upper() in _own_set}
-        # Eigene Positionen einzeln schließen statt close_all_positions()
-        attempted_list: list[str] = list(positions_before.keys())
-        for sym in attempted_list:
-            try:
-                await self.broker.close_position(sym)
-            except Exception as e:  # noqa: BLE001
-                log.warning("runner.eod_close_position_failed",
-                            symbol=sym, error=str(e))
-        await asyncio.sleep(3)
-        _after = await self.broker.get_positions()
-        remaining_set = {s for s in attempted_list if s in _after}
-        result = {"attempted": attempted_list,
-                  "remaining": list(remaining_set),
-                  "ok": not remaining_set}
-        attempted = attempted_list
-        remaining = remaining_set
-        close_execs = await self.broker.get_recent_closes(attempted)
+        if self._eod_close_done:
+            log.debug("runner.eod_close_skipped", reason="already_done")
+            return
+        # Concurrent-Guard: APScheduler und Bar-Level-Check können beide um
+        # 15:27 feuern. Wenn ein Call bereits läuft (Lock ist gehalten),
+        # überspringen – der laufende Call schließt alle Positionen.
+        if self._eod_close_lock.locked():
+            log.debug("runner.eod_close_skipped", reason="already_running")
+            return
+        async with self._eod_close_lock:
+            log.info("runner.eod_close")
+            _all_positions = await self.broker.get_positions()
+            # Multi-Bot: nur eigene Positionen schließen (close_all_positions()
+            # würde den gesamten Account treffen – gefährlich bei gemeinsamem
+            # IBKR-Paper-Account mit mehreren Bots).
+            _own_set = {s.upper() for s in self.symbols} | {s.upper() for s in self.tm.all_symbols()}
+            positions_before = {k: v for k, v in _all_positions.items()
+                                if k.upper() in _own_set}
+            # Eigene Positionen einzeln schließen statt close_all_positions()
+            attempted_list: list[str] = list(positions_before.keys())
+            for sym in attempted_list:
+                try:
+                    await self.broker.close_position(sym)
+                except Exception as e:  # noqa: BLE001
+                    log.warning("runner.eod_close_position_failed",
+                                symbol=sym, error=str(e))
+            await asyncio.sleep(3)
+            _after = await self.broker.get_positions()
+            remaining_set = {s for s in attempted_list if s in _after}
+            result = {"attempted": attempted_list,
+                      "remaining": list(remaining_set),
+                      "ok": not remaining_set}
+            attempted = attempted_list
+            remaining = remaining_set
+            close_execs = await self.broker.get_recent_closes(attempted)
 
-        for sym in attempted:
-            if sym in remaining:
-                continue
-            pos = positions_before.get(sym)
-            tracked = self.tm.get(sym)
-            close_exec = close_execs.get(sym.upper()) or close_execs.get(sym)
+            for sym in attempted:
+                if sym in remaining:
+                    continue
+                pos = positions_before.get(sym)
+                tracked = self.tm.get(sym)
+                close_exec = close_execs.get(sym.upper()) or close_execs.get(sym)
 
-            side = pos.side if pos else (tracked.side if tracked else "long")
-            exit_price = (
-                float(close_exec.fill_price)
-                if close_exec and close_exec.fill_price > 0
-                else self._safe_exit_price(
-                    pos.current_price if pos else None,
-                    tracked.entry if tracked else None,
+                side = pos.side if pos else (tracked.side if tracked else "long")
+                exit_price = (
+                    float(close_exec.fill_price)
+                    if close_exec and close_exec.fill_price > 0
+                    else self._safe_exit_price(
+                        pos.current_price if pos else None,
+                        tracked.entry if tracked else None,
+                    )
                 )
-            )
-            qty = (
-                float(close_exec.qty)
-                if close_exec and close_exec.qty > 0
-                else (float(pos.qty) if pos else (float(tracked.qty) if tracked else None))
-            )
-            pnl = (
-                float(close_exec.realized_pnl)
-                if close_exec and close_exec.realized_pnl is not None
-                else self._compute_pnl(
+                qty = (
+                    float(close_exec.qty)
+                    if close_exec and close_exec.qty > 0
+                    else (float(pos.qty) if pos else (float(tracked.qty) if tracked else None))
+                )
+                pnl = (
+                    float(close_exec.realized_pnl)
+                    if close_exec and close_exec.realized_pnl is not None
+                    else self._compute_pnl(
+                        side=side,
+                        entry=float(tracked.entry) if tracked else exit_price,
+                        exit_price=exit_price,
+                        qty=float(qty or 0.0),
+                    )
+                )
+                await self.notifier.trade_closed(
+                    symbol=sym,
                     side=side,
-                    entry=float(tracked.entry) if tracked else exit_price,
                     exit_price=exit_price,
-                    qty=float(qty or 0.0),
+                    pnl=pnl,
+                    reason="EOD close all",
+                    qty=qty,
+                    order_id=(close_exec.order_id if close_exec else ""),
                 )
-            )
-            await self.notifier.trade_closed(
-                symbol=sym,
-                side=side,
-                exit_price=exit_price,
-                pnl=pnl,
-                reason="EOD close all",
-                qty=qty,
-                order_id=(close_exec.order_id if close_exec else ""),
-            )
-            await self.tm.close_trade(
-                sym, exit_price=exit_price,
-                exit_ts=datetime.now(timezone.utc),
-                pnl=pnl, reason="EOD close all",
-            )
+                await self.tm.close_trade(
+                    sym, exit_price=exit_price,
+                    exit_ts=datetime.now(timezone.utc),
+                    pnl=pnl, reason="EOD close all",
+                )
 
-        if result.get("remaining"):
-            await self.notifier.error("eod_close",
-                                      f"Remaining: {result['remaining']}")
-        else:
-            log.info("runner.eod_closed", attempted=result.get("attempted", []))
+            if result.get("remaining"):
+                await self.notifier.error("eod_close",
+                                          f"Remaining: {result['remaining']}")
+                log.info("runner.eod_close_retry", remaining=list(remaining_set))
+            else:
+                log.info("runner.eod_closed", attempted=result.get("attempted", []))
+                self._eod_close_done = True
 
     async def _on_post_market(self) -> None:
         log.info("runner.post_market")
@@ -646,6 +677,28 @@ class LiveRunner:
             lag_ms = max(0.0, (datetime.now(timezone.utc) - bar_ts).total_seconds() * 1000.0)
         if self.health is not None:
             await self.health.set_last_bar(self.strategy.name, bar_ts, lag_ms)
+        try:
+            await self.state.upsert_bot_heartbeat(
+                strategy=self.strategy.name,
+                bot_name=self.notifier.bot_name,
+                last_bar_ts=bar_ts,
+                last_bar_lag_ms=lag_ms,
+                broker_connected=(
+                    self.health.is_broker_connected() if self.health is not None else True
+                ),
+                broker_adapter=self._adapter_name,
+                circuit_breaker=(
+                    self.health.is_circuit_breaker_active() if self.health is not None else False
+                ),
+                symbol_status=(
+                    self.health.get_symbol_status(self.strategy.name)
+                    if self.health is not None else {}
+                ),
+            )
+        except Exception as e:  # noqa: BLE001
+            log.warning("runner.heartbeat_persist_failed", error=str(e))
+
+        if self.health is not None:
             # Alert bei fehlenden Bars während Handelszeiten
             if self.health.should_alert_on_not_ready():
                 now_ts = _time.time()
@@ -672,6 +725,29 @@ class LiveRunner:
         # EOD-Check
         if self.tm.should_eod_close(bar.timestamp):
             await self._on_eod_close()
+            try:
+                acct = await self.broker.get_account()
+                equity = float(acct["equity"])
+                cash = float(acct.get("cash", 0))
+                self._context.update_account(
+                    equity=equity,
+                    cash=cash,
+                    buying_power=float(acct.get("buying_power", 0)),
+                )
+                peak = await self.state.update_peak_equity(
+                    equity, strategy=self.strategy.name,
+                )
+                dd_pct = 0.0 if peak <= 0 else (equity - peak) / peak * 100.0
+                await self.state.save_equity_snapshot(
+                    strategy=self.strategy.name,
+                    ts=bar.timestamp,
+                    equity=equity,
+                    cash=cash,
+                    drawdown_pct=dd_pct,
+                    peak_equity=peak,
+                )
+            except Exception as e:  # noqa: BLE001
+                log.warning("runner.eod_equity_snapshot_failed", error=str(e))
             return
 
         # Reconcile mit Broker (SL/TP könnte serverseitig gefüllt sein)
@@ -759,7 +835,7 @@ class LiveRunner:
         )
 
         # Drawdown + Circuit-Breaker-Alerts
-        peak = await self.state.update_peak_equity(equity)
+        peak = await self.state.update_peak_equity(equity, strategy=self.strategy.name)
         dd_pct = 0.0 if peak <= 0 else (equity - peak) / peak * 100.0
         positions_count = len(self._context.open_symbols)
         self.metrics.set_equity(self.strategy.name, equity)
@@ -805,6 +881,25 @@ class LiveRunner:
                         if pos.entry_price and pos.qty else None
                     ),
                     held_minutes=held_min,
+                    entry_signal=(
+                        ("LONG" if managed.side == "long" else "SHORT")
+                        if managed is not None else None
+                    ),
+                    entry_reason=(
+                        str(managed.metadata.get("reason"))
+                        if managed is not None and managed.metadata.get("reason")
+                        else None
+                    ),
+                    broker_order_id=(
+                        str(managed.metadata.get("broker_order_id"))
+                        if managed is not None and managed.metadata.get("broker_order_id")
+                        else None
+                    ),
+                    order_reference=(
+                        str(managed.metadata.get("order_reference"))
+                        if managed is not None and managed.metadata.get("order_reference")
+                        else None
+                    ),
                 )
             except Exception as e:  # noqa: BLE001
                 log.warning("runner.position_persist_failed",
@@ -867,6 +962,18 @@ class LiveRunner:
                 )
                 if self.health is not None:
                     await self.health.record_signal(sig.strategy, filtered=True)
+                try:
+                    await self.state.save_signal(
+                        strategy=sig.strategy,
+                        symbol=sig.symbol,
+                        ts=sig.timestamp,
+                        action=("LONG" if sig.direction > 0 else "SHORT"),
+                        strength=float(sig.strength or 0.0),
+                        filtered_by="duplicate_guard",
+                    )
+                except Exception as e:  # noqa: BLE001
+                    log.warning("runner.persist_filtered_signal_failed",
+                                symbol=sig.symbol, error=str(e))
                 return
 
         # ── Core-Limits (gelten für alle Strategien) ──────────────────
@@ -947,6 +1054,18 @@ class LiveRunner:
             )
             if self.health is not None:
                 await self.health.record_signal(sig.strategy, filtered=True)
+            try:
+                await self.state.save_signal(
+                    strategy=sig.strategy,
+                    symbol=sig.symbol,
+                    ts=sig.timestamp,
+                    action=("LONG" if sig.direction > 0 else "SHORT"),
+                    strength=float(sig.strength or 0.0),
+                    filtered_by="broker_reject",
+                )
+            except Exception as e:  # noqa: BLE001
+                log.warning("runner.persist_filtered_signal_failed",
+                            symbol=sig.symbol, error=str(e))
             return
         self._daily_trades_count += 1
 
@@ -967,6 +1086,13 @@ class LiveRunner:
         entry = float(sig.metadata.get("entry_price", 0.0))
         stop = float(sig.stop_price or 0.0)
         target = float(sig.target_price) if sig.target_price else None
+        signal_meta = dict(sig.metadata)
+        signal_meta.setdefault("entry_signal", side_str)
+        signal_meta.setdefault(
+            "order_reference",
+            signal_meta.get("client_order_id") or execution.order_id,
+        )
+        signal_meta.setdefault("broker_order_id", execution.order_id)
 
         # TradeManager + zentrale DB-Persistenz
         managed = ManagedTrade(
@@ -975,9 +1101,15 @@ class LiveRunner:
             qty=float(execution.qty),
             strategy_id=sig.strategy,
             opened_at=sig.timestamp,
-            metadata=dict(sig.metadata),
+            metadata=signal_meta,
         )
-        await self.tm.register_and_persist(managed, sig)
+        await self.tm.register_and_persist(
+            managed,
+            sig,
+            bot_name=self.notifier.bot_name,
+            broker_order_id=execution.order_id,
+            order_reference=str(signal_meta.get("order_reference") or execution.order_id),
+        )
 
         # Signal zur probabilistischen Auswertung spiegeln
         try:

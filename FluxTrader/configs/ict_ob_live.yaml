@@ -3,10 +3,11 @@ mode: live
 
 strategy:
   name: ict_ob_mtf
-  symbols: ["NQ=F","BTC","ETH"]  # Nasdaq Futures, Bitcoin und Ethereum
+  #symbols: ["NQ","BTC","ETH"]  # Nasdaq Futures, Bitcoin und Ethereum
+  symbols: [NVDA, AMD, AVGO]
   risk_pct: 0.005          # 0.5 % pro Trade
   params:
-    min_bars: 250
+    min_bars: 800
     max_bars_buffer: 2000
 
     # OB-Detection
@@ -44,15 +45,16 @@ strategy:
       high_beta_growth: [TSLA, PLTR, NFLX]
 
 broker:
-  type: alpaca
+  type: ibkr
   paper: true
-  alpaca_data_feed: iex
+  ibkr_client_id: 18
+  ibkr_bot_id: Flux_BOTTI
 
 data:
   provider: ibkr
   timeframe: "5Min"
-  lookback_days: 15            # 15 Tage für ausreichend 4H-Bars
+  lookback_days: 60            # 15 Tage für ausreichend 4H-Bars
 
 notifications:
   enabled: true
-  bot_name: FLUX_ICT_OB_ALPACA_PAPER
+  bot_name: FLUX_ICT_OB

@@ -35,3 +35,7 @@ ORB_Bot/orb_trading_data/memory.md
 OneBarBreakout/obb_universe/obb_universe_dashboard.html
 FluxTrader/fluxtrader_data/state.db-shm
 FluxTrader/fluxtrader_data/state.db-wal
+FluxTrader/fluxtrader_data/state.db
+.continue/rules/new-rule.md
+ORB_Bot/orb_trading_data/memory.md
+OneBarBreakout/obb_trading_data/memory.md

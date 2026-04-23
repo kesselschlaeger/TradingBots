@@ -55,10 +55,6 @@ def create_app(cfg: AppConfig,
     app.state.health_state = health_state  # None im Standalone-Modus
     app.state.app_config = cfg
 
-    # Health-Server URL für Frontend (falls Live-Bot läuft)
-    health_port = cfg.monitoring.health_port if hasattr(cfg, 'monitoring') else 8090
-    app.state.health_server_url = f"http://localhost:{health_port}"
-
     app.include_router(portfolio.router, prefix="/api")
     app.include_router(trades.router, prefix="/api")
     app.include_router(strategies.router, prefix="/api")

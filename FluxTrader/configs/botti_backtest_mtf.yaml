@@ -59,7 +59,7 @@ strategy:
     risk_per_trade: 0.02
     max_equity_at_risk: 0.80
     initial_sl_atr_mult: 2.5
-    trailing_atr_mult: 3.0
+    trailing_atr_mult: 2.5
     partial_profit_pct: 0.25
     allow_reentry: true
     reentry_atr_mult: 1.5
@@ -100,7 +100,7 @@ broker:
 data:
   provider: yfinance
   timeframe: "1D"
-  lookback_days: 365
+  lookback_days: 150
 
 notifications:
   enabled: false

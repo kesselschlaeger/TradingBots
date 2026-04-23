@@ -354,7 +354,7 @@ async def cmd_live(cfg: AppConfig) -> None:
     )
 
     # ── Monitoring-Infrastruktur ─────────────────────────────────────
-    health_state = HealthState()
+    health_state = HealthState(persistent_state=state)
     metrics_collector = MetricsCollector.create(
         enabled=cfg.monitoring.prometheus_enabled
     )
@@ -362,10 +362,16 @@ async def cmd_live(cfg: AppConfig) -> None:
     await health_state.set_broker_status(
         connected=False, adapter=cfg.broker.type,
     )
+    monitoring_extra = cfg.monitoring.model_extra or {}
+    fallback_ports = tuple(
+        int(p)
+        for p in (monitoring_extra.get("health_fallback_ports", []) or [])
+    )
     asyncio.create_task(start_health_server(
         health_state=health_state,
         metrics_collector=metrics_collector,
         port=cfg.monitoring.health_port,
+        fallback_ports=fallback_ports,
     ))
 
     log.info("live.starting", mode=cfg.mode,
@@ -383,6 +389,7 @@ async def cmd_live(cfg: AppConfig) -> None:
             data_provider=data_prov,
             context=ctx,
             ml_filter=ml_filter,
+            state=state,
             config=cfg.strategy.params,
             health_state=health_state,
         )

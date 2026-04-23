@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time as _time
+from contextlib import suppress
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Coroutine, Optional, TYPE_CHECKING
 
@@ -188,6 +189,15 @@ class HealthState:
         async with self._lock:
             self._circuit_breaker = bool(active)
 
+    def is_broker_connected(self) -> bool:
+        return self._broker_connected
+
+    def is_circuit_breaker_active(self) -> bool:
+        return self._circuit_breaker
+
+    def get_symbol_status(self, strategy: str) -> dict[str, Any]:
+        return dict(self._symbol_status.get(strategy, {}))
+
     def set_symbol_status(self, strategy: str, symbol: str,
                           code: str, reason: str = "",
                           ts: Optional[datetime] = None) -> None:
@@ -308,7 +318,8 @@ def _ensure_aware(dt: datetime) -> datetime:
 async def start_health_server(health_state: HealthState,
                               metrics_collector: Optional[Any] = None,
                               port: int = 8090,
-                              host: str = "0.0.0.0") -> Optional[Any]:
+                              host: str = "0.0.0.0",
+                              fallback_ports: tuple[int, ...] = ()) -> Optional[Any]:
     """Startet den aiohttp-Server und gibt das Runner-Handle zurueck.
 
     Bei fehlendem aiohttp wird nur gewarnt und ``None`` zurueckgegeben.
@@ -347,12 +358,22 @@ async def start_health_server(health_state: HealthState,
     app.router.add_get("/status", _status)
     app.router.add_get("/metrics/text", _metrics_text)
 
-    runner = web.AppRunner(app, access_log=None)
-    await runner.setup()
-    site = web.TCPSite(runner, host=host, port=port)
-    await site.start()
-    log.info("health.started", host=host, port=port)
-    return runner
+    ports_to_try = (int(port),) + tuple(int(p) for p in fallback_ports)
+    for current_port in ports_to_try:
+        runner = web.AppRunner(app, access_log=None)
+        try:
+            await runner.setup()
+            site = web.TCPSite(runner, host=host, port=current_port)
+            await site.start()
+            log.info("health.started", host=host, port=current_port)
+            return runner
+        except OSError as e:
+            log.warning("health.port_in_use", port=current_port, error=str(e))
+            with suppress(Exception):
+                await runner.cleanup()
+
+    log.error("health.no_port_available", tried=ports_to_try)
+    return None
 
 
 async def snapshot_json(health_state: HealthState) -> str:

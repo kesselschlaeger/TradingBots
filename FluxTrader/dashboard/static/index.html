@@ -60,7 +60,12 @@
     <article class="panel">
       <h2>📍 Open Positions</h2>
       <table id="positions-table">
-        <thead><tr><th>Symbol</th><th>Qty</th><th>Entry</th><th>Current</th><th>PnL</th><th>Held</th></tr></thead>
+        <thead>
+          <tr>
+            <th>Bot</th><th>Symbol</th><th>Qty</th><th>Entry</th><th>Current</th>
+            <th>Signal</th><th>Grund</th><th>PnL</th><th>Orderzeit</th><th>Haltezeit</th><th>Referenz</th>
+          </tr>
+        </thead>
         <tbody id="positions-body"></tbody>
       </table>
     </article>
@@ -76,7 +81,7 @@
       <h2>📋 Recent Trades (Closed)</h2>
       <div class="filter-bar">
         <select id="trade-filter-strategy">
-          <option value="">All Strategies</option>
+          <option value="">All Bots</option>
         </select>
         <select id="trade-filter-days">
           <option value="7">Last 7 days</option>
@@ -87,7 +92,7 @@
       <table id="trades-table">
         <thead>
           <tr>
-            <th>Date</th><th>Strategy</th><th>Symbol</th><th>Side</th>
+            <th>Date</th><th>Bot</th><th>Symbol</th><th>Side</th>
             <th>Entry</th><th>Exit</th><th>PnL</th><th>PnL%</th>
             <th>MIT-Qty</th><th>EV</th><th>Reason</th>
           </tr>

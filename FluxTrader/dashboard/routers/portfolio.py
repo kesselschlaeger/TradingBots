@@ -8,16 +8,17 @@ Endpunkte:
 """
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 from fastapi import APIRouter, Query, Request
+from core.logging import get_logger
 
 router = APIRouter(tags=["portfolio"])
 
 
 async def _get_active_strategy_names(request: Request) -> set[str]:
-    """Bestimmt aktive Strategien aus Live-Health (lokal oder remote)."""
+    """Aktive Strategien via DB-Recency (kein HTTP)."""
     hs = request.app.state.health_state
     if hs is not None:
         snap = hs.snapshot()
@@ -27,23 +28,27 @@ async def _get_active_strategy_names(request: Request) -> set[str]:
             if str(s.get("name", "")).strip()
         }
 
-    # Standalone-Dashboard: versuche Health-Server des Live-Bots
-    try:
-        import httpx
+    state = request.app.state.persistent_state
+    heartbeats = await state.get_bot_heartbeats(active_only=True)
+    if heartbeats:
+        return {str(h.get("strategy", "")).strip() for h in heartbeats if str(h.get("strategy", "")).strip()}
 
-        health_url = request.app.state.health_server_url
-        async with httpx.AsyncClient(timeout=2.0) as client:
-            resp = await client.get(f"{health_url}/status")
-            if resp.status_code != 200:
-                return set()
-            snap = resp.json()
-            return {
-                str(s.get("name", "")).strip()
-                for s in snap.get("strategies", [])
-                if str(s.get("name", "")).strip()
-            }
-    except Exception:
-        return set()
+    strategies = await state.get_strategies()
+    active: set[str] = set()
+    for strat in strategies:
+        curve = await state.get_latest_equity_curve(strat, limit=1)
+        if not curve:
+            continue
+        try:
+            last_ts = datetime.fromisoformat(
+                str(curve[-1]["ts"]).replace("Z", "+00:00")
+            )
+            age = (datetime.now(timezone.utc) - last_ts).total_seconds()
+            if age < 300:
+                active.add(strat)
+        except (ValueError, KeyError, TypeError):
+            continue
+    return active
 
 
 @router.get("/portfolio")
@@ -106,9 +111,10 @@ async def get_positions(
     """Offene Positionen mit Live-PnL aus der zentralen DB.
 
     Fields:
-    - strategy, symbol, side, entry_price, qty
+    - strategy/bot, symbol, side, entry_price, qty
     - stop_price, current_price, unrealized_pnl, unrealized_pnl_pct
-    - held_minutes (wie lange die Position offen ist)
+    - order_ts, held_minutes (wie lange die Position offen ist)
+    - entry_signal, entry_reason, order_reference, broker_order_id
     """
     state = request.app.state.persistent_state
 
@@ -123,17 +129,34 @@ async def get_positions(
 
     result = []
     for p in positions:
+        entry_ts = p.get("entry_ts")
+        held_minutes = p.get("held_minutes") or 0
+        if entry_ts:
+            try:
+                parsed = datetime.fromisoformat(str(entry_ts).replace("Z", "+00:00"))
+                held_minutes = max(
+                    0,
+                    int((datetime.now(timezone.utc) - parsed).total_seconds() // 60),
+                )
+            except (TypeError, ValueError):
+                pass
         result.append({
             "strategy": p.get("strategy"),
+            "bot": p.get("strategy"),
             "symbol": p.get("symbol"),
             "side": p.get("side"),
+            "order_ts": entry_ts,
             "entry_price": float(p.get("entry_price") or 0.0),
             "qty": float(p.get("qty") or 0.0),
             "stop_price": float(p.get("stop_price") or 0.0),
             "current_price": float(p.get("current_price") or 0.0),
             "unrealized_pnl": float(p.get("unrealized_pnl") or 0.0),
             "unrealized_pnl_pct": float(p.get("unrealized_pnl_pct") or 0.0),
-            "held_minutes": p.get("held_minutes") or 0,
+            "held_minutes": held_minutes,
+            "entry_signal": p.get("entry_signal"),
+            "entry_reason": p.get("entry_reason"),
+            "broker_order_id": p.get("broker_order_id"),
+            "order_reference": p.get("order_reference") or p.get("broker_order_id"),
             "last_update_ts": p.get("last_update_ts"),
         })
 
@@ -207,50 +230,45 @@ async def list_strategies(
     return {
         "total_strategies": len(strategies),
         "active_strategies": len(result),
-        "active_source": "health",
+        "active_source": "in_process" if request.app.state.health_state else "db_recency",
         "strategies": result,
     }
 
 
 async def _get_strategy_health_map(request: Request) -> dict[str, dict[str, Any]]:
-    """Sammle Health-Telemetrie pro Strategie aus HealthState.
-
-    Lokal bevorzugt, sonst Remote-Health-Server.
-    """
-    from core.logging import get_logger
-    
+    """Health-Telemetrie aus SQLite (kein HTTP)."""
     log = get_logger(__name__)
     hs = request.app.state.health_state
-    snapshots: list[dict[str, Any]] = []
     if hs is not None:
         snapshots = list(hs.snapshot().get("strategies", []))
-    else:
-        try:
-            import httpx
+        out: dict[str, dict[str, Any]] = {}
+        for s in snapshots:
+            name = str(s.get("name", "")).strip()
+            if name:
+                out[name] = {
+                    "symbol_status": s.get("symbol_status", {}) or {},
+                    "last_bar_ts": s.get("last_bar_ts"),
+                    "last_bar_lag_ms": s.get("last_bar_lag_ms"),
+                    "signals_today": s.get("signals_today", 0),
+                    "signals_filtered_today": s.get("signals_filtered_today", 0),
+                }
+        return out
 
-            health_url = request.app.state.health_server_url
-            async with httpx.AsyncClient(timeout=2.0) as client:
-                resp = await client.get(f"{health_url}/status")
-                if resp.status_code == 200:
-                    data = resp.json()
-                    snapshots = list(data.get("strategies", []))
-                    if snapshots:
-                        log.debug("health_map.fetched", count=len(snapshots), url=health_url)
-                else:
-                    log.warning("health_map.bad_status", status=resp.status_code, url=health_url)
-        except Exception as e:
-            log.warning("health_map.fetch_failed", url=request.app.state.health_server_url, error=str(e))
-            snapshots = []
-
+    state = request.app.state.persistent_state
+    strategies = await state.get_strategies()
     out: dict[str, dict[str, Any]] = {}
-    for s in snapshots:
-        name = str(s.get("name", "")).strip()
-        if name:
-            out[name] = {
-                "symbol_status": s.get("symbol_status", {}) or {},
-                "last_bar_ts": s.get("last_bar_ts"),
-                "last_bar_lag_ms": s.get("last_bar_lag_ms"),
-                "signals_today": s.get("signals_today", 0),
-                "signals_filtered_today": s.get("signals_filtered_today", 0),
+    for strat in strategies:
+        try:
+            snap = await state.get_health_snapshot(strat)
+            out[strat] = {
+                "symbol_status": snap.get("symbol_status", {}),
+                "last_bar_ts": snap.get("last_bar_ts"),
+                "last_bar_lag_ms": snap.get("last_bar_lag_ms"),
+                "signals_today": snap.get("signals_today", 0),
+                "signals_filtered_today": snap.get("signals_filtered_today", 0),
+                "broker_connected": snap.get("broker_connected", False),
+                "circuit_breaker": snap.get("circuit_breaker", False),
             }
+        except Exception as e:
+            log.warning("health_map.db_failed", strategy=strat, error=str(e))
     return out

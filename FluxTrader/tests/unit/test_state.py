@@ -366,7 +366,8 @@ async def test_get_health_snapshot(state: PersistentState):
     assert snap["open_positions"] == 1  # MSFT
     assert snap["trades_today"] == 1   # AAPL geschlossen
     assert snap["pnl_today"] == 50.0
-    assert snap["signals_last_hour"] == 1
+    assert snap["signals_today"] == 1
+    assert snap["signals_filtered_today"] == 0
     assert snap["anomalies_last_hour"] == 0
 
 
