@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import signal as signal_mod
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -367,7 +368,7 @@ async def cmd_live(cfg: AppConfig) -> None:
         int(p)
         for p in (monitoring_extra.get("health_fallback_ports", []) or [])
     )
-    asyncio.create_task(start_health_server(
+    health_task = asyncio.create_task(start_health_server(
         health_state=health_state,
         metrics_collector=metrics_collector,
         port=cfg.monitoring.health_port,
@@ -380,37 +381,77 @@ async def cmd_live(cfg: AppConfig) -> None:
              symbols=cfg.strategy.symbols,
              health_port=cfg.monitoring.health_port)
 
-    # Pair-Pfad: PairEngine als separate Task
-    if isinstance(strategy, PairStrategy):
-        from live.pair_runner import PairEngine
-        pair_engine = PairEngine(
-            strategy=strategy,
-            broker=broker,
-            data_provider=data_prov,
-            context=ctx,
-            ml_filter=ml_filter,
-            state=state,
-            config=cfg.strategy.params,
-            health_state=health_state,
+    try:
+        # Pair-Pfad: PairEngine als separate Task
+        if isinstance(strategy, PairStrategy):
+            from live.pair_runner import PairEngine
+            pair_engine = PairEngine(
+                strategy=strategy,
+                broker=broker,
+                data_provider=data_prov,
+                context=ctx,
+                ml_filter=ml_filter,
+                state=state,
+                config=cfg.strategy.params,
+                health_state=health_state,
+            )
+            await pair_engine.run()
+        else:
+            # Standard-Pfad: LiveRunner
+            runner = LiveRunner(
+                strategy=strategy,
+                broker=broker,
+                data_provider=data_prov,
+                context=ctx,
+                state=state,
+                notifier=notifier,
+                symbols=cfg.strategy.symbols,
+                config=cfg.strategy.params,
+                health_state=health_state,
+                metrics_collector=metrics_collector,
+                anomaly_detector=anomaly_detector,
+                alerts_cfg=cfg.alerts,
+            )
+            await runner.start()
+    finally:
+        # Health-Server mit-cancellen, sonst hängt Shutdown auf Windows
+        health_task.cancel()
+        try:
+            await health_task
+        except (asyncio.CancelledError, Exception):
+            pass
+
+
+async def _run_with_shutdown(coro) -> None:
+    """Startet ``coro`` als Task und cancelt ihn bei SIGINT/SIGTERM.
+
+    Windows unterstützt ``loop.add_signal_handler`` nicht (ProactorEventLoop);
+    dort fällt der Code auf ``signal.signal`` zurück. In beiden Fällen wird der
+    Main-Task sauber gecancelt, sodass ``finally``-Blöcke (``runner.stop`` etc.)
+    laufen können und die Shutdown-Kette greift.
+    """
+    loop = asyncio.get_running_loop()
+    main_task = asyncio.create_task(coro)
+
+    def _request_shutdown() -> None:
+        if not main_task.done():
+            log.info("main.shutdown_requested")
+            main_task.cancel()
+
+    try:
+        loop.add_signal_handler(signal_mod.SIGINT, _request_shutdown)
+        loop.add_signal_handler(signal_mod.SIGTERM, _request_shutdown)
+    except NotImplementedError:
+        # Windows: signal.signal() wird im Main-Thread aufgerufen
+        signal_mod.signal(
+            signal_mod.SIGINT,
+            lambda *_: loop.call_soon_threadsafe(_request_shutdown),
         )
-        await pair_engine.run()
-    else:
-        # Standard-Pfad: LiveRunner
-        runner = LiveRunner(
-            strategy=strategy,
-            broker=broker,
-            data_provider=data_prov,
-            context=ctx,
-            state=state,
-            notifier=notifier,
-            symbols=cfg.strategy.symbols,
-            config=cfg.strategy.params,
-            health_state=health_state,
-            metrics_collector=metrics_collector,
-            anomaly_detector=anomaly_detector,
-            alerts_cfg=cfg.alerts,
-        )
-        await runner.start()
+
+    try:
+        await main_task
+    except asyncio.CancelledError:
+        log.info("main.cancelled")
 
 
 def cmd_dashboard(cfg: AppConfig, port: int) -> None:
@@ -465,9 +506,9 @@ def main() -> None:
         cfg.backtest_export.export_dir = Path(args.export_dir)
 
     if args.command in ("live", "paper"):
-        asyncio.run(cmd_live(cfg))
+        asyncio.run(_run_with_shutdown(cmd_live(cfg)))
     elif args.command == "backtest":
-        asyncio.run(cmd_backtest(cfg))
+        asyncio.run(_run_with_shutdown(cmd_backtest(cfg)))
     elif args.command == "wfo":
         cmd_wfo(cfg)
     elif args.command == "dashboard":

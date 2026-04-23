@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import signal as signal_mod
 import time as _time
 from dataclasses import asdict
 from datetime import date, datetime, time, timedelta, timezone
@@ -183,21 +182,17 @@ class LiveRunner:
         except Exception as e:  # noqa: BLE001
             log.warning("runner.warmup_failed", error=str(e))
 
-        # Graceful Shutdown via SIGINT / SIGTERM
-        loop = asyncio.get_event_loop()
-        for sig in (signal_mod.SIGINT, signal_mod.SIGTERM):
-            try:
-                loop.add_signal_handler(sig, lambda: asyncio.create_task(self.stop()))
-            except NotImplementedError:
-                pass
-
-        # Hauptloop: Bars streamen/pollt
+        # Hauptloop: Bars streamen/pollt. Shutdown via main.py –
+        # dort wird der Main-Task bei SIGINT/SIGTERM gecancelt, was
+        # hier als CancelledError ankommt. ``shield`` stellt sicher,
+        # dass ``self.stop()`` im finally-Block zu Ende läuft, auch
+        # wenn der Task selbst gerade gecancelt wird.
         try:
             await self._bar_loop()
         except (KeyboardInterrupt, asyncio.CancelledError):
             log.info("runner.interrupted")
         finally:
-            await self.stop()
+            await asyncio.shield(self.stop())
 
     async def stop(self) -> None:
         if not self._running:

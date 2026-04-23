@@ -128,21 +128,28 @@ class PairEngine:
                 )
 
             except asyncio.CancelledError:
+                self._running = False
                 break
             except Exception as e:  # noqa: BLE001
                 log.error("pair_engine.error", error=str(e))
 
-            await asyncio.sleep(poll_interval)
+            try:
+                await asyncio.sleep(poll_interval)
+            except asyncio.CancelledError:
+                self._running = False
+                break
 
+        # Shutdown-Heartbeat via shield, damit er auch bei gecanceltem
+        # Task zu Ende schreibt.
         try:
-            await self.state.upsert_bot_heartbeat(
+            await asyncio.shield(self.state.upsert_bot_heartbeat(
                 strategy=self.strategy.name,
                 bot_name=self.strategy.name,
                 broker_connected=False,
                 circuit_breaker=False,
                 broker_adapter=self._adapter_name,
-            )
-        except Exception as e:  # noqa: BLE001
+            ))
+        except (asyncio.CancelledError, Exception) as e:  # noqa: BLE001
             log.warning("pair_engine.heartbeat_shutdown_failed", error=str(e))
 
         log.info("pair_engine.stopped")
