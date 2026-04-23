@@ -12,6 +12,7 @@ from typing import Optional
 
 from core.logging import get_logger
 from core.models import CloseExecution, OrderRequest, OrderSide, Position
+from execution.contract_factory import build_contract
 from execution.port import BrokerPort
 
 log = get_logger(__name__)
@@ -127,7 +128,8 @@ class IBKRAdapter(BrokerPort):
         return "DAY"
 
     async def submit_order(self, req: OrderRequest) -> str:
-        contract = Stock(req.symbol, "SMART", "USD")
+        asset_class = str(req.metadata.get("asset_class", "equity"))
+        contract = build_contract(req.symbol, asset_class, req.metadata)
         action = "BUY" if req.side == OrderSide.BUY else "SELL"
         ref = _build_order_ref(self._bot_id, req.symbol, action,
                                self._order_prefix)
@@ -209,7 +211,7 @@ class IBKRAdapter(BrokerPort):
             self._ensure_connected()
             out: dict[str, Position] = {}
             for p in self.ib.positions():
-                if p.contract.secType != "STK":
+                if p.contract.secType not in ("STK", "FUT", "CRYPTO"):
                     continue
                 sym = p.contract.symbol
                 qty = float(p.position)
@@ -259,9 +261,33 @@ class IBKRAdapter(BrokerPort):
         if pos is None:
             return False
         action = "SELL" if pos.side == "long" else "BUY"
-        req = OrderRequest(symbol=symbol,
-                           side=OrderSide.SELL if action == "SELL" else OrderSide.BUY,
-                           qty=max(1, int(round(pos.qty))), order_type="market")
+        # Asset-class aus IB-Position ableiten (STK/FUT/CRYPTO), damit der
+        # Gegen-Trade den passenden Contract-Typ benutzt.
+        meta: dict = {}
+        for p in self.ib.positions():
+            if getattr(p.contract, "symbol", "").upper() == symbol.upper():
+                sec_type = getattr(p.contract, "secType", "STK")
+                meta["asset_class"] = {
+                    "STK": "equity",
+                    "FUT": "futures",
+                    "CRYPTO": "crypto",
+                }.get(sec_type, "equity")
+                if sec_type == "FUT":
+                    meta["futures_exchange"] = getattr(
+                        p.contract, "exchange", "CME",
+                    )
+                if sec_type == "CRYPTO":
+                    meta["crypto_quote_currency"] = getattr(
+                        p.contract, "currency", "USD",
+                    )
+                break
+        req = OrderRequest(
+            symbol=symbol,
+            side=OrderSide.SELL if action == "SELL" else OrderSide.BUY,
+            qty=max(1, int(round(pos.qty))),
+            order_type="market",
+            metadata=meta,
+        )
         await self.submit_order(req)
         return True
 
@@ -302,7 +328,7 @@ class IBKRAdapter(BrokerPort):
                 execution = getattr(fill, "execution", None)
                 if contract is None or execution is None:
                     continue
-                if getattr(contract, "secType", "") != "STK":
+                if getattr(contract, "secType", "") not in ("STK", "FUT", "CRYPTO"):
                     continue
 
                 sym = str(getattr(contract, "symbol", "")).upper()

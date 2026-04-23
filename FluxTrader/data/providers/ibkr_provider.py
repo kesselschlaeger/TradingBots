@@ -12,6 +12,7 @@ import pandas as pd
 from core.logging import get_logger
 from core.models import Bar
 from data.providers.base import DataProvider
+from execution.contract_factory import build_contract
 
 log = get_logger(__name__)
 
@@ -103,6 +104,8 @@ class IBKRDataProvider(DataProvider):
         fetch_timeout_s: float = 45.0,
         pacing_sleep_s: float = 0.3,
         max_retries: int = 2,
+        asset_class: str = "equity",
+        contract_cfg: Optional[dict] = None,
     ):
         if not IBKR_AVAILABLE:
             raise RuntimeError("ib_insync fehlt – pip install ib_insync")
@@ -116,6 +119,12 @@ class IBKRDataProvider(DataProvider):
             else:
                 client_id = int(os.getenv("IBKR_CLIENT_ID", "1")) + 100
         self._client_id = client_id
+        self._asset_class = (asset_class or "equity").lower()
+        self._contract_cfg = dict(contract_cfg or {})
+        # Futures/Crypto haben 24h bzw. Overnight-Sessions – RTH-Fenster
+        # würde die meisten Bars herausfiltern.
+        if self._asset_class in ("futures", "crypto"):
+            use_rth = False
         self._use_rth = use_rth
         self._fetch_timeout_s = float(
             os.getenv("IBKR_DATA_TIMEOUT_S", fetch_timeout_s)
@@ -201,16 +210,26 @@ class IBKRDataProvider(DataProvider):
 
         def _fetch() -> pd.DataFrame:
             self._ensure_connected()
-            contract = Stock(symbol.upper(), "SMART", "USD")
-            self.ib.qualifyContracts(contract)
+            contract = build_contract(
+                symbol.upper(), self._asset_class, self._contract_cfg,
+            )
+            qualified = self.ib.qualifyContracts(contract)
+            if not qualified:
+                log.error(
+                    "ibkr_provider.no_contract",
+                    symbol=symbol,
+                    asset_class=self._asset_class,
+                )
+                return pd.DataFrame()
             end_utc = end.astimezone(timezone.utc) if end.tzinfo else end.replace(tzinfo=timezone.utc)
             end_dt_str = end_utc.strftime("%Y%m%d-%H:%M:%S")
+            what_to_show = "AGGTRADES" if self._asset_class == "crypto" else "TRADES"
             bars = self.ib.reqHistoricalData(
                 contract,
                 endDateTime=end_dt_str,
                 durationStr=duration,
                 barSizeSetting=bar_size,
-                whatToShow="TRADES",
+                whatToShow=what_to_show,
                 useRTH=self._use_rth,
                 formatDate=1,
                 keepUpToDate=False,

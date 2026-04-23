@@ -8,6 +8,11 @@ Multi-Timeframe Order Block strategy implementing ICT/SMC concepts:
 
 Broker-agnostisch: kein I/O, kein HTTP, kein SDK.
 Identisch in Backtest und Live.
+
+Unterstützt drei Asset-Klassen: equity | futures | crypto. Asset-spezifische
+Session-Fenster, Trend-Referenz, Gap-Filter und Position-Sizing werden über
+private Hooks (``_is_trading_session`` etc.) abgewickelt – die Kern-Logik
+in ``_generate_signals`` bleibt strukturell identisch.
 """
 from __future__ import annotations
 
@@ -50,45 +55,97 @@ log = get_logger(__name__)
 
 # ─────────────────────────── Default Config ─────────────────────────────────
 
+# Fallback-Tabelle für Futures-Point-Values (USD pro Punkt). Wird nur
+# genutzt wenn cfg["futures_point_value"] nicht gesetzt ist. Alle CME
+# E-Mini / Micro-E-Mini sind unterstützt, können via Config überschrieben
+# werden.
+FUTURES_POINT_VALUES: dict = {
+    "NQ": 20.0,    # E-mini Nasdaq-100 ($20 / Punkt)
+    "ES": 50.0,    # E-mini S&P 500 ($50 / Punkt)
+    "YM": 5.0,     # E-mini Dow ($5 / Punkt)
+    "RTY": 50.0,   # E-mini Russell 2000 ($50 / Punkt)
+    "MNQ": 2.0,    # Micro E-mini Nasdaq ($2 / Punkt)
+    "MES": 5.0,    # Micro E-mini S&P ($5 / Punkt)
+}
+
+
 ICT_OB_DEFAULT_PARAMS: dict = {
-    "min_bars": 250,
-    "max_bars_buffer": 2000,
+    "min_bars": 250,                          # Mindestzahl 5m-Bars für Signalerzeugung
+    "max_bars_buffer": 2000,                  # Rolling-Buffer in BaseStrategy
 
     # OB detection
-    "atr_period": 14,
-    "displacement_mult": 1.8,
-    "swing_lookback_4h": 3,
-    "swing_lookback_1h": 5,
+    "atr_period": 14,                         # ATR-Fenster in Bars (MTF)
+    "displacement_mult": 1.8,                 # Displacement = body > mult × ATR
+    "swing_lookback_4h": 3,                   # Swing-Fenster für 4H-OB Detection
+    "swing_lookback_1h": 5,                   # Swing-Fenster für 1H-Struktur
 
     # Entry
-    "ob_entry_mode": "standard",   # aggressive | standard | conservative
-    "min_confluence_score": 0.75,
-    "min_signal_strength": 0.75,
+    "ob_entry_mode": "standard",              # aggressive | standard | conservative
+    "min_confluence_score": 0.75,             # Mindest-Confluence (0..1) für Entry
+    "min_signal_strength": 0.75,              # Signal-Strength-Threshold
 
     # Risk
-    "stop_ob_mult": 0.75,         # SL = mult × OB-range outside OB
-    "profit_target_r": 2.0,       # 1:2 RR
-    "risk_per_trade": 0.005,      # 0.5 %
+    "stop_ob_mult": 0.75,                     # SL = mult × OB-range außerhalb der Zone
+    "profit_target_r": 2.0,                   # R-Multiple für TP (1:2)
+    "risk_per_trade": 0.005,                  # 0.5 % Risiko je Trade
 
     # Filters
-    "use_trend_filter": True,
-    "trend_ema_period": 20,
-    "use_gap_filter": True,
-    "max_gap_pct": 0.03,
-    "vix_threshold": 30.0,
+    "use_trend_filter": True,                 # EMA-Referenz-Trend aktivieren
+    "trend_ema_period": 20,                   # EMA-Periode für Trend-Filter
+    "use_gap_filter": True,                   # Overnight-Gap-Block (nur equity relevant)
+    "max_gap_pct": 0.03,                      # max. Overnight-Gap (3 %)
+    "vix_threshold": 30.0,                    # VIX-Grenze für Positionsgrößen-Halbierung
 
-    "allow_shorts": True,
-    "market_open": time(9, 30),
-    "market_close": time(16, 0),
-    "entry_cutoff_time": time(15, 0),
+    "allow_shorts": True,                     # Short-Seite aktivieren
+    "market_open": time(9, 30),               # Equity Session-Start (ET)
+    "market_close": time(16, 0),              # Equity Session-Ende (ET)
+    "entry_cutoff_time": time(15, 0),         # Equity: kein neuer Entry nach 15:00 ET
+
+    # ── Asset-Class Support (equity | futures | crypto) ───────────────
+    "asset_class": "equity",                  # Routing-Schalter für Session/Sizing/Contract
+
+    # Futures-spezifisch (CME Globex)
+    "futures_exchange": "CME",                # IBKR-Exchange für Future-Contract
+    "futures_point_value": 20.0,              # USD je Punkt (NQ=20, ES=50); überschreibt FUTURES_POINT_VALUES
+    "futures_session_open": "18:00",          # ET, Abend-Open (Start Globex-Woche)
+    "futures_session_close": "17:00",         # ET, Fr-Close (Ende Globex-Woche)
+    "futures_entry_cutoff": "15:45",          # ET, letzter Entry vor US-Close; None = kein Cutoff
+
+    # Crypto-spezifisch (24/7 Spot)
+    "crypto_quote_currency": "USD",           # Notierungs-Währung für Crypto-Contract
+    "crypto_session_open": None,              # None = 24/7 handelbar
+    "crypto_entry_cutoff": None,              # None = kein Cutoff
+
+    # Trend-Filter Referenz-Asset (überschreibt Auto-Routing je asset_class)
+    "trend_reference_asset": None,            # None = auto: SPY (equity) / ES (futures) / None (crypto)
 
     # MIT Independence
-    "use_mit_independence_guard": False,
-    "mit_correlation_groups": {},
+    "use_mit_independence_guard": False,      # Korrelations-Gruppen-Lock aktivieren
+    "mit_correlation_groups": {},             # Symbol-Gruppen-Mapping
 }
 
 
 # ─────────────────────────── Helpers ────────────────────────────────────────
+
+def _coerce_time(val) -> Optional[time]:
+    """Normalisiert 'HH:MM'-Strings / time-Objekte auf ``time`` | None."""
+    if val is None:
+        return None
+    if isinstance(val, time):
+        return val
+    if isinstance(val, str):
+        s = val.strip()
+        if not s:
+            return None
+        parts = s.split(":")
+        try:
+            hh = int(parts[0])
+            mm = int(parts[1]) if len(parts) > 1 else 0
+            return time(hh, mm)
+        except (ValueError, IndexError):
+            return None
+    return None
+
 
 def _bars_to_df(bars: list[Bar]) -> pd.DataFrame:
     """Convert Bar list to OHLCV DataFrame with UTC index."""
@@ -185,13 +242,14 @@ class IctOrderBlockStrategy(BaseStrategy):
         cfg = self.config
         symbol = bar.symbol
         ts = bar.timestamp
+        asset_class = str(cfg.get("asset_class", "equity")).lower()
 
-        if not is_market_hours(ts):
+        if not self._is_trading_session(ts):
             self._record_status(symbol, "OUTSIDE_HOURS",
                                 "außerhalb Handelszeiten")
             return []
 
-        if not entry_cutoff_ok(ts, cfg.get("entry_cutoff_time")):
+        if not self._entry_cutoff_ok(ts):
             self._record_status(symbol, "ENTRY_CUTOFF",
                                 "Entry-Cutoff überschritten")
             return []
@@ -228,15 +286,14 @@ class IctOrderBlockStrategy(BaseStrategy):
         day_et = to_et(ts)
         day_key = day_et.date() if hasattr(day_et, "date") else day_et
 
-        # ── Gap Filter ────────────────────────────────────────────────
+        # ── Gap Filter (equity-only, futures/crypto: No-Op) ───────────
         if cfg.get("use_gap_filter", True):
             gap_ck = (symbol, day_key)
             cached = self._gap_cache.get(gap_ck)
             if cached is not None:
                 gap_ok, gap_pct = cached
             else:
-                gap_ok, gap_pct = self._gap_check(
-                    df_5m, float(cfg.get("max_gap_pct", 0.03)))
+                gap_ok, gap_pct = self._gap_check_for_asset(df_5m)
                 self._gap_cache[gap_ck] = (gap_ok, gap_pct)
             if not gap_ok:
                 log.debug("ict_ob.gap_block", symbol=symbol, gap_pct=gap_pct)
@@ -244,17 +301,14 @@ class IctOrderBlockStrategy(BaseStrategy):
                                     f"gap {gap_pct:.2%}")
                 return []
 
-        # ── Trend Filter ──────────────────────────────────────────────
+        # ── Trend Filter (asset-class aware) ──────────────────────────
         trend = {"bullish": True, "bearish": True}
         if cfg.get("use_trend_filter", True):
             ct = self._trend_cache.get(day_key)
             if ct is not None:
                 trend = ct
             else:
-                trend = trend_filter_from_spy(
-                    self.context.spy_df_asof(self.context.now),
-                    cfg.get("trend_ema_period", 20),
-                )
+                trend = self._resolve_trend(day_key)
                 self._trend_cache[day_key] = trend
 
         # ── VIX overlay ───────────────────────────────────────────────
@@ -287,13 +341,22 @@ class IctOrderBlockStrategy(BaseStrategy):
         ob_type = active_ob["type"]
 
         # Direction must align with trend
+        ref_asset = self._trend_reference_asset_key()
         if ob_type == "bullish" and not trend["bullish"]:
-            self._record_status(symbol, "TREND_BLOCK",
-                                "4H bullish OB, aber SPY-Trend nicht bullish")
+            log.debug("ict_ob.trend_block", symbol=symbol,
+                      asset_class=asset_class, ref_asset=ref_asset)
+            self._record_status(
+                symbol, "TREND_BLOCK",
+                f"4H bullish OB, aber {ref_asset or 'ref'}-Trend nicht bullish",
+            )
             return []
         if ob_type == "bearish" and not trend["bearish"]:
-            self._record_status(symbol, "TREND_BLOCK",
-                                "4H bearish OB, aber SPY-Trend nicht bearish")
+            log.debug("ict_ob.trend_block", symbol=symbol,
+                      asset_class=asset_class, ref_asset=ref_asset)
+            self._record_status(
+                symbol, "TREND_BLOCK",
+                f"4H bearish OB, aber {ref_asset or 'ref'}-Trend nicht bearish",
+            )
             return []
         if ob_type == "bearish" and not cfg.get("allow_shorts", True):
             self._record_status(symbol, "SHORTS_DISABLED",
@@ -375,7 +438,12 @@ class IctOrderBlockStrategy(BaseStrategy):
             float(cfg.get("profit_target_r", 2.0)),
         )
 
-        # ── qty_factor (VIX) ──────────────────────────────────────────
+        # ── Position Sizing (asset-class aware) ───────────────────────
+        equity = float(self.context.account.equity or 0.0)
+        risk_pct = float(cfg.get("risk_per_trade", 0.005))
+        contract_qty = self._effective_risk_qty(
+            equity, risk_pct, float(entry_price), float(stop_price),
+        )
         qty_factor = vix_factor
         strength = float(np.clip(score, 0.0, 1.0))
 
@@ -429,10 +497,25 @@ class IctOrderBlockStrategy(BaseStrategy):
                 "fvg_at_ob": fvg_at_ob,
                 "entry_confirmed": entry_confirmed,
                 "qty_factor": qty_factor,
+                "contract_qty": float(contract_qty),
+                "asset_class": asset_class,
+                "futures_exchange": cfg.get("futures_exchange", "CME"),
+                "futures_point_value": float(cfg.get(
+                    "futures_point_value",
+                    FUTURES_POINT_VALUES.get(symbol.upper(), 0.0),
+                )),
+                "crypto_quote_currency": cfg.get("crypto_quote_currency", "USD"),
+                "ibkr_crypto_symbol": cfg.get("ibkr_crypto_symbol"),
                 "reason": reason,
                 "risk_per_trade": float(cfg.get("risk_per_trade", 0.005)),
             },
         )
+
+        # Für Futures bestimmt der Kontrakt-Count die Ordermenge direkt;
+        # Share-basiertes position_size() greift nicht. Für equity/crypto
+        # bleibt der bestehende R-basierte Flow in execute_signal intakt.
+        if asset_class == "futures":
+            signal.metadata["qty_hint"] = max(1, int(round(contract_qty)))
 
         if cfg.get("use_mit_independence_guard", False):
             signal.metadata["reserve_group"] = correlation_group(
@@ -440,7 +523,8 @@ class IctOrderBlockStrategy(BaseStrategy):
             )
 
         log.info("ict_ob.signal", symbol=symbol, direction=side,
-                 strength=strength, confluence=score)
+                 strength=strength, confluence=score,
+                 asset_class=asset_class, contract_qty=contract_qty)
         self._record_status(symbol, "SIGNAL", reason)
         return [signal]
 
@@ -531,3 +615,127 @@ class IctOrderBlockStrategy(BaseStrategy):
         gap_pct = (abs(today_open - prev_close) / prev_close
                    if prev_close > 0 else 0.0)
         return gap_filter(today_open, prev_close, max_gap_pct), gap_pct
+
+    # ── Asset-Class Hooks ──────────────────────────────────────────────
+    # Die Kern-Signallogik bleibt equity/futures/crypto-agnostisch. Die
+    # folgenden fünf Hooks kapseln alle asset-abhängigen Entscheidungen.
+
+    def _asset_class(self) -> str:
+        return str(self.config.get("asset_class", "equity")).lower()
+
+    def _is_trading_session(self, ts) -> bool:
+        """Asset-class-abhängige Session-Prüfung."""
+        ac = self._asset_class()
+        if ac == "crypto":
+            return True
+        if ac == "futures":
+            et_dt = to_et(ts)
+            wday = et_dt.weekday()              # 0=Mon … 6=Sun
+            t = et_dt.time()
+            open_t = _coerce_time(self.config.get("futures_session_open")) \
+                or time(18, 0)
+            close_t = _coerce_time(self.config.get("futures_session_close")) \
+                or time(17, 0)
+            # CME Globex vereinfacht: Mo 18:00 ET – Fr 17:00 ET. Sa/So
+            # keine Trades. Wochenrand-Lücken an Mon/Fri werden exakt
+            # abgefangen.
+            if wday >= 5:                       # Sa, So
+                return False
+            if wday == 4 and t >= close_t:      # Freitag nach Close
+                return False
+            if wday == 0 and t < open_t:        # Montag vor Open
+                return False
+            return True
+        # equity
+        return is_market_hours(ts)
+
+    def _entry_cutoff_ok(self, ts) -> bool:
+        """Asset-class-abhängiger Entry-Cutoff."""
+        ac = self._asset_class()
+        if ac == "futures":
+            cutoff = _coerce_time(self.config.get("futures_entry_cutoff"))
+            if cutoff is None:
+                return True
+            return entry_cutoff_ok(ts, cutoff)
+        if ac == "crypto":
+            cutoff = _coerce_time(self.config.get("crypto_entry_cutoff"))
+            if cutoff is None:
+                return True
+            return entry_cutoff_ok(ts, cutoff)
+        return entry_cutoff_ok(ts, _coerce_time(
+            self.config.get("entry_cutoff_time"),
+        ))
+
+    def _trend_reference_asset_key(self) -> Optional[str]:
+        """Default-Routing: equity→SPY (implizit), futures→ES, crypto→None."""
+        explicit = self.config.get("trend_reference_asset")
+        if explicit:
+            return str(explicit).upper()
+        ac = self._asset_class()
+        if ac == "futures":
+            return "ES"
+        if ac == "equity":
+            return "SPY"
+        return None
+
+    def _resolve_trend(self, day_key) -> dict:
+        """Liefert {'bullish': bool, 'bearish': bool} je nach Asset-Klasse."""
+        ac = self._asset_class()
+        ema_period = int(self.config.get("trend_ema_period", 20))
+
+        if ac == "equity" and not self.config.get("trend_reference_asset"):
+            return trend_filter_from_spy(
+                self.context.spy_df_asof(self.context.now), ema_period,
+            )
+
+        ref = self._trend_reference_asset_key()
+        if ref is None:
+            return {"bullish": True, "bearish": True}
+
+        ref_bars = self.context.bars(ref)
+        if not ref_bars:
+            return {"bullish": True, "bearish": True}
+        df = _bars_to_df(ref_bars)
+        if df.empty or len(df) < ema_period:
+            return {"bullish": True, "bearish": True}
+        return trend_filter_from_spy(df, ema_period)
+
+    def _gap_check_for_asset(self, df_5m: pd.DataFrame) -> tuple[bool, float]:
+        """Gap-Filter nur für equity; futures/crypto → neutral."""
+        if self._asset_class() != "equity":
+            return True, 0.0
+        return self._gap_check(
+            df_5m, float(self.config.get("max_gap_pct", 0.03)),
+        )
+
+    def _effective_risk_qty(
+        self,
+        equity: float,
+        risk_pct: float,
+        entry: float,
+        stop: float,
+    ) -> float:
+        """Asset-spezifische Stückzahl/Kontrakt-Anzahl je Trade."""
+        ac = self._asset_class()
+        if equity <= 0 or entry <= 0:
+            return 0.0
+        if ac == "futures":
+            risk_dollars = equity * risk_pct
+            points_at_risk = abs(entry - stop)
+            if points_at_risk <= 0:
+                return 0.0
+            symbol_guess = ""
+            try:
+                symbol_guess = self.bars[-1].symbol.upper() if self.bars else ""
+            except Exception:  # noqa: BLE001
+                symbol_guess = ""
+            point_value = float(self.config.get(
+                "futures_point_value",
+                FUTURES_POINT_VALUES.get(symbol_guess, 0.0),
+            ))
+            if point_value <= 0:
+                return 0.0
+            qty = risk_dollars / (points_at_risk * point_value)
+            return max(1.0, float(round(qty)))
+        # equity + crypto: shares/units via bestehender R-Formel
+        return float(position_size(equity, risk_pct, entry, stop))

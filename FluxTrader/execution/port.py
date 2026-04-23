@@ -126,6 +126,18 @@ class BrokerPort(ABC):
             return None
 
         side = OrderSide.BUY if signal.direction > 0 else OrderSide.SELL
+        # Asset-class-spezifische Kontext-Keys werden an den Broker-Adapter
+        # weitergereicht (→ build_contract in execution.contract_factory).
+        order_meta = {
+            "asset_class": signal.metadata.get("asset_class", "equity"),
+            "futures_exchange": signal.metadata.get("futures_exchange", "CME"),
+            "crypto_quote_currency": signal.metadata.get(
+                "crypto_quote_currency", "USD",
+            ),
+        }
+        ibkr_crypto_symbol = signal.metadata.get("ibkr_crypto_symbol")
+        if ibkr_crypto_symbol:
+            order_meta["ibkr_crypto_symbol"] = ibkr_crypto_symbol
         req = OrderRequest(
             symbol=signal.symbol,
             side=side,
@@ -136,6 +148,7 @@ class BrokerPort(ABC):
             take_profit=signal.target_price,
             time_in_force=signal.metadata.get("time_in_force", "day"),
             client_order_id=signal.metadata.get("client_order_id"),
+            metadata=order_meta,
         )
         order_id = await self.submit_order(req)
         return ExecutionResult(

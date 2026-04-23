@@ -90,6 +90,7 @@ class OrderRequest:
     take_profit: Optional[float] = None
     time_in_force: str = "day"
     client_order_id: Optional[str] = None
+    metadata: dict = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

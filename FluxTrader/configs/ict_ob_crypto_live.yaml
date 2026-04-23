@@ -1,0 +1,62 @@
+# ICT Order Block MTF Confluence – Crypto Live / Paper (IBKR PAXOS)
+mode: live
+
+strategy:
+  name: ict_ob_mtf
+  symbols: [BTCUSD, ETHUSD]          # IBKR Crypto-Symbole (PAXOS)
+  risk_pct: 0.005                    # 0.5 % pro Trade
+  params:
+    asset_class: crypto              # Routing-Schalter (equity | futures | crypto)
+
+    min_bars: 800                    # Mindest-5m-Bars für MTF-Aggregation
+    max_bars_buffer: 2000            # Rolling-Buffer in BaseStrategy
+
+    # OB-Detection
+    atr_period: 14                   # ATR-Fenster
+    displacement_mult: 1.8           # Displacement-Schwelle
+    swing_lookback_4h: 3             # Swing-Fenster 4H OB
+    swing_lookback_1h: 5             # Swing-Fenster 1H Struktur
+
+    # Entry
+    ob_entry_mode: standard          # aggressive | standard | conservative
+    min_confluence_score: 0.75       # Mindest-Confluence (0..1)
+    min_signal_strength: 0.75        # Signal-Strength-Threshold
+
+    # Risk
+    stop_ob_mult: 0.75               # SL = 0.75 × OB-Range außerhalb der Zone
+    profit_target_r: 2.0             # 1:2 RR
+    risk_per_trade: 0.005            # 0.5 % Equity-Risiko je Trade
+
+    # Crypto-spezifisch
+    crypto_quote_currency: USD       # Notierungs-Währung (Contract-Build)
+    crypto_session_open: null        # null = 24/7, kein Session-Gate
+    crypto_entry_cutoff: null        # null = kein Cutoff
+
+    # Filter – crypto: kein externer Benchmark, kein Gap, kein VIX
+    use_trend_filter: false          # kein Referenz-Asset für Bias
+    trend_reference_asset: null      # (auto) – null = kein Trend-Block
+    use_gap_filter: false             # 24/7 Market – Gap-Konzept passt nicht
+    vix_threshold: null              # VIX-Overlay deaktiviert
+
+    allow_shorts: true               # auf PAXOS i.d.R. nur long; Short per Config disable
+    market_open: null                # keine Equity-Session-Grenzen
+    market_close: null
+
+    # MIT Independence Guard (optional)
+    use_mit_independence_guard: false
+    mit_correlation_groups: {}
+
+broker:
+  type: ibkr
+  paper: true
+  ibkr_client_id: 20                 # eindeutige Client-ID (Separate-Bot-Isolation)
+  ibkr_bot_id: Flux_ICT_CRY
+
+data:
+  provider: ibkr
+  timeframe: "5Min"
+  lookback_days: 30                  # 24/7 Crypto: mehr Bars je Zeitfenster
+
+notifications:
+  enabled: true
+  bot_name: FLUX_ICT_OB_CRYPTO

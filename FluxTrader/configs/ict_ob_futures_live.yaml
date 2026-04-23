@@ -1,0 +1,67 @@
+# ICT Order Block MTF Confluence – Futures Live / Paper (CME)
+mode: live
+
+strategy:
+  name: ict_ob_mtf
+  symbols: [NQ]                      # Nasdaq 100 E-mini; ES/YM/RTY möglich
+  risk_pct: 0.005                    # 0.5 % pro Trade
+  params:
+    asset_class: futures             # Routing-Schalter (equity | futures | crypto)
+
+    min_bars: 800                    # Mindest-5m-Bars für MTF-Aggregation
+    max_bars_buffer: 2000            # Rolling-Buffer in BaseStrategy
+
+    # OB-Detection
+    atr_period: 14                   # ATR-Fenster (MTF-Indikator)
+    displacement_mult: 1.8           # Displacement = body > mult × ATR
+    swing_lookback_4h: 3             # Swing-Fenster 4H OB
+    swing_lookback_1h: 5             # Swing-Fenster 1H Struktur
+
+    # Entry
+    ob_entry_mode: standard          # aggressive | standard | conservative
+    min_confluence_score: 0.75       # Mindest-Confluence (0..1)
+    min_signal_strength: 0.75        # Signal-Strength-Threshold
+
+    # Risk
+    stop_ob_mult: 0.75               # SL = 0.75 × OB-Range außerhalb der Zone
+    profit_target_r: 2.0             # 1:2 RR
+    risk_per_trade: 0.005            # 0.5 % Equity-Risiko je Trade
+
+    # Futures-spezifisch
+    futures_exchange: CME            # IBKR-Exchange für Future-Contract
+    futures_point_value: 20.0        # NQ: $20 pro Punkt (ES=50, YM=5, RTY=50)
+    futures_session_open: "18:00"    # ET, CME-Globex Start (Vorabend)
+    futures_session_close: "17:00"   # ET, CME-Globex Ende
+    futures_entry_cutoff: "15:45"    # ET, kein Entry nach 15:45 ET
+
+    # Trend-Filter
+    use_trend_filter: true           # EMA-Trend aktivieren
+    trend_ema_period: 20             # EMA-Periode
+    trend_reference_asset: ES        # E-Mini S&P als Markt-Bias-Referenz
+
+    # Gap-Filter: für Futures deaktiviert (Overnight-Session macht Gap-Logik sinnlos)
+    use_gap_filter: false            # wird intern ohnehin ignoriert, explizit gesetzt
+
+    vix_threshold: 30.0              # VIX-Schwelle für Sizing-Halbierung
+
+    allow_shorts: true               # Short-Seite erlauben
+    entry_cutoff_time: "15:45"       # fallback (wird durch futures_entry_cutoff überschrieben)
+
+    # MIT Independence Guard (optional)
+    use_mit_independence_guard: false
+    mit_correlation_groups: {}
+
+broker:
+  type: ibkr
+  paper: true
+  ibkr_client_id: 19                 # eindeutige Client-ID (nicht 18 wie equity-Bot)
+  ibkr_bot_id: Flux_ICT_FUT
+
+data:
+  provider: ibkr
+  timeframe: "5Min"
+  lookback_days: 60                  # genügend 4H-Bars für MTF
+
+notifications:
+  enabled: true
+  bot_name: FLUX_ICT_OB_FUTURES
