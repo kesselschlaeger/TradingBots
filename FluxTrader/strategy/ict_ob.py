@@ -258,9 +258,10 @@ class IctOrderBlockStrategy(BaseStrategy):
         bars_list = [b for b in self.bars if b.symbol == symbol]
         if len(bars_list) < int(cfg.get("min_bars", 250)):
             bars_list = self.context.bars(symbol)
-            if len(bars_list) < 50:
+            MIN_BARS_FOR_MTF = 400  # ~5 Handelstage à 78 5M-Bars
+            if len(bars_list) < MIN_BARS_FOR_MTF:
                 self._record_status(symbol, "NO_DATA",
-                                    f"nur {len(bars_list)} Bars verfügbar")
+                                    f"nur {len(bars_list)} Bars für MTF (min {MIN_BARS_FOR_MTF})")
                 return []
 
         df_5m = _bars_to_df(bars_list)

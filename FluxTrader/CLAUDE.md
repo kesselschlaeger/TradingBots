@@ -49,15 +49,20 @@ strategy/orb.py         → ORBStrategy (@register("orb"))
 strategy/obb.py         → OBBStrategy (@register("obb"))
 strategy/botti.py       → BottiStrategy (@register("botti"))
 strategy/botti_pair.py  → BottiPairStrategy (@register("botti_pair"))
+strategy/ict_ob.py      → IctOrderBlockStrategy (@register("ict_ob_mtf"))
+                           Multi-Timeframe ICT/SMC Order Block (4H/1H/15M/5M)
+                           Unterstützt equity | futures | crypto via asset_class-Config
 
-execution/port.py       → BrokerPort ABC + execute_signal() + execute_pair_signal()
+execution/port.py           → BrokerPort ABC + execute_signal() + execute_pair_signal()
 execution/paper_adapter.py  → In-Memory, kein Netzwerk, für Tests/Backtest
 execution/alpaca_adapter.py → alpaca-py sync→async via run_in_executor
 execution/ibkr_adapter.py   → ib_insync sync→async, Bracket via Parent/Child
+execution/contract_factory.py → build_contract(symbol, asset_class, cfg) → Stock/Future/Crypto
 
 data/providers/base.py         → DataProvider ABC
 data/providers/alpaca_provider.py → Alpaca Historical + Polling-Stream
 data/providers/yfinance_provider.py → yfinance für Backtest
+data/providers/ibkr_provider.py   → IBKR Historical + Polling-Stream (equity/futures/crypto)
 
 backtest/engine.py   → BarByBarEngine (chronologische Bar-Iteration)
 backtest/report.py   → build_tearsheet(), format_tearsheet()
@@ -73,12 +78,15 @@ live/scanner.py     → PremarketScanner (Alpaca Snapshot-API)
 tools/train_ml.py   → CLI: ML-Model-Training auf historischen Trades
 tools/models/       → Gespeicherte model.pkl + scaler.pkl
 
-configs/base.yaml              → Shared Defaults (wird gemerged)
-configs/botti.yaml            → Botti Live/Paper (IBKR, Daily + MTF-Filter aktiv)
-configs/botti_backtest_mtf.yaml  → Botti Backtest MIT MTF-Filter (yfinance, broker=paper)
-configs/botti_backtest_nomtf.yaml → Botti Backtest OHNE MTF-Filter (Baseline)
-configs/botti_pair.yaml       → Botti Pair-Trading (SPY/QQQ Kalman Z-Score)
-main.py                       → CLI: live | paper | backtest
+configs/base.yaml                   → Shared Defaults (wird gemerged)
+configs/botti.yaml                  → Botti Live/Paper (IBKR, Daily + MTF-Filter aktiv)
+configs/botti_backtest_mtf.yaml     → Botti Backtest MIT MTF-Filter (yfinance, broker=paper)
+configs/botti_backtest_nomtf.yaml   → Botti Backtest OHNE MTF-Filter (Baseline)
+configs/botti_pair.yaml             → Botti Pair-Trading (SPY/QQQ Kalman Z-Score)
+configs/ict_ob_live.yaml            → ICT OB Equity Live/Paper (NVDA/AMD/AVGO, IBKR)
+configs/ict_ob_futures_live.yaml    → ICT OB Futures Live/Paper (NQ, CME Globex, IBKR)
+configs/ict_ob_crypto_live.yaml     → ICT OB Crypto Live/Paper (BTCUSD/ETHUSD, PAXOS/IBKR)
+main.py                             → CLI: live | paper | backtest
 ```
 
 ## Signal-Flow (Kurzfassung)
@@ -136,6 +144,11 @@ macd_hist, z_score (Pair: Spread Z-Score, Einzelsymbol: 0.0), volume_ratio.
   `botti_trend`-Signal enthält `vix_factor` in metadata
 - **Pair**: ATR-basiert über `execute_pair_signal(signal, equity)`
   Nutzt `qty_pct` und `atr_pct` aus PairSignal/FeatureVector
+- **ICT OB Equity**: R-basiert via `position_size()`, VIX-Overlay via `qty_factor`
+- **ICT OB Futures**: Kontrakt-Anzahl = `equity × risk_pct / (points_at_risk × point_value)`
+  Mindestens 1 Kontrakt. `futures_point_value` aus Config oder `FUTURES_POINT_VALUES`-Tabelle.
+  Signal setzt `qty_hint` → `execute_signal` umgeht Share-basiertes Sizing.
+- **ICT OB Crypto**: wie Equity (fraktionale Einheiten via `position_size`)
 
 ## Strategie registrieren
 
@@ -196,6 +209,70 @@ Fixtures in `tests/conftest.py`:
 | Neuer Filter | `core/filters.py` | Pure Funktion hinzufügen |
 | Neuer Indikator | `core/indicators.py` | Pure Funktion hinzufügen |
 | ML-Modell trainieren | `tools/train_ml.py` | `python tools/train_ml.py --history DB --output tools/models/` |
+
+## ICT Order Block – Asset-Class-Routing
+
+`IctOrderBlockStrategy` unterstützt drei Asset-Klassen über den Config-Parameter
+`asset_class: equity | futures | crypto`. Die gesamte asset-spezifische Logik
+steckt in fünf privaten Hooks – `_generate_signals` bleibt strukturell identisch:
+
+| Hook | equity | futures | crypto |
+|---|---|---|---|
+| `_is_trading_session` | `is_market_hours()` (9:30–16:00 ET) | CME Globex Mo 18:00–Fr 17:00 ET | immer `True` (24/7) |
+| `_entry_cutoff_ok` | `entry_cutoff_time` (default 15:00) | `futures_entry_cutoff` (default 15:45) | `crypto_entry_cutoff` (default None) |
+| `_resolve_trend` | SPY via `spy_df_asof()` | Ref-Asset via `context.bars(ref)` (default ES) | neutral wenn kein Ref-Asset |
+| `_gap_check_for_asset` | `_gap_check(df_5m, max_gap_pct)` | `(True, 0.0)` | `(True, 0.0)` |
+| `_effective_risk_qty` | `position_size()` | `equity*risk / (points*point_value)` | `position_size()` |
+
+**FUTURES_POINT_VALUES** (Fallback-Tabelle, überschreibbar via `futures_point_value`):
+`NQ=20, ES=50, YM=5, RTY=50, MNQ=2, MES=5`
+
+**Signal-Metadata-Keys** (für Adapter / Broker):
+- `asset_class`, `futures_exchange`, `futures_point_value`, `crypto_quote_currency`
+- `contract_qty` (berechnete Stückzahl), `qty_factor` (VIX-Multiplikator)
+- `qty_hint` (nur Futures) → umgeht Share-basiertes Sizing in `execute_signal`
+
+**Contract-Factory** (`execution/contract_factory.py`):
+```python
+build_contract(symbol, asset_class, cfg) → Stock | Future | Crypto
+```
+Wird von `ibkr_adapter` (Orders) und `ibkr_provider` (Bar-Abruf) geteilt.
+Bei Futures: kein `lastTradeDate` → IBKR wählt Front-Month.
+Bei Crypto: graceful Fallback auf `Stock(symbol, 'PAXOS', currency)` wenn
+`ib_insync` keine `Crypto`-Klasse kennt (ältere Versionen).
+
+**IBKRDataProvider** – Futures/Crypto:
+- Konstruktor-Parameter `asset_class`, `contract_cfg`
+- Futures/Crypto setzen automatisch `useRTH=False`
+- Crypto nutzt `whatToShow="AGGTRADES"` statt `"TRADES"`
+- Kein qualifizierbarer Contract → `log.error("ibkr_provider.no_contract", …)`
+
+**Wichtige Constraints**:
+- Kein Broker-Import in `strategy/ict_ob.py` (CLAUDE.md Regel 1)
+- `core/filters.py` bleibt equity-orientiert; asset-spezifische Logik nur in der Strategie
+- Session-Checks für Futures: Sa/So immer closed; Mo vor 18:00 ET closed
+
+## Config-Parameter-Konvention
+
+**Jeder Parameter** in YAML-Configs und in `*_DEFAULT_PARAMS`-Dicts bekommt
+einen deutschen Inline-Kommentar, der erklärt, was der Parameter tut und warum
+er relevant ist. Die **Gesamtzeile darf 120 Zeichen nicht überschreiten**.
+
+```yaml
+# YAML – korrekt:
+futures_point_value: 20.0        # NQ: $20 pro Punkt (ES=50, YM=5, RTY=50)
+risk_per_trade: 0.005            # 0.5 % Equity-Risiko je Trade
+use_gap_filter: false            # wird intern ohnehin ignoriert, explizit gesetzt
+```
+
+```python
+# Python DEFAULT_PARAMS – korrekt:
+"futures_point_value": 20.0,     # USD je Punkt (NQ=20, ES=50); überschreibt FUTURES_POINT_VALUES
+"risk_per_trade": 0.005,         # 0.5 % Risiko je Trade
+```
+
+**Gilt für**: alle neuen Parameter beim Hinzufügen, und für alle bearbeiteten
+Config-Blöcke (retroaktiv die angrenzenden Zeilen mit kommentieren).
 
 ## Pydantic v2 Konventionen
 
