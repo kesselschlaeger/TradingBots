@@ -191,6 +191,7 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
         bot_name             TEXT NOT NULL,
         strategy             TEXT NOT NULL,
         last_bar_ts          TEXT,
+        last_watchdog_ts     TEXT,
         last_bar_lag_ms      REAL,
         broker_connected     INTEGER NOT NULL DEFAULT 0,
         broker_adapter       TEXT    NOT NULL DEFAULT '',
@@ -272,6 +273,12 @@ class PersistentState:
                     await conn.execute(
                         "ALTER TABLE trades ADD COLUMN exit_features_json TEXT"
                     )
+                hb_cur = await conn.execute("PRAGMA table_info(bot_heartbeat)")
+                hb_cols = {row[1] for row in await hb_cur.fetchall()}
+                if "last_watchdog_ts" not in hb_cols:
+                    await conn.execute(
+                        "ALTER TABLE bot_heartbeat ADD COLUMN last_watchdog_ts TEXT"
+                    )
                 await conn.commit()
             self._schema_ready = True
         log.info("state.schema_ready", path=str(self.db_path))
@@ -324,14 +331,14 @@ class PersistentState:
                         bot_name, strategy, symbol, side, entry_ts,
                         entry_price, qty, stop_price, signal_strength,
                         mit_qty_factor, ev_estimate, group_name,
-                        features_json, reason, created_at
-                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                        features_json, created_at
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                     """,
                     (
                         bot_name, strategy, symbol, side, ts,
                         float(entry_price), float(qty), stop_price,
                         signal_strength, mit_qty_factor, ev_estimate,
-                        group_name, features_json, reason, now,
+                        group_name, features_json, now,
                     ),
                 )
                 trade_id = int(cur.lastrowid or 0)
@@ -671,6 +678,7 @@ class PersistentState:
         bot_name: str,
         strategy: str,
         last_bar_ts: datetime | str | None = None,
+        last_watchdog_ts: datetime | str | None = None,
         last_bar_lag_ms: float | None = None,
         broker_connected: bool = False,
         broker_adapter: str = "",
@@ -681,6 +689,13 @@ class PersistentState:
         if last_bar_ts is not None:
             last_bar_ts_iso = (
                 last_bar_ts if isinstance(last_bar_ts, str) else _iso(last_bar_ts)
+            )
+        last_watchdog_ts_iso: str | None = None
+        if last_watchdog_ts is not None:
+            last_watchdog_ts_iso = (
+                last_watchdog_ts
+                if isinstance(last_watchdog_ts, str)
+                else _iso(last_watchdog_ts)
             )
         status_json = "{}"
         if symbol_status is not None:
@@ -693,15 +708,26 @@ class PersistentState:
             async with self._conn() as conn:
                 await conn.execute(
                     """
-                    INSERT OR REPLACE INTO bot_heartbeat (
+                    INSERT INTO bot_heartbeat (
                         bot_name, strategy, last_bar_ts, last_bar_lag_ms,
+                        last_watchdog_ts,
                         broker_connected, broker_adapter,
                         circuit_breaker, symbol_status_json, updated_at
-                    ) VALUES (?,?,?,?,?,?,?,?,?)
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?)
+                    ON CONFLICT(bot_name, strategy) DO UPDATE SET
+                        last_bar_ts=COALESCE(excluded.last_bar_ts, bot_heartbeat.last_bar_ts),
+                        last_bar_lag_ms=COALESCE(excluded.last_bar_lag_ms, bot_heartbeat.last_bar_lag_ms),
+                        last_watchdog_ts=COALESCE(excluded.last_watchdog_ts, bot_heartbeat.last_watchdog_ts),
+                        broker_connected=excluded.broker_connected,
+                        broker_adapter=excluded.broker_adapter,
+                        circuit_breaker=excluded.circuit_breaker,
+                        symbol_status_json=excluded.symbol_status_json,
+                        updated_at=excluded.updated_at
                     """,
                     (
                         bot_name, strategy, last_bar_ts_iso,
                         float(last_bar_lag_ms) if last_bar_lag_ms is not None else None,
+                        last_watchdog_ts_iso,
                         int(bool(broker_connected)),
                         str(broker_adapter),
                         int(bool(circuit_breaker)),
@@ -1096,6 +1122,7 @@ class PersistentState:
             "peak_equity": float(eq["peak_equity"]) if eq else None,
             "last_equity_ts": eq["ts"] if eq else None,
             "last_bar_ts": hb["last_bar_ts"] if hb else None,
+            "last_watchdog_ts": hb["last_watchdog_ts"] if hb else None,
             "last_bar_lag_ms": (
                 float(hb["last_bar_lag_ms"])
                 if hb and hb["last_bar_lag_ms"] is not None else None
@@ -1193,6 +1220,33 @@ class PersistentState:
             item["circuit_breaker"] = bool(item.get("circuit_breaker", 0))
             item["symbol_status"] = status
             out.append(item)
+        return out
+
+    async def get_liveness_view(self) -> list[dict[str, Any]]:
+        """Aggregierte Sicht auf Heartbeat + Portfolio pro Bot-Instanz."""
+        instances = await self.get_bot_instances()
+        out: list[dict[str, Any]] = []
+        for inst in instances:
+            bn = inst["bot_name"]
+            strat = inst["strategy"]
+            snap = await self.get_health_snapshot(bn, strat)
+            out.append({
+                "bot_name": bn,
+                "strategy": strat,
+                "last_watchdog_ts": snap.get("last_watchdog_ts"),
+                "last_bar_ts": snap.get("last_bar_ts"),
+                "last_bar_lag_ms": snap.get("last_bar_lag_ms"),
+                "bot_last_seen": snap.get("bot_last_seen"),
+                "broker_connected": bool(snap.get("broker_connected", False)),
+                "circuit_breaker": bool(snap.get("circuit_breaker", False)),
+                "equity": snap.get("equity"),
+                "peak_equity": snap.get("peak_equity"),
+                "drawdown_pct": snap.get("drawdown_pct"),
+                "open_positions": int(snap.get("open_positions", 0) or 0),
+                "signals_today": int(snap.get("signals_today", 0) or 0),
+                "signals_filtered_today": int(snap.get("signals_filtered_today", 0) or 0),
+                "anomalies_last_hour": int(snap.get("anomalies_last_hour", 0) or 0),
+            })
         return out
 
     async def get_bot_instances(self) -> list[dict[str, str]]:

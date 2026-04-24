@@ -282,3 +282,68 @@ def is_within_trade_window(
     open_et = to_et(open_time)
     delta_min = (now_et - open_et).total_seconds() / 60.0
     return 0.0 <= delta_min <= float(window_minutes)
+
+
+def _cfg_time(cfg: dict | object, key: str, default: time) -> time:
+    """Lese Zeitfeld robust aus dict/Objekt; akzeptiert time oder 'HH:MM'."""
+    val = None
+    if isinstance(cfg, dict):
+        val = cfg.get(key, default)
+    else:
+        val = getattr(cfg, key, default)
+    if isinstance(val, time):
+        return val
+    if isinstance(val, str) and ":" in val:
+        hh, mm = val.split(":", 1)
+        return time(int(hh), int(mm))
+    return default
+
+
+def _cfg_int(cfg: dict | object, key: str, default: int) -> int:
+    if isinstance(cfg, dict):
+        val = cfg.get(key, default)
+    else:
+        val = getattr(cfg, key, default)
+    try:
+        return int(val)
+    except Exception:
+        return int(default)
+
+
+def is_before_premarket(cfg: dict | object, now: datetime) -> bool:
+    """True wenn aktuelle Zeit vor premarket_time liegt (ET)."""
+    now_et = to_et(now).time()
+    premarket_t = _cfg_time(cfg, "premarket_time", time(9, 0))
+    return now_et < premarket_t
+
+
+def is_after_entry_cutoff(cfg: dict | object, now: datetime) -> bool:
+    """True wenn aktuelle Zeit nach Entry-Cutoff liegt (ET)."""
+    now_et = to_et(now).time()
+    cutoff_t = _cfg_time(cfg, "entry_cutoff_time", time(15, 0))
+    return now_et >= cutoff_t
+
+
+def is_after_eod_close(cfg: dict | object, now: datetime) -> bool:
+    """True wenn aktuelle Zeit nach EOD-Close liegt (ET)."""
+    now_et = to_et(now).time()
+    close_t = _cfg_time(cfg, "eod_close_time", time(15, 27))
+    return now_et >= close_t
+
+
+def in_regular_trade_window(cfg: dict | object, now: datetime) -> bool:
+    """True wenn 'now' zwischen Market-Open und Entry-Cutoff liegt (ET)."""
+    now_et = to_et(now)
+    open_t = _cfg_time(cfg, "market_open_time", time(9, 30))
+    open_dt = now_et.replace(
+        hour=open_t.hour,
+        minute=open_t.minute,
+        second=0,
+        microsecond=0,
+    )
+    minutes = _cfg_int(cfg, "trade_window_minutes", 390)
+    return is_within_trade_window(
+        now=now_et,
+        open_time=open_dt,
+        window_minutes=minutes,
+    )

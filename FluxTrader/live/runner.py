@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import time as _time
 from dataclasses import asdict
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Optional
@@ -54,6 +53,7 @@ class LiveRunner:
         metrics_collector: Optional[Any] = None,
         anomaly_detector: Optional[AnomalyDetector] = None,
         alerts_cfg: Any = None,
+        monitoring_cfg: Any = None,
         bot_name: str = "",
     ):
         self.strategy = strategy
@@ -72,6 +72,7 @@ class LiveRunner:
         self.metrics = metrics_collector or MetricsCollector.create(enabled=False)
         self.anomaly: Optional[AnomalyDetector] = anomaly_detector
         self.alerts_cfg = alerts_cfg
+        self.monitoring_cfg = monitoring_cfg
 
         self.tm = TradeManager(
             trail_after_r=float(config.get("trail_after_r", 1.0)),
@@ -88,8 +89,13 @@ class LiveRunner:
         self._pending_exit_next_open: set[str] = set()
         self._daily_trades_count: int = 0
         self._last_health_status: Optional[str] = None
-        self._last_alert_ts: float = 0.0
-        self._alert_cooldown_s = 60
+        self._watchdog_task: Optional[asyncio.Task] = None
+        self._watchdog_interval_s: int = int(
+            getattr(self.monitoring_cfg, "watchdog_interval_s", 15) if self.monitoring_cfg is not None else 15
+        )
+        self._health_reminder_min: int = int(
+            getattr(self.monitoring_cfg, "reminder_interval_min", 30) if self.monitoring_cfg is not None else 30
+        )
         self._status_sink: Optional[callable] = None
         # Lock verhindert concurrent Ausführung von _on_eod_close (Scheduler +
         # Bar-Level-Check können simultan feuern). Locked() → laufender Call
@@ -186,6 +192,8 @@ class LiveRunner:
         except Exception as e:  # noqa: BLE001
             log.warning("runner.warmup_failed", error=str(e))
 
+        self._watchdog_task = asyncio.create_task(self._watchdog_loop())
+
         # Hauptloop: Bars streamen/pollt. Shutdown via main.py –
         # dort wird der Main-Task bei SIGINT/SIGTERM gecancelt, was
         # hier als CancelledError ankommt. ``shield`` stellt sicher,
@@ -213,6 +221,13 @@ class LiveRunner:
             )
         except Exception as e:  # noqa: BLE001
             log.warning("runner.heartbeat_shutdown_failed", error=str(e))
+
+        if self._watchdog_task is not None:
+            self._watchdog_task.cancel()
+            try:
+                await self._watchdog_task
+            except (asyncio.CancelledError, Exception):
+                pass
 
         if self._scheduler:
             self._scheduler.stop()
@@ -729,21 +744,8 @@ class LiveRunner:
             )
         except Exception as e:  # noqa: BLE001
             log.warning("runner.heartbeat_persist_failed", error=str(e))
-
-        if self.health is not None:
-            # Alert bei fehlenden Bars während Handelszeiten
-            if self.health.should_alert_on_not_ready():
-                now_ts = _time.time()
-                if now_ts - self._last_alert_ts > self._alert_cooldown_s:
-                    await self.notifier.send_readiness(
-                        "🚨 *Readiness Alert* – Keine aktuellen Kurse während "
-                        f"Handelszeiten. Health-Status: {self.health.overall_status()}"
-                    )
-                    self._last_alert_ts = now_ts
-                    log.warning("runner.health_alert_sent", reason="bar_stream_failure")
         self.metrics.set_bar_lag(self.strategy.name, lag_ms)
-        if self.anomaly is not None:
-            await self.anomaly.check_heartbeat(self.strategy.name, bar_ts)
+        await self._emit_health_alerts()
 
         # Marktpreis für PaperAdapter (No-Op bei echten Brokern)
         self.broker.update_price(bar.symbol, bar.close)
@@ -880,6 +882,7 @@ class LiveRunner:
                 open_positions=positions_count, peak_equity=peak,
             )
         await self._check_drawdown_alerts(dd_pct)
+        await self._emit_health_alerts()
 
         # Equity-Snapshot + Live-Positions-Spiegelung (Dashboard-Feed)
         unrealized_total = 0.0
@@ -978,6 +981,57 @@ class LiveRunner:
             if self.health is not None:
                 await self.health.set_circuit_breaker(False)
             self.metrics.set_circuit_breaker(self.strategy.name, False)
+
+    async def _watchdog_loop(self) -> None:
+        while self._running:
+            now = datetime.now(timezone.utc)
+            try:
+                if self.health is not None:
+                    await self.health.set_watchdog(self.strategy.name, now)
+                await self.state.upsert_bot_heartbeat(
+                    bot_name=self._bot_name,
+                    strategy=self.strategy.name,
+                    last_watchdog_ts=now,
+                    broker_connected=(
+                        self.health.is_broker_connected() if self.health is not None else True
+                    ),
+                    broker_adapter=self._adapter_name,
+                    circuit_breaker=(
+                        self.health.is_circuit_breaker_active() if self.health is not None else False
+                    ),
+                    symbol_status=(
+                        self.health.get_symbol_status(self.strategy.name)
+                        if self.health is not None else {}
+                    ),
+                )
+            except Exception as e:  # noqa: BLE001
+                log.warning("runner.watchdog_persist_failed", error=str(e))
+            await asyncio.sleep(max(1, int(self._watchdog_interval_s)))
+
+    async def _emit_health_alerts(self) -> None:
+        if self.health is None:
+            return
+        state = self.health.overall_state(self.strategy.name)
+        await self.notifier.alert_health(
+            "data_stale",
+            level=AlertLevel.WARNING,
+            bot_name=self._bot_name,
+            strategy=self.strategy.name,
+            check_name="data_stale",
+            is_firing=(state == "DATA_STALE"),
+            details=f"state={state}",
+            reminder_interval_min=self._health_reminder_min,
+        )
+        await self.notifier.alert_health(
+            "circuit_break",
+            level=AlertLevel.CRITICAL,
+            bot_name=self._bot_name,
+            strategy=self.strategy.name,
+            check_name="circuit_break",
+            is_firing=(state == "CIRCUIT_BREAK"),
+            details=f"state={state}",
+            reminder_interval_min=self._health_reminder_min,
+        )
 
     async def _execute_signal(self, sig: Signal) -> None:
         if sig.direction == 0:

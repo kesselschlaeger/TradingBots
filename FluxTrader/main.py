@@ -364,7 +364,12 @@ async def cmd_live(cfg: AppConfig) -> None:
 
     # ── Monitoring-Infrastruktur ─────────────────────────────────────
     effective_bot_name = _resolve_bot_name(cfg)
-    health_state = HealthState(persistent_state=state, bot_name=effective_bot_name)
+    health_state = HealthState(
+        strategy_config=cfg.strategy.params,
+        monitoring_config=cfg.monitoring,
+        persistent_state=state,
+        bot_name=effective_bot_name,
+    )
     metrics_collector = MetricsCollector.create(
         enabled=cfg.monitoring.prometheus_enabled
     )
@@ -422,6 +427,7 @@ async def cmd_live(cfg: AppConfig) -> None:
                 metrics_collector=metrics_collector,
                 anomaly_detector=anomaly_detector,
                 alerts_cfg=cfg.alerts,
+                monitoring_cfg=cfg.monitoring,
                 bot_name=effective_bot_name,
             )
             await runner.start()
@@ -432,6 +438,87 @@ async def cmd_live(cfg: AppConfig) -> None:
             await health_task
         except (asyncio.CancelledError, Exception):
             pass
+
+
+async def cmd_healthcheck(cfg: AppConfig) -> int:
+    """Externer Dead-Man's-Switch: liest DB, bewertet Health, sendet Alerts."""
+    from core.models import AlertLevel
+    from live.health_eval import evaluate_liveness
+    from live.notifier import TelegramNotifier
+    from live.state import PersistentState
+
+    env = load_env()
+    state = PersistentState(Path(cfg.persistence.data_dir) / cfg.persistence.state_db)
+    await state.ensure_schema()
+
+    notifier = TelegramNotifier(
+        bot_token=env.TELEGRAM_TOKEN or cfg.notifications.telegram_token,
+        chat_id=env.TELEGRAM_CHAT_ID or cfg.notifications.telegram_chat_id,
+        health_bot_token=(
+            env.TELEGRAM_HEALTH_TOKEN
+            or cfg.notifications.health_telegram_token
+        ),
+        readiness_bot_token=(
+            env.TELEGRAM_READINESS_TOKEN
+            or cfg.notifications.readiness_telegram_token
+        ),
+        health_chat_id=(
+            env.TELEGRAM_HEALTH_CHAT_ID
+            or cfg.notifications.health_telegram_chat_id
+        ),
+        readiness_chat_id=(
+            env.TELEGRAM_READINESS_CHAT_ID
+            or cfg.notifications.readiness_telegram_chat_id
+        ),
+        enabled=cfg.notifications.enabled,
+        bot_name=_resolve_notifier_bot_name(cfg),
+        strategy_name=cfg.strategy.name,
+        broker_name="healthcheck",
+        alerts_cfg=cfg.alerts,
+    )
+
+    rows = await state.get_liveness_view()
+    now = datetime.now(timezone.utc)
+    has_critical = False
+
+    for row in rows:
+        eval_row = evaluate_liveness(
+            row=row,
+            strategy_cfg=dict(cfg.strategy.params or {}),
+            monitoring_cfg=cfg.monitoring,
+            now=now,
+        )
+        overall = str(eval_row["overall_state"])
+        bot_name = str(row.get("bot_name", ""))
+        strategy = str(row.get("strategy", ""))
+
+        if overall in {"PROCESS_DEAD", "DATA_STALE"}:
+            has_critical = True
+
+        await notifier.alert_health(
+            "process_dead",
+            level=AlertLevel.CRITICAL,
+            bot_name=bot_name,
+            strategy=strategy,
+            check_name="process_dead",
+            is_firing=(overall == "PROCESS_DEAD"),
+            details=f"overall={overall}",
+            reminder_interval_min=cfg.monitoring.reminder_interval_min,
+        )
+        await notifier.alert_health(
+            "data_stale",
+            level=AlertLevel.WARNING,
+            bot_name=bot_name,
+            strategy=strategy,
+            check_name="data_stale",
+            is_firing=(overall == "DATA_STALE"),
+            details=(
+                f"overall={overall}, next_expected={eval_row.get('next_expected_bar_at')}"
+            ),
+            reminder_interval_min=cfg.monitoring.reminder_interval_min,
+        )
+
+    return 1 if has_critical else 0
 
 
 async def _run_with_shutdown(coro) -> None:
@@ -492,8 +579,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="FluxTrader")
     parser.add_argument(
         "command",
-        choices=["live", "paper", "backtest", "wfo", "dashboard"],
-        help="Modus: live, paper, backtest, wfo, dashboard",
+        choices=["live", "paper", "backtest", "wfo", "dashboard", "healthcheck"],
+        help="Modus: live, paper, backtest, wfo, dashboard, healthcheck",
     )
     parser.add_argument("--config", "-c", required=True,
                         help="Pfad zur YAML-Config")
@@ -526,6 +613,9 @@ def main() -> None:
     elif args.command == "dashboard":
         port = args.port or cfg.monitoring.dashboard_port
         cmd_dashboard(cfg, port=port)
+    elif args.command == "healthcheck":
+        code = asyncio.run(cmd_healthcheck(cfg))
+        sys.exit(int(code))
 
 
 if __name__ == "__main__":

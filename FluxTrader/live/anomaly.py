@@ -18,7 +18,6 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from core.config import AnomalyConfig, AppConfig
-from core.filters import is_market_hours
 from core.logging import get_logger
 from core.models import (
     AlertLevel,
@@ -244,35 +243,4 @@ class AnomalyDetector:
         self._pnl_window.append(pnl)
         return events
 
-    # ── Check 4: ConnectivityWatchdog ────────────────────────────────
-
-    async def check_heartbeat(self, strategy: str,
-                              last_bar_ts: Optional[datetime]) -> list[AnomalyEvent]:
-        if not self._enabled("connectivity"):
-            return []
-        events: list[AnomalyEvent] = []
-        now = self._now()
-        if not is_market_hours(now):
-            return []
-        if last_bar_ts is None:
-            return []
-        if last_bar_ts.tzinfo is None:
-            last_bar_ts = last_bar_ts.replace(tzinfo=timezone.utc)
-        gap_min = (now - last_bar_ts).total_seconds() / 60.0
-        if gap_min > self.acfg.bar_gap_minutes:
-            ev = AnomalyEvent(
-                timestamp=now, check_name="connectivity",
-                severity=AlertLevel.CRITICAL,
-                strategy=strategy,
-                message=(
-                    f"Kein Bar fuer {gap_min:.1f} Min "
-                    f"(Limit {self.acfg.bar_gap_minutes} Min)"
-                ),
-                context={"gap_minutes": gap_min,
-                         "last_bar_ts": last_bar_ts.isoformat()},
-            )
-            events.append(ev)
-            log.error("anomaly.connectivity", strategy=strategy,
-                      gap_minutes=gap_min)
-            await self._emit(ev)
-        return events
+    # Check "connectivity" wird ueber den zentralen Health-Pfad abgedeckt.

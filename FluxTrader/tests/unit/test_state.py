@@ -126,7 +126,7 @@ async def test_close_trade_atomic_by_id(state: PersistentState):
         bot_name=BOT, strategy=STRAT,
         trade_id=trade_id,
         exit_ts=now, exit_price=155.0,
-        pnl=50.0, pnl_pct=3.33, reason="target",
+        pnl=50.0, pnl_pct=3.33, exit_reason="target",
     )
 
     assert len(await state.get_open_positions(BOT, STRAT)) == 0

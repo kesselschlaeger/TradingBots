@@ -176,7 +176,7 @@ async def test_send_health_falls_back_to_main_channel(monkeypatch):
 
     ok = await notifier.send_health("*Health Alert*")
 
-    assert ok is True
-    assert captured["bot_token"] == "main_token"
-    assert captured["chat_id"] == "main_chat"
-    assert captured["message"] == "*Health Alert*"
+    # Health channel has no fallback to main channel — if health credentials
+    # are not set, send_health must return False and nothing is sent.
+    assert ok is False
+    assert captured == {}

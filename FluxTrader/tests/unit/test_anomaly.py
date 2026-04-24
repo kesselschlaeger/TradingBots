@@ -116,6 +116,7 @@ async def test_pnl_spike_detector(tmp_path):
     assert any(e.check_name == "pnl_spike" for e in events)
 
 
+@pytest.mark.skip(reason="check_heartbeat removed — connectivity now handled by health state machine")
 @pytest.mark.asyncio
 async def test_connectivity_no_alert_outside_market_hours(tmp_path, monkeypatch):
     cfg = _mk_cfg()
@@ -127,6 +128,7 @@ async def test_connectivity_no_alert_outside_market_hours(tmp_path, monkeypatch)
     assert events == []
 
 
+@pytest.mark.skip(reason="check_heartbeat removed — connectivity now handled by health state machine")
 @pytest.mark.asyncio
 async def test_connectivity_alerts_inside_market_hours(tmp_path, monkeypatch):
     cfg = _mk_cfg()

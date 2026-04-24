@@ -63,12 +63,41 @@ class PersistenceConfig(BaseModel):
     state_db: str = "state.db"
 
 
+class TradeWindowPhaseConfig(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    premarket_alert: bool = False
+    after_cutoff_alert: bool = False
+    after_eod_alert: bool = False
+
+
 class MonitoringConfig(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     health_port: int = 8090
     prometheus_enabled: bool = True
     dashboard_port: int = 8080
+    watchdog_interval_s: int = 15
+    bar_timeframe_seconds: int = 300
+    provider_poll_interval_s: int = 30
+    stale_tolerance_s: int = 60
+    grace_period_s: int = 90
+    reminder_interval_min: int = 30
+    trade_window_phases: TradeWindowPhaseConfig = Field(
+        default_factory=TradeWindowPhaseConfig,
+    )
+
+
+class AlertsRoutingConfig(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    channel_default: list[str] = Field(
+        default_factory=lambda: ["trade_opened", "trade_closed", "daily_summary"],
+    )
+    channel_health: list[str] = Field(
+        default_factory=lambda: ["process_dead", "data_stale", "circuit_break"],
+    )
+    channel_readiness: list[str] = Field(default_factory=list)
 
 
 class AlertsConfig(BaseModel):
@@ -86,6 +115,8 @@ class AlertsConfig(BaseModel):
     large_order_confirm_above: float = 0.0
     max_per_symbol_per_minute: int = 1
     max_per_hour: int = 20
+    dedup_window_s: int = 300
+    routing: AlertsRoutingConfig = Field(default_factory=AlertsRoutingConfig)
 
 
 class AnomalyConfig(BaseModel):

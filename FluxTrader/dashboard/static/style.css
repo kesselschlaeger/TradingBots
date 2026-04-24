@@ -225,6 +225,46 @@ header h1 {
   color: #b0bec5;
 }
 
+.bot-health-light {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  display: inline-block;
+  margin-right: 6px;
+  box-shadow: 0 0 6px rgba(0, 0, 0, 0.4);
+}
+
+.bot-health-light.green { background: #5dd39e; }
+.bot-health-light.yellow { background: #f4d77a; }
+.bot-health-light.red { background: #ef5350; }
+.bot-health-light.gray { background: #8a93a1; }
+
+.health-alerts-strip {
+  margin: 6px 0 12px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.health-alert-pill {
+  padding: 6px 10px;
+  border-radius: 999px;
+  font-size: 11px;
+  border: 1px solid #262b33;
+  background: #141920;
+  color: #e6e6e6;
+}
+
+.health-alert-pill.warning {
+  border-color: #8f6a11;
+  color: #f4d77a;
+}
+
+.health-alert-pill.critical {
+  border-color: #7a2020;
+  color: #f8a3a3;
+}
+
 .bot-card-stats {
   display: flex;
   flex-direction: column;

@@ -24,11 +24,17 @@ import asyncio
 import json
 import time as _time
 from contextlib import suppress
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone
 from typing import Any, Callable, Coroutine, Optional, TYPE_CHECKING
 
 from core.logging import get_logger
-from core.filters import is_market_hours
+from core.filters import (
+    is_after_entry_cutoff,
+    is_after_eod_close,
+    is_before_premarket,
+    is_within_trade_window,
+    to_et,
+)
 
 if TYPE_CHECKING:  # pragma: no cover
     from live.state import PersistentState
@@ -42,7 +48,6 @@ except ImportError:  # pragma: no cover
     AIOHTTP_AVAILABLE = False
 
 
-_READY_BAR_MAX_AGE_S = 600          # letzter Bar muss juenger als 10 Min sein
 _STATUS_OK_BAR_LAG_MS = 5_000
 _STATUS_DEGRADED_BAR_LAG_MS = 30_000
 
@@ -57,19 +62,40 @@ class HealthState:
 
     def __init__(self,
                  on_ready_alert: Optional[Callable[..., Coroutine]] = None,
-                 bar_max_age_seconds: int = _READY_BAR_MAX_AGE_S,
+                 strategy_config: Optional[dict[str, Any]] = None,
+                 monitoring_config: Optional[Any] = None,
                  persistent_state: Optional["PersistentState"] = None,
                  cache_ttl_seconds: float = 5.0,
                  bot_name: str = "") -> None:
         self._start_ts = _time.time()
         self._lock = asyncio.Lock()
-        self._bar_max_age_seconds = max(1, int(bar_max_age_seconds))
+        self._strategy_cfg = strategy_config or {}
+        self._monitoring_cfg = monitoring_config
+
+        self._watchdog_interval_s = max(1, self._monitoring_int("watchdog_interval_s", 15))
+        self._bar_timeframe_seconds = max(
+            1,
+            int(self._strategy_cfg.get("bar_timeframe_seconds")
+                or self._monitoring_int("bar_timeframe_seconds", 300)),
+        )
+        self._provider_poll_interval_s = max(
+            0,
+            int(self._strategy_cfg.get("provider_poll_interval_s")
+                or self._monitoring_int("provider_poll_interval_s", 30)),
+        )
+        self._stale_tolerance_s = max(
+            0,
+            int(self._strategy_cfg.get("stale_tolerance_s")
+                or self._monitoring_int("stale_tolerance_s", 60)),
+        )
+        self._grace_period_s = max(0, self._monitoring_int("grace_period_s", 90))
 
         self._broker_connected: bool = False
         self._broker_adapter: str = ""
         self._last_order_ms: Optional[float] = None
 
         self._last_bar_ts: dict[str, datetime] = {}
+        self._last_watchdog_ts: dict[str, datetime] = {}
         self._last_bar_lag_ms: dict[str, float] = {}
         self._signals_today: dict[str, int] = {}
         self._signals_filtered_today: dict[str, int] = {}
@@ -146,6 +172,10 @@ class HealthState:
         async with self._lock:
             self._last_bar_ts[strategy] = _ensure_aware(ts)
             self._last_bar_lag_ms[strategy] = float(lag_ms)
+
+    async def set_watchdog(self, strategy: str, ts: datetime) -> None:
+        async with self._lock:
+            self._last_watchdog_ts[strategy] = _ensure_aware(ts)
 
     async def set_broker_status(self, connected: bool, adapter: str,
                                 last_order_ms: Optional[float] = None) -> None:
@@ -225,14 +255,31 @@ class HealthState:
         now = datetime.now(timezone.utc)
         strategies: list[dict[str, Any]] = []
         all_names = (set(self._last_bar_ts)
+                     | set(self._last_watchdog_ts)
                      | set(self._signals_today)
                      | set(self._signals_filtered_today)
                      | set(self._symbol_status))
         for name in sorted(all_names):
             ts = self._last_bar_ts.get(name)
+            wd = self._last_watchdog_ts.get(name)
+            now = datetime.now(timezone.utc)
+            expected = self.next_expected_bar_at(ts)
+            phase = self.trade_window_phase(now)
+            in_window = phase == "in_window"
+            process_alive = self._is_process_alive(name, now)
+            data_flowing = self._is_data_flowing(name, now, in_window, expected)
             strategies.append({
                 "name": name,
+                "bot_name": self._bot_name,
                 "last_bar_ts": ts.isoformat() if ts else None,
+                "last_watchdog_ts": wd.isoformat() if wd else None,
+                "next_expected_bar_at": expected.isoformat() if expected else None,
+                "seconds_to_next_bar": self._seconds_to_next_bar(expected, now),
+                "trade_window": self._trade_window_payload(phase),
+                "in_trade_window": in_window,
+                "process_alive": process_alive,
+                "data_flowing": data_flowing,
+                "overall_state": self.overall_state(name, now=now),
                 "last_bar_lag_ms": self._last_bar_lag_ms.get(name),
                 "signals_today": self._signals_today.get(name, 0),
                 "signals_filtered_today":
@@ -261,47 +308,34 @@ class HealthState:
         }
 
     def is_ready(self) -> bool:
-        """Readiness Check: Broker + Bars aktuell (außerhalb Handelszeiten locker).
-
-        Außerhalb Handelszeiten: nur Broker-Check (Bars dürfen alt sein).
-        Innerhalb Handelszeiten: Broker + Bars < 10 Min.
-        """
+        """Readiness ist die zentrale Auswertung aus overall_state()."""
         if not self._broker_connected:
             return False
-        if not self._last_bar_ts:
-            return True  # noch keine Bars, aber Broker connected
-
         now = datetime.now(timezone.utc)
-        # Außerhalb der Handelszeiten: akzeptiere alte Bars
-        if not is_market_hours(now):
-            return True  # Broker OK, Bars können alt sein außerhalb Handelszeiten
-
-        # Innerhalb Handelszeiten: Bars müssen frisch sein
-        for ts in self._last_bar_ts.values():
-            if (now - _ensure_aware(ts)).total_seconds() > self._bar_max_age_seconds:
+        for name in self._last_bar_ts:
+            if self.overall_state(name, now=now) in {
+                "PROCESS_DEAD", "DATA_STALE", "CIRCUIT_BREAK",
+            }:
                 return False
         return True
 
     def should_alert_on_not_ready(self) -> bool:
-        """True wenn 503 während Handelszeiten (Fehler, nicht Normal-Zustand).
-
-        Nutze dies um Telegram-Alerts zu triggern.
-        """
-        if not is_market_hours(datetime.now(timezone.utc)):
-            return False  # Außerhalb Handelszeiten: kein Alert
-        if self._broker_connected and self._last_bar_ts:
-            now = datetime.now(timezone.utc)
-            for ts in self._last_bar_ts.values():
-                if (now - _ensure_aware(ts)).total_seconds() > self._bar_max_age_seconds:
-                    return True  # Bars zu alt während Handelszeiten → Alert
+        now = datetime.now(timezone.utc)
+        for name in self._last_bar_ts:
+            if self.overall_state(name, now=now) in {"PROCESS_DEAD", "DATA_STALE"}:
+                return True
         return False
 
     def overall_status(self) -> str:
         if self._circuit_breaker or not self._broker_connected:
             return "critical"
-        # Während Handelszeiten: 503 (is_ready=False) → critical
-        if is_market_hours(datetime.now(timezone.utc)) and not self.is_ready():
-            return "critical"
+        now = datetime.now(timezone.utc)
+        for name in self._last_bar_ts:
+            state = self.overall_state(name, now=now)
+            if state in {"PROCESS_DEAD", "DATA_STALE", "CIRCUIT_BREAK"}:
+                return "critical"
+            if state == "IDLE_OUT_OF_WINDOW":
+                continue
         # Bar-Lag bewerten (nur wenn Bars vorhanden)
         if self._last_bar_lag_ms:
             worst = max(self._last_bar_lag_ms.values())
@@ -310,6 +344,131 @@ class HealthState:
             if worst > _STATUS_OK_BAR_LAG_MS:
                 return "degraded"
         return "ok"
+
+    def next_expected_bar_at(self, last_bar_ts: Optional[datetime]) -> Optional[datetime]:
+        if last_bar_ts is None:
+            return None
+        return _ensure_aware(last_bar_ts) + timedelta(
+            seconds=(
+                self._bar_timeframe_seconds
+                + self._provider_poll_interval_s
+                + self._stale_tolerance_s
+            )
+        )
+
+    def trade_window_phase(self, now: datetime) -> str:
+        now_utc = _ensure_aware(now)
+        if is_before_premarket(self._strategy_cfg, now_utc):
+            return "before_premarket"
+        if is_after_eod_close(self._strategy_cfg, now_utc):
+            return "after_eod"
+        if is_after_entry_cutoff(self._strategy_cfg, now_utc):
+            return "after_cutoff"
+
+        now_et = to_et(now_utc)
+        open_t = self._cfg_time("market_open_time", default=(9, 30))
+        open_dt = now_et.replace(
+            hour=open_t.hour,
+            minute=open_t.minute,
+            second=0,
+            microsecond=0,
+        )
+        cutoff_t = self._cfg_time("entry_cutoff_time", default=(15, 0))
+        window_minutes = max(
+            1,
+            int((cutoff_t.hour * 60 + cutoff_t.minute) - (open_t.hour * 60 + open_t.minute)),
+        )
+        if is_within_trade_window(now_et, open_dt, window_minutes=window_minutes):
+            return "in_window"
+        return "out_of_window"
+
+    def overall_state(self, strategy: str, now: Optional[datetime] = None) -> str:
+        cur = _ensure_aware(now or datetime.now(timezone.utc))
+        if self._circuit_breaker:
+            return "CIRCUIT_BREAK"
+
+        phase = self.trade_window_phase(cur)
+        in_window = (phase == "in_window") or self._phase_alert_enabled(phase)
+        expected = self.next_expected_bar_at(self._last_bar_ts.get(strategy))
+        process_alive = self._is_process_alive(strategy, cur)
+        data_flowing = self._is_data_flowing(strategy, cur, in_window, expected)
+
+        if not process_alive:
+            return "PROCESS_DEAD"
+        if not in_window:
+            return "IDLE_OUT_OF_WINDOW"
+        if not data_flowing:
+            return "DATA_STALE"
+        return "OK"
+
+    def _is_process_alive(self, strategy: str, now: datetime) -> bool:
+        wd = self._last_watchdog_ts.get(strategy)
+        if wd is None:
+            return True
+        return (now - wd).total_seconds() < (3 * self._watchdog_interval_s)
+
+    def _is_data_flowing(self, strategy: str, now: datetime,
+                         in_window: bool,
+                         expected: Optional[datetime]) -> bool:
+        if not in_window:
+            return True
+        if expected is None:
+            return False
+        return now <= (expected + timedelta(seconds=self._grace_period_s))
+
+    @staticmethod
+    def _seconds_to_next_bar(expected: Optional[datetime], now: datetime) -> Optional[int]:
+        if expected is None:
+            return None
+        return int((expected - now).total_seconds())
+
+    def _trade_window_payload(self, phase: str) -> dict[str, str]:
+        open_t = self._cfg_time("market_open_time", default=(9, 30))
+        cutoff_t = self._cfg_time("entry_cutoff_time", default=(15, 0))
+        return {
+            "start": f"{open_t.hour:02d}:{open_t.minute:02d}",
+            "end": f"{cutoff_t.hour:02d}:{cutoff_t.minute:02d}",
+            "phase": phase,
+        }
+
+    def _monitoring_int(self, key: str, default: int) -> int:
+        cfg = self._monitoring_cfg
+        if cfg is None:
+            return int(default)
+        try:
+            if isinstance(cfg, dict):
+                return int(cfg.get(key, default))
+            return int(getattr(cfg, key, default))
+        except Exception:
+            return int(default)
+
+    def _phase_alert_enabled(self, phase: str) -> bool:
+        phases = getattr(self._monitoring_cfg, "trade_window_phases", None)
+        if phases is None:
+            return False
+        mapping = {
+            "before_premarket": "premarket_alert",
+            "after_cutoff": "after_cutoff_alert",
+            "after_eod": "after_eod_alert",
+        }
+        key = mapping.get(phase)
+        if key is None:
+            return False
+        try:
+            return bool(getattr(phases, key, False))
+        except Exception:
+            return False
+
+    def _cfg_time(self, key: str, default: tuple[int, int]) -> time:
+        raw = self._strategy_cfg.get(key)
+        if raw is None:
+            return datetime(2000, 1, 1, default[0], default[1]).time()
+        if hasattr(raw, "hour") and hasattr(raw, "minute"):
+            return raw
+        if isinstance(raw, str) and ":" in raw:
+            hh, mm = raw.split(":", 1)
+            return datetime(2000, 1, 1, int(hh), int(mm)).time()
+        return datetime(2000, 1, 1, default[0], default[1]).time()
 
 
 def _ensure_aware(dt: datetime) -> datetime:

@@ -111,6 +111,33 @@ class _RateLimiter:
         return True
 
 
+class _HealthAlertTracker:
+    """In-Memory Alert-State pro (bot, strategy, check)."""
+
+    def __init__(self) -> None:
+        self._state: dict[tuple[str, str, str], dict[str, float]] = {}
+
+    def transition(self, *, key: tuple[str, str, str], is_firing: bool,
+                   now_ts: float, reminder_seconds: float) -> tuple[str, Optional[float]]:
+        cur = self._state.get(key)
+        if not is_firing:
+            if cur is None:
+                return "NOOP", None
+            since = cur.get("since")
+            self._state.pop(key, None)
+            return "RESOLVED", since
+
+        if cur is None:
+            self._state[key] = {"since": now_ts, "last_sent": now_ts}
+            return "FIRING", now_ts
+
+        last_sent = float(cur.get("last_sent", 0.0))
+        if (now_ts - last_sent) >= max(1.0, reminder_seconds):
+            cur["last_sent"] = now_ts
+            return "FIRING_ONGOING", cur.get("since")
+        return "NOOP", cur.get("since")
+
+
 # ── Notifier ─────────────────────────────────────────────────────────
 
 class TelegramNotifier:
@@ -132,40 +159,36 @@ class TelegramNotifier:
             health_bot_token
             or os.getenv("TELEGRAM_HEALTH_BOT_TOKEN", "")
             or os.getenv("TELEGRAM_HEALTH_TOKEN", "")
-            or self.bot_token
         )
         self.readiness_bot_token = (
             readiness_bot_token
             or os.getenv("TELEGRAM_READINESS_BOT_TOKEN", "")
             or os.getenv("TELEGRAM_READINESS_TOKEN", "")
-            or self.health_bot_token
         )
         self.chat_id = chat_id or os.getenv("TELEGRAM_CHAT_ID", "")
         self.health_chat_id = (
             health_chat_id
             or os.getenv("TELEGRAM_HEALTH_CHAT_ID", "")
-            or self.chat_id
         )
         self.readiness_chat_id = (
             readiness_chat_id
             or os.getenv("TELEGRAM_READINESS_CHAT_ID", "")
-            or self.health_chat_id
         )
         self.bot_name = bot_name.strip() or "FluxTrader"
         self.strategy_name = strategy_name.strip()
         self.broker_name = broker_name.strip()
-        self.enabled = enabled and bool(self.bot_token) and bool(self.chat_id) \
-            and HTTPX_AVAILABLE
+        self.enabled = bool(enabled) and HTTPX_AVAILABLE
         if enabled and not self.enabled:
             log.warning("notifier.disabled",
-                        has_token=bool(self.bot_token),
-                        has_chat=bool(self.chat_id),
                         httpx=HTTPX_AVAILABLE)
 
         self.alerts_cfg = alerts_cfg
         per_sym = int(getattr(alerts_cfg, "max_per_symbol_per_minute", 1) or 1)
         per_hour = int(getattr(alerts_cfg, "max_per_hour", 20) or 20)
         self._limiter = _RateLimiter(per_sym, per_hour)
+        self._health_tracker = _HealthAlertTracker()
+        self._dedup_window_s = int(getattr(alerts_cfg, "dedup_window_s", 300) or 300)
+        self._dedup_cache: dict[str, float] = {}
 
     @staticmethod
     def _url_for(bot_token: str) -> str:
@@ -180,7 +203,7 @@ class TelegramNotifier:
 
     async def _send_to_target(self, bot_token: str, chat_id: str, message: str,
                             parse_mode: str = "Markdown") -> bool:
-        if not self.enabled:
+        if not self.enabled or not bot_token or not chat_id:
             return False
         rendered_message = self._decorate_message(message)
         payload = {
@@ -211,6 +234,8 @@ class TelegramNotifier:
 
     async def send_health(self, message: str,
                           parse_mode: str = "Markdown") -> bool:
+        if not self.health_bot_token or not self.health_chat_id:
+            return False
         return await self._send_to_target(
             self.health_bot_token,
             self.health_chat_id,
@@ -226,6 +251,102 @@ class TelegramNotifier:
             message,
             parse_mode,
         )
+
+    async def alert_health(self,
+                           event: str,
+                           *,
+                           level: AlertLevel,
+                           bot_name: str,
+                           strategy: str,
+                           check_name: str,
+                           is_firing: bool,
+                           details: str = "",
+                           reminder_interval_min: int = 30) -> bool:
+        """Einziger Einstieg für Health/Readiness-Events inkl. Dedup + Reminder."""
+        if not self.enabled:
+            return False
+
+        key = (bot_name, strategy, check_name)
+        now_ts = _time.time()
+        phase, since_ts = self._health_tracker.transition(
+            key=key,
+            is_firing=is_firing,
+            now_ts=now_ts,
+            reminder_seconds=float(max(1, reminder_interval_min) * 60),
+        )
+        if phase == "NOOP":
+            return False
+
+        title = {
+            "process_dead": "PROCESS_DEAD",
+            "data_stale": "DATA_STALE",
+            "circuit_break": "CIRCUIT_BREAK",
+        }.get(event, event.upper())
+
+        if phase == "RESOLVED":
+            since_text = ""
+            if since_ts:
+                age_min = int(max(0, now_ts - since_ts) // 60)
+                since_text = f"\nDuration: {age_min}m"
+            msg = (
+                f"✅ *Health Resolved* {title}\n"
+                f"Bot: `{bot_name}`\n"
+                f"Strategy: `{strategy}`\n"
+                f"Check: `{check_name}`"
+                f"{since_text}"
+            )
+        else:
+            prefix = "🚨" if level == AlertLevel.CRITICAL else "⚠️"
+            tag = "FIRING" if phase == "FIRING" else "FIRING_ONGOING"
+            msg = (
+                f"{prefix} *Health Alert* {tag} – {title}\n"
+                f"Bot: `{bot_name}`\n"
+                f"Strategy: `{strategy}`\n"
+                f"Check: `{check_name}`"
+            )
+            if details:
+                msg += f"\nDetails: {details}"
+
+        if self._is_duplicate(msg):
+            return False
+
+        rate_key = f"health:{bot_name}:{strategy}:{check_name}"
+        if not self._limiter.is_allowed(rate_key):
+            return False
+
+        channel = self._resolve_alert_channel(event)
+        return await self._send_channel(channel, msg)
+
+    def _resolve_alert_channel(self, event: str) -> str:
+        routing = getattr(self.alerts_cfg, "routing", None)
+        if routing is None:
+            return "default"
+        if event in set(getattr(routing, "channel_health", []) or []):
+            return "health"
+        if event in set(getattr(routing, "channel_readiness", []) or []):
+            return "readiness"
+        return "default"
+
+    async def _send_channel(self, channel: str, message: str) -> bool:
+        if channel == "health":
+            return await self.send_health(message)
+        if channel == "readiness":
+            return await self.send_readiness(message)
+        return await self.send(message)
+
+    def _is_duplicate(self, message: str) -> bool:
+        now = _time.time()
+        # Alte Fingerprints aufraeumen.
+        stale_before = now - float(max(1, self._dedup_window_s))
+        self._dedup_cache = {
+            k: ts for k, ts in self._dedup_cache.items() if ts >= stale_before
+        }
+        key = str(hash(message))
+        last = self._dedup_cache.get(key)
+        if last is not None and (now - last) <= float(self._dedup_window_s):
+            return True
+        self._dedup_cache[key] = now
+        return False
 
     # ── High-Level API (neu) ─────────────────────────────────────────
 

@@ -1,4 +1,4 @@
-"""Tests fuer live/health.py – HealthState Writer/Reader-Trennung."""
+﻿"""Tests fuer live/health.py mit neuer Overall-State-Logik."""
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
@@ -9,148 +9,109 @@ from live.health import HealthState
 
 
 @pytest.mark.asyncio
-async def test_initial_state_is_critical_without_broker():
-    hs = HealthState()
-    assert hs.is_ready() is False
-    assert hs.overall_status() == "critical"
-
-
-@pytest.mark.asyncio
-async def test_broker_connected_without_bars_is_ready():
-    hs = HealthState()
-    await hs.set_broker_status(connected=True, adapter="paper")
-    assert hs.is_ready() is True
-
-
-@pytest.mark.asyncio
-async def test_stale_bar_marks_unready(monkeypatch):
-    # is_ready akzeptiert alte Bars außerhalb der Handelszeiten, damit
-    # der Runner nachts/am Wochenende nicht als "not ready" gilt. Dieser
-    # Test verifiziert das Verhalten während der Handelszeiten, also
-    # muss is_market_hours() hier True liefern.
-    import live.health as health_mod
-    monkeypatch.setattr(health_mod, "is_market_hours", lambda _dt: True)
-    hs = HealthState()
-    await hs.set_broker_status(connected=True, adapter="paper")
-    old = datetime.now(timezone.utc) - timedelta(minutes=20)
-    await hs.set_last_bar("orb", old, lag_ms=1_200_000.0)
-    assert hs.is_ready() is False
-
-
-@pytest.mark.asyncio
-async def test_custom_bar_age_threshold_allows_delayed_feed(monkeypatch):
-    import live.health as health_mod
-    monkeypatch.setattr(health_mod, "is_market_hours", lambda _dt: True)
-    hs = HealthState(bar_max_age_seconds=25 * 60)
-    await hs.set_broker_status(connected=True, adapter="ibkr")
-    old = datetime.now(timezone.utc) - timedelta(minutes=20)
-    await hs.set_last_bar("orb", old, lag_ms=1_200_000.0)
-    assert hs.is_ready() is True
-    assert hs.should_alert_on_not_ready() is False
-
-
-@pytest.mark.asyncio
-async def test_stale_bar_ok_outside_market_hours(monkeypatch):
-    import live.health as health_mod
-    monkeypatch.setattr(health_mod, "is_market_hours", lambda _dt: False)
-    hs = HealthState()
-    await hs.set_broker_status(connected=True, adapter="paper")
-    old = datetime.now(timezone.utc) - timedelta(minutes=20)
-    await hs.set_last_bar("orb", old, lag_ms=1_200_000.0)
-    assert hs.is_ready() is True
-
-
-@pytest.mark.asyncio
-async def test_bar_lag_thresholds_degrade_status():
-    hs = HealthState()
-    await hs.set_broker_status(connected=True, adapter="paper")
-    recent = datetime.now(timezone.utc)
-    await hs.set_last_bar("orb", recent, lag_ms=15_000.0)  # degraded
-    assert hs.overall_status() == "degraded"
-    await hs.set_last_bar("orb", recent, lag_ms=500.0)
-    assert hs.overall_status() == "ok"
-
-
-@pytest.mark.asyncio
-async def test_signal_counters_reset():
-    hs = HealthState()
-    await hs.record_signal("orb", filtered=False)
-    await hs.record_signal("orb", filtered=True)
-    snap = hs.snapshot()
-    strats = {s["name"]: s for s in snap["strategies"]}
-    assert strats["orb"]["signals_today"] == 1
-    assert strats["orb"]["signals_filtered_today"] == 1
-    await hs.reset_daily_counters()
-    snap = hs.snapshot()
-    strats = {s["name"]: s for s in snap["strategies"]}
-    assert strats.get("orb", {"signals_today": 0})["signals_today"] == 0
-
-
-@pytest.mark.asyncio
-async def test_circuit_breaker_forces_critical():
-    hs = HealthState()
-    await hs.set_broker_status(connected=True, adapter="paper")
-    await hs.set_circuit_breaker(True)
-    assert hs.overall_status() == "critical"
-
-
-@pytest.mark.asyncio
-async def test_symbol_status_round_trip():
-    """set_symbol_status (sync) erscheint im Snapshot."""
-    hs = HealthState()
-    from datetime import timezone
-    ts = datetime(2026, 4, 21, 14, 0, tzinfo=timezone.utc)
-    hs.set_symbol_status("orb", "AAPL", "WAIT_BREAKOUT",
-                         "Preis 150.00 in [149..151]", ts)
-    hs.set_symbol_status("orb", "NVDA", "GAP_BLOCK", "gap 3.50%")
-
-    snap = hs.snapshot()
-    strats = {s["name"]: s for s in snap["strategies"]}
-    sym = strats["orb"]["symbol_status"]
-    assert sym["AAPL"]["code"] == "WAIT_BREAKOUT"
-    assert "149" in sym["AAPL"]["reason"]
-    assert sym["NVDA"]["code"] == "GAP_BLOCK"
-
-
-@pytest.mark.asyncio
-async def test_symbol_status_overwrite():
-    """Neueres set_symbol_status überschreibt den alten Eintrag."""
-    hs = HealthState()
-    hs.set_symbol_status("orb", "SPY", "WAIT_ORB", "ORB-Periode")
-    hs.set_symbol_status("orb", "SPY", "SIGNAL", "ORB Breakout: 420 > 419")
-
-    snap = hs.snapshot()
-    strats = {s["name"]: s for s in snap["strategies"]}
-    assert strats["orb"]["symbol_status"]["SPY"]["code"] == "SIGNAL"
-
-
-@pytest.mark.asyncio
-async def test_strategy_status_sink_wires_to_health_state():
-    """LiveRunner-Muster: Sink verbindet BaseStrategy mit HealthState."""
-    from strategy.orb import ORBStrategy
-
-    hs = HealthState()
-    strat = ORBStrategy({})
-    strat.set_status_sink(
-        lambda sym, code, reason:
-            hs.set_symbol_status("orb", sym, code, reason)
+async def test_next_expected_bar_at_dynamic_formula():
+    hs = HealthState(
+        strategy_config={
+            "bar_timeframe_seconds": 300,
+            "provider_poll_interval_s": 30,
+            "stale_tolerance_s": 60,
+        },
     )
-    strat._record_status("AAPL", "TEST_CODE", "detail")
-
-    snap = hs.snapshot()
-    strats = {s["name"]: s for s in snap["strategies"]}
-    assert strats["orb"]["symbol_status"]["AAPL"]["code"] == "TEST_CODE"
+    last = datetime(2026, 4, 24, 14, 0, tzinfo=timezone.utc)
+    expected = hs.next_expected_bar_at(last)
+    assert expected == datetime(2026, 4, 24, 14, 6, 30, tzinfo=timezone.utc)
 
 
 @pytest.mark.asyncio
-async def test_snapshot_contains_all_sections():
-    hs = HealthState()
-    await hs.set_broker_status(connected=True, adapter="alpaca", last_order_ms=120.0)
-    await hs.update_portfolio(equity=10000.0, cash=5000.0,
-                              drawdown_pct=-1.5, open_positions=2, peak_equity=10100.0)
-    snap = hs.snapshot()
-    assert snap["broker"]["adapter"] == "alpaca"
-    assert snap["portfolio"]["equity"] == 10000.0
-    assert snap["portfolio"]["open_positions"] == 2
-    assert "strategies" in snap
-    assert snap["uptime_seconds"] >= 0
+async def test_overall_state_ok_in_trade_window_when_fresh_and_alive():
+    hs = HealthState(
+        strategy_config={
+            "market_open_time": "09:30",
+            "entry_cutoff_time": "15:00",
+            "eod_close_time": "15:27",
+        },
+        monitoring_config={
+            "watchdog_interval_s": 15,
+            "grace_period_s": 90,
+            "bar_timeframe_seconds": 300,
+            "provider_poll_interval_s": 30,
+            "stale_tolerance_s": 60,
+        },
+    )
+    now = datetime(2026, 4, 24, 14, 0, tzinfo=timezone.utc)  # 10:00 ET
+    await hs.set_broker_status(True, "paper")
+    await hs.set_watchdog("orb", now - timedelta(seconds=10))
+    await hs.set_last_bar("orb", now - timedelta(minutes=1), lag_ms=500.0)
+
+    assert hs.overall_state("orb", now=now) == "OK"
+
+
+@pytest.mark.asyncio
+async def test_overall_state_idle_outside_window():
+    hs = HealthState(
+        strategy_config={
+            "market_open_time": "09:30",
+            "entry_cutoff_time": "15:00",
+            "eod_close_time": "15:27",
+        },
+    )
+    now = datetime(2026, 4, 24, 20, 0, tzinfo=timezone.utc)  # 16:00 ET
+    await hs.set_broker_status(True, "paper")
+    await hs.set_watchdog("orb", now - timedelta(seconds=10))
+    await hs.set_last_bar("orb", now - timedelta(minutes=20), lag_ms=1000.0)
+
+    assert hs.overall_state("orb", now=now) == "IDLE_OUT_OF_WINDOW"
+
+
+@pytest.mark.asyncio
+async def test_overall_state_data_stale_in_window():
+    hs = HealthState(
+        strategy_config={
+            "market_open_time": "09:30",
+            "entry_cutoff_time": "15:00",
+            "eod_close_time": "15:27",
+            "bar_timeframe_seconds": 300,
+            "provider_poll_interval_s": 30,
+            "stale_tolerance_s": 60,
+        },
+        monitoring_config={
+            "watchdog_interval_s": 15,
+            "grace_period_s": 90,
+        },
+    )
+    now = datetime(2026, 4, 24, 14, 0, tzinfo=timezone.utc)  # 10:00 ET
+    await hs.set_broker_status(True, "paper")
+    await hs.set_watchdog("orb", now - timedelta(seconds=5))
+    await hs.set_last_bar("orb", now - timedelta(minutes=20), lag_ms=1_200_000.0)
+
+    assert hs.overall_state("orb", now=now) == "DATA_STALE"
+
+
+@pytest.mark.asyncio
+async def test_overall_state_process_dead():
+    hs = HealthState(
+        strategy_config={
+            "market_open_time": "09:30",
+            "entry_cutoff_time": "15:00",
+            "eod_close_time": "15:27",
+        },
+        monitoring_config={"watchdog_interval_s": 15},
+    )
+    now = datetime(2026, 4, 24, 14, 0, tzinfo=timezone.utc)
+    await hs.set_broker_status(True, "paper")
+    await hs.set_watchdog("orb", now - timedelta(seconds=60))
+    await hs.set_last_bar("orb", now - timedelta(minutes=1), lag_ms=500.0)
+
+    assert hs.overall_state("orb", now=now) == "PROCESS_DEAD"
+
+
+@pytest.mark.asyncio
+async def test_overall_state_circuit_break_priority():
+    hs = HealthState(strategy_config={"entry_cutoff_time": "15:00"})
+    now = datetime(2026, 4, 24, 14, 0, tzinfo=timezone.utc)
+    await hs.set_broker_status(True, "paper")
+    await hs.set_watchdog("orb", now - timedelta(seconds=5))
+    await hs.set_last_bar("orb", now - timedelta(minutes=1), lag_ms=500.0)
+    await hs.set_circuit_breaker(True)
+
+    assert hs.overall_state("orb", now=now) == "CIRCUIT_BREAK"

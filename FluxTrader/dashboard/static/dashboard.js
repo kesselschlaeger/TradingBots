@@ -10,6 +10,7 @@ let strategies = [];
 let signalData = [];
 let selectedTradeStrategy = '';
 let selectedSignalStrategy = '';
+let healthOverview = [];
 // Persistent UI-State: welche Bot-Cards sind ausgeklappt?
 const expandedBots = new Set();
 
@@ -161,6 +162,50 @@ async function refreshDashboard() {
   }
 }
 
+function stateMeta(overallState) {
+  switch (overallState) {
+    case 'OK':
+      return { cls: 'green', label: 'OK' };
+    case 'IDLE_OUT_OF_WINDOW':
+      return { cls: 'gray', label: 'IDLE (out of window)' };
+    case 'DATA_STALE':
+      return { cls: 'yellow', label: 'DATA STALE' };
+    case 'PROCESS_DEAD':
+    case 'CIRCUIT_BREAK':
+      return { cls: 'red', label: overallState };
+    default:
+      return { cls: 'gray', label: overallState || 'UNKNOWN' };
+  }
+}
+
+function findHealth(bot) {
+  return healthOverview.find(h =>
+    (h.bot_name || '') === (bot.bot_name || '') &&
+    (h.strategy || '') === (bot.strategy || '')
+  ) || null;
+}
+
+function renderActiveHealthAlerts() {
+  const root = document.getElementById('active-health-alerts');
+  if (!root) return;
+  const alerts = [];
+  for (const item of healthOverview) {
+    for (const alert of (item.active_alerts || [])) {
+      alerts.push({ item, alert });
+    }
+  }
+  if (!alerts.length) {
+    root.innerHTML = '<span class="muted">No active health alerts</span>';
+    return;
+  }
+  root.innerHTML = alerts.map(({ item, alert }) => `
+    <span class="health-alert-pill ${String(alert.level || '').toLowerCase() === 'critical' ? 'critical' : 'warning'}">
+      ${item.bot_name || item.strategy}: ${alert.check}
+      ${alert.since ? `(${new Date(alert.since).toLocaleTimeString()})` : ''}
+    </span>
+  `).join('');
+}
+
 // ─────────────────────────────────────────────────────────────────────────
 // Portfolio
 // ─────────────────────────────────────────────────────────────────────────
@@ -243,6 +288,13 @@ async function updateEquityChart() {
 
 async function updateHealth() {
   try {
+    const overviewResp = await fetch(`${API_BASE}/health/overview`);
+    if (overviewResp.ok) {
+      const overview = await overviewResp.json();
+      healthOverview = overview.items || [];
+      renderActiveHealthAlerts();
+    }
+
     const resp = await fetch(`${API_BASE}/strategies/health`);
     const data = await resp.json();
 
@@ -369,6 +421,12 @@ async function updateStrategies() {
     }
     container.innerHTML = strategies.map(bot => {
       const symStatus = bot.symbol_status || {};
+      const health = findHealth(bot);
+      const overallState = health ? health.overall_state : (bot.running ? 'OK' : 'IDLE_OUT_OF_WINDOW');
+      const sm = stateMeta(overallState);
+      const tooltip = health
+        ? `next_expected_bar_at: ${health.next_expected_bar_at || '—'}\nseconds_to_next_bar: ${health.seconds_to_next_bar ?? '—'}`
+        : '';
       const symCount = Object.keys(symStatus).length;
       const expanded = expandedBots.has(bot.strategy);
       const toggleIcon = expanded ? '▾' : '▸';
@@ -382,8 +440,8 @@ async function updateStrategies() {
           <span class="bot-toggle">${toggleIcon}</span>
           <h3>${bot.bot_name || bot.strategy}</h3>
           ${symbolsBadge}
-          <span class="bot-status-badge ${bot.running ? 'running' : 'stopped'}">
-            ${bot.running ? 'RUNNING' : 'STOPPED'}
+          <span class="bot-status-badge" title="${escapeAttr(tooltip)}">
+            <span class="bot-health-light ${sm.cls}"></span>${sm.label}
           </span>
         </div>
         <div class="bot-card-stats">

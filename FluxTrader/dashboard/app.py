@@ -40,7 +40,7 @@ def create_app(cfg: AppConfig,
     from fastapi.responses import FileResponse
     from fastapi.staticfiles import StaticFiles
 
-    from dashboard.routers import portfolio, strategies, trades, wfo
+    from dashboard.routers import health, portfolio, strategies, trades, wfo
     from live.state import PersistentState
 
     state = PersistentState(
@@ -58,6 +58,7 @@ def create_app(cfg: AppConfig,
     app.include_router(portfolio.router, prefix="/api")
     app.include_router(trades.router, prefix="/api")
     app.include_router(strategies.router, prefix="/api")
+    app.include_router(health.router, prefix="/api")
     app.include_router(wfo.router, prefix="/api")
 
     @app.on_event("startup")

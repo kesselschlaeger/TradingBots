@@ -122,3 +122,22 @@ notifications:
   bot_name: FLUX_BOTTI_PAPER
 
 benchmark: SPY
+
+monitoring:
+  watchdog_interval_s: 15          # Heartbeat-Takt des LiveRunners in die DB
+  bar_timeframe_seconds: 300       # Erwartetes Bar-Intervall in Sekunden (5Min=300)
+  provider_poll_interval_s: 30     # Polling-Intervall des Datenproviders in Sekunden
+  stale_tolerance_s: 60            # Zusätzliche Toleranz oberhalb der erwarteten Bar-Zeit
+  grace_period_s: 90               # Anlaufpuffer nach Session-Start, bevor Alerts feuern
+  reminder_interval_min: 30        # Erinnerung für aktive Health-Alerts alle N Minuten
+  trade_window_phases:
+    premarket_alert: false         # Kein Alert vor Marktöffnung
+    after_cutoff_alert: false      # Kein Alert nach Entry-Cutoff
+    after_eod_alert: false         # Kein Alert nach EOD-Close
+
+alerts:
+  routing:
+    channel_default: ["trade_opened", "trade_closed", "daily_summary"]   # Standardkanal für Trade-Events
+    channel_health: ["process_dead", "data_stale", "circuit_break"]       # Health-Kanal nur für kritische Health-Events
+    channel_readiness: []                                               # Leer = Readiness-Kanal deaktiviert
+  dedup_window_s: 300              # Unterdrückt identische Alert-Texte innerhalb dieses Fensters
