@@ -247,7 +247,13 @@ class PersistentState:
     # ── Schema ────────────────────────────────────────────────────────
 
     async def ensure_schema(self) -> None:
-        """Idempotent: PRAGMAs + CREATE TABLE IF NOT EXISTS + CREATE INDEX IF NOT EXISTS."""
+        """Idempotent: PRAGMAs + CREATE TABLE IF NOT EXISTS + Spalten-Migration + Indexes.
+
+        Reihenfolge ist kritisch:
+          1. CREATE TABLE IF NOT EXISTS  – erzeugt fehlende Tabellen
+          2. Spalten-Migration           – fügt fehlende Spalten hinzu (inkl. bot_name)
+          3. CREATE INDEX IF NOT EXISTS  – Indexes referenzieren ggf. neue Spalten
+        """
         async with self._lock:
             if self._schema_ready:
                 return
@@ -255,10 +261,31 @@ class PersistentState:
                 await conn.execute("PRAGMA journal_mode=WAL")
                 await conn.execute("PRAGMA synchronous=NORMAL")
                 await conn.execute("PRAGMA foreign_keys=ON")
+
+                # ── Schritt 1: Tabellen erzeugen (bereits existierende werden übersprungen)
                 for stmt in _SCHEMA_STATEMENTS:
                     await conn.execute(stmt)
-                for stmt in _INDEX_STATEMENTS:
-                    await conn.execute(stmt)
+
+                # ── Schritt 2: Spalten-Migrationen (vor Indexes!) ─────────────────────
+                # bot_name-Migration: In bestehenden DBs ohne bot_name würden die Indexes
+                # auf ON trades(bot_name, ...) mit "no such column" fehlschlagen.
+                # ALTER TABLE ADD COLUMN bot_name TEXT NOT NULL DEFAULT '' ist sicher:
+                # bestehende Zeilen erhalten bot_name='', neue schreiben den echten Wert.
+                _bot_name_tables = (
+                    "trades", "equity_snapshots", "positions",
+                    "signals", "anomaly_events",
+                    "account", "cooldowns", "reserved_groups", "bot_heartbeat",
+                )
+                for tbl in _bot_name_tables:
+                    tbl_cur = await conn.execute(f"PRAGMA table_info({tbl})")
+                    tbl_cols = {row[1] for row in await tbl_cur.fetchall()}
+                    if "bot_name" not in tbl_cols:
+                        await conn.execute(
+                            f"ALTER TABLE {tbl} ADD COLUMN bot_name TEXT NOT NULL DEFAULT ''"
+                        )
+                        log.info("state.migrate_bot_name", table=tbl)
+
+                # trades: Spalten-Umbenennungen / Ergänzungen
                 cur = await conn.execute("PRAGMA table_info(trades)")
                 cols = {row[1] for row in await cur.fetchall()}
                 if "reason" in cols and "exit_reason" not in cols:
@@ -273,12 +300,19 @@ class PersistentState:
                     await conn.execute(
                         "ALTER TABLE trades ADD COLUMN exit_features_json TEXT"
                     )
+
+                # bot_heartbeat: last_watchdog_ts
                 hb_cur = await conn.execute("PRAGMA table_info(bot_heartbeat)")
                 hb_cols = {row[1] for row in await hb_cur.fetchall()}
                 if "last_watchdog_ts" not in hb_cols:
                     await conn.execute(
                         "ALTER TABLE bot_heartbeat ADD COLUMN last_watchdog_ts TEXT"
                     )
+
+                # ── Schritt 3: Indexes (jetzt existieren alle referenzierten Spalten) ──
+                for stmt in _INDEX_STATEMENTS:
+                    await conn.execute(stmt)
+
                 await conn.commit()
             self._schema_ready = True
         log.info("state.schema_ready", path=str(self.db_path))
