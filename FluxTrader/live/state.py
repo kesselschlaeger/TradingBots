@@ -101,10 +101,13 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
         exit_ts          TEXT,
         entry_price      REAL NOT NULL,
         exit_price       REAL,
+        exit_reason      TEXT,
+        exit_signal      TEXT,
+        exit_strength    REAL,
+        exit_features_json TEXT,
         qty              REAL NOT NULL,
         pnl              REAL,
         pnl_pct          REAL,
-        reason           TEXT,
         stop_price       REAL,
         signal_strength  REAL,
         mit_qty_factor   REAL,
@@ -255,6 +258,20 @@ class PersistentState:
                     await conn.execute(stmt)
                 for stmt in _INDEX_STATEMENTS:
                     await conn.execute(stmt)
+                cur = await conn.execute("PRAGMA table_info(trades)")
+                cols = {row[1] for row in await cur.fetchall()}
+                if "reason" in cols and "exit_reason" not in cols:
+                    await conn.execute(
+                        "ALTER TABLE trades RENAME COLUMN reason TO exit_reason"
+                    )
+                if "exit_signal" not in cols:
+                    await conn.execute("ALTER TABLE trades ADD COLUMN exit_signal TEXT")
+                if "exit_strength" not in cols:
+                    await conn.execute("ALTER TABLE trades ADD COLUMN exit_strength REAL")
+                if "exit_features_json" not in cols:
+                    await conn.execute(
+                        "ALTER TABLE trades ADD COLUMN exit_features_json TEXT"
+                    )
                 await conn.commit()
             self._schema_ready = True
         log.info("state.schema_ready", path=str(self.db_path))
@@ -395,7 +412,10 @@ class PersistentState:
         exit_price: float,
         pnl: float | None = None,
         pnl_pct: float | None = None,
-        reason: str | None = None,
+        exit_reason: str | None = None,
+        exit_signal: str | None = None,
+        exit_strength: float | None = None,
+        exit_features_json: str | None = None,
     ) -> None:
         """Atomarer Exit: trades UPDATE + positions DELETE in einer Transaktion."""
         ts = _iso(exit_ts)
@@ -434,10 +454,15 @@ class PersistentState:
                 await conn.execute(
                     """
                     UPDATE trades
-                    SET exit_ts=?, exit_price=?, pnl=?, pnl_pct=?, reason=?
+                    SET exit_ts=?, exit_price=?, pnl=?, pnl_pct=?,
+                        exit_reason=?, exit_signal=?, exit_strength=?, exit_features_json=?
                     WHERE id=?
                     """,
-                    (ts, float(exit_price), pnl, pnl_pct, reason, tid),
+                    (
+                        ts, float(exit_price), pnl, pnl_pct,
+                        exit_reason, exit_signal, exit_strength,
+                        exit_features_json, tid,
+                    ),
                 )
                 await conn.execute(
                     "DELETE FROM positions "
@@ -447,7 +472,8 @@ class PersistentState:
                 await conn.commit()
 
         log.info("state.trade_closed_atomic", bot_name=bot_name,
-                 strategy=strategy, trade_id=tid, pnl=pnl, reason=reason)
+                 strategy=strategy, trade_id=tid, pnl=pnl,
+                 exit_reason=exit_reason, exit_signal=exit_signal)
 
     # ══════════════════════════════════════════════════════════════════
     # Equity
