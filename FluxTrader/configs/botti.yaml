@@ -111,29 +111,39 @@ broker:
   ibkr_bot_id: Flux_BOTTI
 
 data:
-  --provider: yfinance
-  provider: ibkr
-  alpaca_data_feed: iex
-  timeframe: "1D"
-  lookback_days: 150
+  provider: ibkr                   # Datenquelle: ibkr | alpaca | yfinance
+  alpaca_data_feed: iex            # Alpaca-Feed (nur wirksam wenn provider=alpaca)
+  timeframe: "1D"                  # Botti ist Daily-basiert; auto-Monitoring leitet davon ab
+  lookback_days: 150               # Warmup-Fenster für Indikatoren (SMA30 + 120 Tage Puffer)
 
 notifications:
-  enabled: true
-  bot_name: FLUX_BOTTI_PAPER
+  enabled: true                    # Telegram-Benachrichtigungen aktiv
+  bot_name: FLUX_BOTTI_PAPER       # Prefix für alle ausgehenden Alerts
 
-benchmark: SPY
+benchmark: SPY                     # Referenzindex für Trend-Filter + Alpha-Berechnung
 
 monitoring:
-  watchdog_interval_s: 15          # Heartbeat-Takt des LiveRunners in die DB
-  bar_timeframe_seconds: 300       # Erwartetes Bar-Intervall in Sekunden (5Min=300)
+  watchdog_interval_s: 15          # Heartbeat-Takt des LiveRunners in die DB (Sekunden)
+  bar_timeframe_seconds: 0         # 0 = auto aus data.timeframe (1D → 86400s); >0 = Override
   provider_poll_interval_s: 30     # Polling-Intervall des Datenproviders in Sekunden
-  stale_tolerance_s: 60            # Zusätzliche Toleranz oberhalb der erwarteten Bar-Zeit
+  stale_tolerance_s: 0             # 0 = auto (25 % der Bar-TF, min. 60s); >0 = Override
   grace_period_s: 90               # Anlaufpuffer nach Session-Start, bevor Alerts feuern
   reminder_interval_min: 30        # Erinnerung für aktive Health-Alerts alle N Minuten
   trade_window_phases:
     premarket_alert: false         # Kein Alert vor Marktöffnung
     after_cutoff_alert: false      # Kein Alert nach Entry-Cutoff
     after_eod_alert: false         # Kein Alert nach EOD-Close
+
+anomaly:
+  duplicate_window_minutes: 30     # Duplicate-Guard-Fenster für Daily-Strategien erweitert
+  duplicate_hard_block: true       # Hart blockieren: Regression gegen Incident 2026-04-24 (RKLB-Duplikat)
+
+execution:
+  order_confirm_timeout_s: 10.0              # Timeout für IBKR orderStatus-Bestätigung nach placeOrder
+  close_verification_timeout_s: 120.0        # Orphan-Close-Timeout: bis dahin wird fehlender Fill toleriert
+  reconcile_require_healthy_session: true    # Fantasie-Close nur bei gesunder Session (Incident-Schutz)
+  scanner_provider: auto                     # auto | alpaca | ibkr | yfinance (Premarket-Gap-Scanner)
+  scanner_premarket_hours: 4                 # Zeitfenster (h vor Open) für Bars-basierte Scanner-Pfade
 
 alerts:
   routing:

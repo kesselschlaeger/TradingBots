@@ -9,6 +9,7 @@ from core.filters import (
     is_after_eod_close,
     is_before_premarket,
     is_within_trade_window,
+    timeframe_to_seconds,
     to_et,
 )
 
@@ -71,18 +72,32 @@ def evaluate_liveness(*,
                       strategy_cfg: dict[str, Any],
                       monitoring_cfg: Any,
                       now: datetime) -> dict[str, Any]:
-    bar_timeframe_seconds = int(
+    # bar_timeframe_seconds: expliziter Wert (>0) gewinnt, sonst aus
+    # strategy.timeframe ableiten. Stale-Tolerance fällt auf 25 % des
+    # Bar-Intervalls (min. 60 s) zurück, wenn nicht explizit gesetzt.
+    explicit_bar_tf = int(
         strategy_cfg.get("bar_timeframe_seconds")
-        or getattr(monitoring_cfg, "bar_timeframe_seconds", 300)
+        or getattr(monitoring_cfg, "bar_timeframe_seconds", 0)
+        or 0
     )
+    if explicit_bar_tf > 0:
+        bar_timeframe_seconds = explicit_bar_tf
+    else:
+        tf_label = str(strategy_cfg.get("timeframe") or "5Min")
+        bar_timeframe_seconds = int(timeframe_to_seconds(tf_label))
     provider_poll_interval_s = int(
         strategy_cfg.get("provider_poll_interval_s")
         or getattr(monitoring_cfg, "provider_poll_interval_s", 30)
     )
-    stale_tolerance_s = int(
+    explicit_stale = int(
         strategy_cfg.get("stale_tolerance_s")
-        or getattr(monitoring_cfg, "stale_tolerance_s", 60)
+        or getattr(monitoring_cfg, "stale_tolerance_s", 0)
+        or 0
     )
+    if explicit_stale > 0:
+        stale_tolerance_s = explicit_stale
+    else:
+        stale_tolerance_s = max(60, int(bar_timeframe_seconds * 0.25))
     grace_period_s = int(getattr(monitoring_cfg, "grace_period_s", 90))
     watchdog_interval_s = int(getattr(monitoring_cfg, "watchdog_interval_s", 15))
 

@@ -241,7 +241,7 @@ class TradeManager:
                     exit_price=float(exit_price),
                     pnl=pnl,
                     pnl_pct=pnl_pct,
-                    reason=reason,
+                    exit_reason=reason,
                 )
             except Exception as e:  # noqa: BLE001
                 log.warning("trade.persist_close_failed",

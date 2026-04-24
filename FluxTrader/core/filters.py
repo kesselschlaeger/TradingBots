@@ -331,6 +331,46 @@ def is_after_eod_close(cfg: dict | object, now: datetime) -> bool:
     return now_et >= close_t
 
 
+def timeframe_to_seconds(timeframe: str) -> int:
+    """Wandle einen Alpaca/IBKR-Timeframe-String in Sekunden um.
+
+    Erkennt Notationen wie ``5Min``, ``15min``, ``1H``, ``1Day``, ``1d``, ``30S``.
+    Fällt auf 300 (5 Min) zurück, wenn die Notation unbekannt ist – so bleibt
+    das bisherige Default-Verhalten erhalten, wenn eine Config keinen sauberen
+    Timeframe setzt.
+    """
+    if not timeframe:
+        return 300
+    tf = str(timeframe).strip().lower()
+    if not tf:
+        return 300
+    # Trenne Zahl und Einheit (z.B. "5min" -> 5, "min"; "1d" -> 1, "d")
+    num_part = ""
+    unit_part = ""
+    for ch in tf:
+        if ch.isdigit() or ch == ".":
+            num_part += ch
+        else:
+            unit_part += ch
+    try:
+        n = float(num_part) if num_part else 1.0
+    except ValueError:
+        n = 1.0
+    unit = unit_part.strip() or "min"
+
+    if unit in {"s", "sec", "secs", "second", "seconds"}:
+        return max(1, int(n))
+    if unit in {"min", "mins", "minute", "minutes", "m"}:
+        return max(1, int(n * 60))
+    if unit in {"h", "hr", "hrs", "hour", "hours"}:
+        return max(1, int(n * 3600))
+    if unit in {"d", "day", "days", "1day"}:
+        return max(1, int(n * 86400))
+    if unit in {"w", "week", "weeks"}:
+        return max(1, int(n * 7 * 86400))
+    return 300
+
+
 def in_regular_trade_window(cfg: dict | object, now: datetime) -> bool:
     """True wenn 'now' zwischen Market-Open und Entry-Cutoff liegt (ET)."""
     now_et = to_et(now)

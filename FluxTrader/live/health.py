@@ -33,6 +33,7 @@ from core.filters import (
     is_after_eod_close,
     is_before_premarket,
     is_within_trade_window,
+    timeframe_to_seconds,
     to_et,
 )
 
@@ -66,28 +67,47 @@ class HealthState:
                  monitoring_config: Optional[Any] = None,
                  persistent_state: Optional["PersistentState"] = None,
                  cache_ttl_seconds: float = 5.0,
-                 bot_name: str = "") -> None:
+                 bot_name: str = "",
+                 data_timeframe: Optional[str] = None) -> None:
         self._start_ts = _time.time()
         self._lock = asyncio.Lock()
         self._strategy_cfg = strategy_config or {}
         self._monitoring_cfg = monitoring_config
 
         self._watchdog_interval_s = max(1, self._monitoring_int("watchdog_interval_s", 15))
+        # Auto-Ableitung: Wenn weder strategy_cfg noch monitoring_cfg einen
+        # expliziten Wert (>0) setzen, berechnen wir den Bar-Takt aus dem
+        # Strategie-/Data-Timeframe. Vermeidet Fehlalarme wie "Kein Bar für
+        # 15 Min" bei Daily-Strategien, wo 300s-Defaults unsinnig sind.
+        tf_fallback = (
+            str(self._strategy_cfg.get("timeframe")
+                or data_timeframe
+                or "5Min")
+        )
+        explicit_bar_tf = (
+            self._strategy_cfg.get("bar_timeframe_seconds")
+            or self._monitoring_int("bar_timeframe_seconds", 0)
+        )
         self._bar_timeframe_seconds = max(
             1,
-            int(self._strategy_cfg.get("bar_timeframe_seconds")
-                or self._monitoring_int("bar_timeframe_seconds", 300)),
+            int(explicit_bar_tf) if explicit_bar_tf and int(explicit_bar_tf) > 0
+            else int(timeframe_to_seconds(tf_fallback)),
         )
         self._provider_poll_interval_s = max(
             0,
             int(self._strategy_cfg.get("provider_poll_interval_s")
                 or self._monitoring_int("provider_poll_interval_s", 30)),
         )
-        self._stale_tolerance_s = max(
-            0,
-            int(self._strategy_cfg.get("stale_tolerance_s")
-                or self._monitoring_int("stale_tolerance_s", 60)),
+        explicit_stale = (
+            self._strategy_cfg.get("stale_tolerance_s")
+            or self._monitoring_int("stale_tolerance_s", 0)
         )
+        if explicit_stale and int(explicit_stale) > 0:
+            self._stale_tolerance_s = int(explicit_stale)
+        else:
+            # 25 % des Bar-Intervalls, mindestens 60 s. Bei Daily-Bars (86400 s)
+            # resultiert das in 21600 s = 6 h – vernünftig als Toleranz.
+            self._stale_tolerance_s = max(60, int(self._bar_timeframe_seconds * 0.25))
         self._grace_period_s = max(0, self._monitoring_int("grace_period_s", 90))
 
         self._broker_connected: bool = False

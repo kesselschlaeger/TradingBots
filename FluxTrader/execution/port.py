@@ -19,6 +19,25 @@ from core.risk import fixed_fraction_size, position_size
 log = get_logger(__name__)
 
 
+class OrderSubmitError(RuntimeError):
+    """Signalisiert, dass eine Order nicht sauber beim Broker angenommen wurde.
+
+    Der Aufrufer (BrokerPort.execute_signal / Runner) muss daraus ableiten,
+    dass weder ``ManagedTrade`` noch ``trades``-INSERT erfolgen dürfen – der
+    Adapter selbst hat evtl. bereits lokale Parent-Orders wieder storniert.
+    """
+
+    def __init__(self, message: str, *, status: str = "",
+                 order_id: Optional[str] = None,
+                 last_error_code: Optional[int] = None,
+                 last_error_msg: str = "") -> None:
+        super().__init__(message)
+        self.status = status
+        self.order_id = order_id
+        self.last_error_code = last_error_code
+        self.last_error_msg = last_error_msg
+
+
 class BrokerPort(ABC):
     """Minimaler Vertrag für jeden Broker-Adapter (Alpaca, IBKR, Paper)."""
 
@@ -74,6 +93,23 @@ class BrokerPort(ABC):
         Telegram-CLOSE-Meldungen mit echten Fill-Preisen implementieren.
         """
         return {}
+
+    async def health(self) -> dict:
+        """Liefert Gesundheitsstatus der Broker-Session.
+
+        Keys: ``connected`` (bool), ``session_healthy`` (bool),
+        ``last_error_code`` (int | None), ``last_error_msg`` (str),
+        ``managed_accounts`` (list[str]). Adapter mit echter Netzwerk-
+        Verbindung überschreiben; der Default gilt für PaperAdapter o. Ä.,
+        die immer als gesund angenommen werden.
+        """
+        return {
+            "connected": True,
+            "session_healthy": True,
+            "last_error_code": None,
+            "last_error_msg": "",
+            "managed_accounts": [],
+        }
 
     # ── Preis-Update Hook (für Paper-/Backtest-Adapter) ─────────────
 
@@ -150,7 +186,17 @@ class BrokerPort(ABC):
             client_order_id=signal.metadata.get("client_order_id"),
             metadata=order_meta,
         )
-        order_id = await self.submit_order(req)
+        try:
+            order_id = await self.submit_order(req)
+        except OrderSubmitError as e:
+            log.warning(
+                "broker.execute_signal.submit_rejected",
+                symbol=signal.symbol,
+                status=e.status,
+                last_error_code=e.last_error_code,
+                last_error_msg=e.last_error_msg,
+            )
+            return None
         return ExecutionResult(
             order_id=order_id,
             qty=qty,

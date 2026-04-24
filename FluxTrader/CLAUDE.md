@@ -30,6 +30,27 @@ Diese Regeln dürfen NIEMALS verletzt werden:
    - Sync-SDKs (alpaca-py, ib_insync) werden via `loop.run_in_executor(None, ...)` gewrapped
    - Niemals `asyncio.run()` innerhalb eines laufenden Event-Loops aufrufen
 
+6. **Order-Lifecycle** (nach Live-Incident 2026-04-24)
+   - `BrokerPort.submit_order()` liefert die Order-ID **erst**, wenn der Broker
+     `orderStatus ∈ {Submitted, PreSubmitted, Filled}` gemeldet hat. Timeout
+     oder terminaler Reject-Status (`Cancelled`, `Inactive`, `Rejected`, ...)
+     werfen `OrderSubmitError`; der Adapter storniert dabei selbstständig
+     Parent-Legs mit `transmit=False`, damit keine "Floating"-Orders bleiben.
+   - Der Runner darf **erst nach** erfolgreicher Order-ID einen
+     `ManagedTrade`/DB-Eintrag erzeugen. Pre-Submit-Idempotenz:
+     `_pending_submit`-Set, TM-Check, Broker-Position-Check.
+   - Reconcile (LiveRunner: getrackter Trade verschwindet aus `get_positions()`):
+     Close nur bei **echtem Fill** (`broker.get_recent_closes`). Bei ungesunder
+     Session (`broker.health().session_healthy = False`) wird der Auto-Close
+     **übersprungen** (`reconcile_skipped_unhealthy`). Fehlt der Fill länger
+     als `execution.close_verification_timeout_s`, eskaliert ein
+     `orphan_close`-AnomalyEvent und der Trade wird als
+     `UNKNOWN (reconcile timeout)` geschlossen. **Niemals** Close-Gründe wie
+     `TARGET (server/bracket)` aus einer Bar-High/Low-Ableitung fabrizieren.
+   - Multi-Bot-Isolation auf gemeinsamem IBKR-Paper-Account: primärer Filter
+     ist das `orderRef`-Prefix (`bot_id` + optionaler `order_prefix`).
+     `get_recent_closes` akzeptiert nur Fills mit passendem Prefix.
+
 ## Verzeichnis-Verantwortlichkeiten
 
 ```

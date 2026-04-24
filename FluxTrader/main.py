@@ -89,6 +89,7 @@ def _build_broker(cfg: AppConfig):
             client_id=cfg.broker.ibkr_client_id,
             paper=cfg.broker.paper,
             bot_id=cfg.broker.ibkr_bot_id,
+            order_confirm_timeout_s=float(cfg.execution.order_confirm_timeout_s),
         )
 
     raise ValueError(f"Unknown broker type: {bt}")
@@ -369,6 +370,7 @@ async def cmd_live(cfg: AppConfig) -> None:
         monitoring_config=cfg.monitoring,
         persistent_state=state,
         bot_name=effective_bot_name,
+        data_timeframe=str(cfg.data.timeframe or "5Min"),
     )
     metrics_collector = MetricsCollector.create(
         enabled=cfg.monitoring.prometheus_enabled
@@ -428,6 +430,7 @@ async def cmd_live(cfg: AppConfig) -> None:
                 anomaly_detector=anomaly_detector,
                 alerts_cfg=cfg.alerts,
                 monitoring_cfg=cfg.monitoring,
+                execution_cfg=cfg.execution,
                 bot_name=effective_bot_name,
             )
             await runner.start()

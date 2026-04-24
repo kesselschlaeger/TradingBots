@@ -13,10 +13,13 @@ TODO: ML-Training (train_ml_model) -> eigenes tools/train_botti_ml.py
 """
 from __future__ import annotations
 
+from typing import Optional
+
 import numpy as np
 import pandas as pd
 
 from core.filters import (
+    correlation_group,
     drawdown_breaker,
     sector_cluster_ok,
     vix_size_factor,
@@ -382,6 +385,22 @@ class BottiStrategy(BaseStrategy):
             volume_ratio=volume / vol_sma if vol_sma > 0 else 1.0,
         )
 
+    @staticmethod
+    def _resolve_reserve_group(symbol: str, cfg: dict) -> Optional[str]:
+        """Bestimme den Sektor-Gruppennamen für ``symbol`` oder None.
+
+        Grundlage ist ``sector_groups`` aus der Config (identisch zum
+        Sector-Cluster-Guard). Der Wert landet als ``reserve_group`` in
+        den Signal-Metadaten, damit ``trade_manager.register_and_persist``
+        ihn in die ``trades.group_name``-Spalte UND ``reserved_groups`` für
+        MIT-Independence persistiert.
+        """
+        groups = cfg.get("sector_groups") or {}
+        if not isinstance(groups, dict) or not groups:
+            return None
+        name = correlation_group(symbol, groups)
+        return name or None
+
     def _make_trend_signal(
         self, bar: Bar, df: pd.DataFrame, last: pd.Series,
         cfg: dict, vix_factor: float, reason: str,
@@ -392,6 +411,17 @@ class BottiStrategy(BaseStrategy):
                         float(cfg.get("initial_sl_atr_mult", 2.5)))
         target = entry + float(cfg.get("trailing_atr_mult", 3.0)) * atr_val
 
+        metadata: dict = {
+            "entry_price": entry,
+            "atr": atr_val,
+            "vix_factor": vix_factor,
+            "reason": reason,
+            "cross_type": reason.split("|")[0].strip() if "|" in reason else reason,
+        }
+        group = self._resolve_reserve_group(bar.symbol, cfg)
+        if group:
+            metadata["reserve_group"] = group
+
         return Signal(
             strategy="botti_trend",
             symbol=bar.symbol,
@@ -401,13 +431,7 @@ class BottiStrategy(BaseStrategy):
             stop_price=stop,
             target_price=target,
             timestamp=bar.timestamp,
-            metadata={
-                "entry_price": entry,
-                "atr": atr_val,
-                "vix_factor": vix_factor,
-                "reason": reason,
-                "cross_type": reason.split("|")[0].strip() if "|" in reason else reason,
-            },
+            metadata=metadata,
         )
 
     def _make_mr_signal(
@@ -421,6 +445,18 @@ class BottiStrategy(BaseStrategy):
         stop = atr_stop("long", entry, atr_val,
                         float(cfg.get("initial_sl_atr_mult", 2.5)))
 
+        metadata: dict = {
+            "entry_price": entry,
+            "atr": atr_val,
+            "vix_factor": vix_factor,
+            "mr_target": mr_target,
+            "bb_mid": bb_mid,
+            "reason": reason,
+        }
+        group = self._resolve_reserve_group(bar.symbol, cfg)
+        if group:
+            metadata["reserve_group"] = group
+
         return Signal(
             strategy="botti_mr",
             symbol=bar.symbol,
@@ -430,14 +466,7 @@ class BottiStrategy(BaseStrategy):
             stop_price=stop,
             target_price=mr_target,
             timestamp=bar.timestamp,
-            metadata={
-                "entry_price": entry,
-                "atr": atr_val,
-                "vix_factor": vix_factor,
-                "mr_target": mr_target,
-                "bb_mid": bb_mid,
-                "reason": reason,
-            },
+            metadata=metadata,
         )
 
     @staticmethod

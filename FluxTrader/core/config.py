@@ -74,15 +74,15 @@ class TradeWindowPhaseConfig(BaseModel):
 class MonitoringConfig(BaseModel):
     model_config = ConfigDict(extra="allow")
 
-    health_port: int = 8090
-    prometheus_enabled: bool = True
-    dashboard_port: int = 8080
-    watchdog_interval_s: int = 15
-    bar_timeframe_seconds: int = 300
-    provider_poll_interval_s: int = 30
-    stale_tolerance_s: int = 60
-    grace_period_s: int = 90
-    reminder_interval_min: int = 30
+    health_port: int = 8090                 # HTTP-Port für Health/Metrics-Endpoint
+    prometheus_enabled: bool = True         # Prometheus-Metriken aktivieren (0 = aus)
+    dashboard_port: int = 8080              # Port für FastAPI-Dashboard
+    watchdog_interval_s: int = 15           # Heartbeat-Takt des LiveRunners in die DB (Sekunden)
+    bar_timeframe_seconds: int = 0          # 0 = aus strategy.timeframe abgeleitet; >0 = expliziter Override
+    provider_poll_interval_s: int = 30      # Polling-Intervall Datenprovider (Sekunden)
+    stale_tolerance_s: int = 0              # 0 = aus timeframe abgeleitet (max 60s, 25% der TF); >0 = Override
+    grace_period_s: int = 90                # Anlaufpuffer nach Session-Start, bevor Stale-Alerts feuern
+    reminder_interval_min: int = 30         # Erinnerungs-Intervall für aktive Health-Alerts (Minuten)
     trade_window_phases: TradeWindowPhaseConfig = Field(
         default_factory=TradeWindowPhaseConfig,
     )
@@ -122,14 +122,14 @@ class AlertsConfig(BaseModel):
 class AnomalyConfig(BaseModel):
     model_config = ConfigDict(extra="allow")
 
-    duplicate_window_minutes: int = 5
-    duplicate_hard_block: bool = False
-    max_single_order_pct: float = 0.25
-    max_volume_pct: float = 0.01
-    pnl_spike_sigma: float = 3.0
-    pnl_lookback_trades: int = 50
-    bar_gap_minutes: int = 10
-    max_signals_per_hour: int = 20
+    duplicate_window_minutes: int = 5           # Fensterbreite des Duplicate-Signal-Guards in Minuten
+    duplicate_hard_block: bool = False          # True = identisches Signal innerhalb des Fensters wird blockiert
+    max_single_order_pct: float = 0.25          # Maximalanteil einer Einzelorder am Equity (0.25 = 25 %)
+    max_volume_pct: float = 0.01                # Maximalanteil der Order am Tagesvolumen des Symbols
+    pnl_spike_sigma: float = 3.0                # σ-Schwelle für PnL-Spike-Erkennung
+    pnl_lookback_trades: int = 50               # Rollendes Fenster der letzten N realisierten PnLs
+    bar_gap_minutes: int = 10                   # Schwellwert für bar_stream_gap-Anomalie (Minuten)
+    max_signals_per_hour: int = 20              # Signal-Flood-Limit pro Strategie und Stunde
     enabled_checks: dict[str, bool] = Field(
         default_factory=lambda: {
             "duplicate_trade": True,
@@ -150,6 +150,17 @@ class BacktestExportConfig(BaseModel):
     show_exit_stats: bool = True         # Exit-Reason-Tabelle in Konsole
 
 
+class ExecutionConfig(BaseModel):
+    """Order- und Reconcile-Parameter für Live/Paper-Broker."""
+    model_config = ConfigDict(extra="allow")
+
+    order_confirm_timeout_s: float = 10.0               # Timeout für IBKR orderStatus-Bestätigung nach placeOrder (Sekunden)
+    close_verification_timeout_s: float = 120.0         # Timeout bis fehlender Fill als orphan_close eskaliert (Sekunden)
+    reconcile_require_healthy_session: bool = True      # Reconcile (Fantasie-Close-Block) nur bei gesunder Broker-Session
+    scanner_provider: Literal["auto", "alpaca", "ibkr", "yfinance"] = "auto"  # Datenquelle für Premarket-Gap-Scan
+    scanner_premarket_hours: int = 4                    # Zeitfenster (Stunden vor Open), das der Scanner als Premarket fetcht
+
+
 class AppConfig(BaseModel):
     """Wurzel-Konfiguration. extra='allow' -> unbekannte Keys werden durchgereicht."""
     model_config = ConfigDict(extra="allow")
@@ -165,6 +176,7 @@ class AppConfig(BaseModel):
     backtest_export: BacktestExportConfig = Field(
         default_factory=BacktestExportConfig,
     )
+    execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
     bot_name: str = ""              # YAML-Instanzname, z.B. "botti_nq_live"; leer → aus strategy+broker abgeleitet
     initial_capital: float = 10_000.0
     currency: str = "USD"

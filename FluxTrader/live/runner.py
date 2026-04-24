@@ -24,6 +24,7 @@ from core.trade_manager import ManagedTrade, TradeManager
 from data.providers.base import DataProvider
 from execution.port import BrokerPort
 from live.anomaly import AnomalyDetector
+from core.models import AnomalyEvent
 from live.health import HealthState
 from live.metrics import MetricsCollector
 from live.notifier import TelegramNotifier
@@ -54,6 +55,7 @@ class LiveRunner:
         anomaly_detector: Optional[AnomalyDetector] = None,
         alerts_cfg: Any = None,
         monitoring_cfg: Any = None,
+        execution_cfg: Any = None,
         bot_name: str = "",
     ):
         self.strategy = strategy
@@ -88,6 +90,27 @@ class LiveRunner:
         self._running = False
         self._pending_exit_next_open: set[str] = set()
         self._daily_trades_count: int = 0
+        # Submit-Idempotenz: Symbole, für die aktuell eine Order-Submission
+        # läuft. Verhindert Race-Conditions zwischen parallel verarbeiteten
+        # Bars (async execute_signal → submit_order).
+        self._pending_submit: set[str] = set()
+        # Orphan-Close-Tracking: wenn Broker eine Position nicht mehr meldet,
+        # aber kein passender Fill vorliegt, geben wir dem System Zeit, den
+        # Fill nachzureichen, bevor wir den Trade im Zweifel als "UNKNOWN"
+        # schließen. Key: Symbol → Zeitpunkt der ersten fehlenden Sichtung.
+        self._orphan_close_since: dict[str, datetime] = {}
+        # Execution-Config (aus AppConfig.execution) – steuert Reconcile-
+        # Hardening und Orphan-Close-Timeout. Fallback auf Defaults, wenn
+        # kein Block übergeben wurde (z.B. Tests).
+        self._execution_cfg = execution_cfg
+        self._close_verification_timeout_s: float = float(
+            getattr(execution_cfg, "close_verification_timeout_s", 120.0)
+            if execution_cfg is not None else 120.0
+        )
+        self._reconcile_require_healthy_session: bool = bool(
+            getattr(execution_cfg, "reconcile_require_healthy_session", True)
+            if execution_cfg is not None else True
+        )
         self._last_health_status: Optional[str] = None
         self._watchdog_task: Optional[asyncio.Task] = None
         self._watchdog_interval_s: int = int(
@@ -248,11 +271,19 @@ class LiveRunner:
     async def _on_premarket(self) -> None:
         log.info("runner.premarket_scan")
         if self._scanner is None:
+            preferred = "auto"
+            premarket_hours = 4
+            if self._execution_cfg is not None:
+                preferred = str(getattr(self._execution_cfg, "scanner_provider", "auto"))
+                premarket_hours = int(getattr(self._execution_cfg, "scanner_premarket_hours", 4))
             self._scanner = PremarketScanner(
                 watchlist=self.symbols,
                 min_gap_pct=float(self.cfg.get("scanner_min_gap", 0.02)),
                 max_gap_pct=float(self.cfg.get("scanner_max_gap", 0.10)),
                 min_premarket_vol=int(self.cfg.get("scanner_min_vol", 50_000)),
+                data_provider=self.data,
+                preferred_source=preferred,
+                premarket_hours=premarket_hours,
             )
         results = await self._scanner.scan_filtered(max_results=10)
         if results:
@@ -800,55 +831,15 @@ class LiveRunner:
                             if k.upper() in _own_set}
         self._context.set_open_symbols(list(broker_positions.keys()))
 
-        closed_symbols = [
+        missing_symbols = [
             symbol for symbol in tracked_before
             if symbol not in broker_positions
         ]
-        close_execs = await self.broker.get_recent_closes(closed_symbols)
-        for sym in closed_symbols:
-            tracked = tracked_before.get(sym)
-            if tracked is None:
-                continue
-            close_exec = close_execs.get(sym.upper()) or close_execs.get(sym)
-            exit_price = (
-                float(close_exec.fill_price)
-                if close_exec and close_exec.fill_price > 0
-                else self._safe_exit_price(
-                    bar.close if bar.symbol == sym else None,
-                    tracked.entry,
-                )
-            )
-            reason = self._infer_close_reason(tracked, bar)
-            pnl = self._compute_pnl(
-                side=tracked.side,
-                entry=tracked.entry,
-                exit_price=exit_price,
-                qty=(
-                    float(close_exec.qty)
-                    if close_exec and close_exec.qty > 0
-                    else tracked.qty
-                ),
-            )
-            if close_exec and close_exec.realized_pnl is not None:
-                pnl = float(close_exec.realized_pnl)
-            await self.notifier.trade_closed(
-                symbol=sym,
-                side=tracked.side,
-                exit_price=exit_price,
-                pnl=pnl,
-                reason=reason,
-                qty=(
-                    float(close_exec.qty)
-                    if close_exec and close_exec.qty > 0
-                    else tracked.qty
-                ),
-                order_id=(close_exec.order_id if close_exec else ""),
-            )
-            await self.tm.close_trade(
-                sym, exit_price=exit_price,
-                exit_ts=datetime.now(timezone.utc),
-                pnl=pnl, reason=reason, tracked=tracked,
-            )
+        await self._reconcile_missing_positions(
+            missing_symbols=missing_symbols,
+            tracked_before=tracked_before,
+            bar=bar,
+        )
 
         # Stale-Cleanup für Trades, deren Close der Runner nicht explizit
         # verarbeitet hat (z.B. gar kein Eintrag in tracked_before).
@@ -954,6 +945,165 @@ class LiveRunner:
             )
         except Exception as e:  # noqa: BLE001
             log.warning("runner.equity_persist_failed", error=str(e))
+
+    async def _reconcile_missing_positions(
+        self,
+        *,
+        missing_symbols: list[str],
+        tracked_before: dict[str, Optional[ManagedTrade]],
+        bar: Bar,
+    ) -> None:
+        """Behandle Trades, deren Position der Broker nicht mehr meldet.
+
+        Order-Lifecycle-Invariante: Ein Trade wird **nur** dann in der DB
+        geschlossen, wenn einer der folgenden Fälle zutrifft:
+
+        1. Broker meldet einen echten Fill (``get_recent_closes``).
+        2. Broker-Session ist gesund, der Fill fehlt aber länger als
+           ``close_verification_timeout_s`` – dann wird der Trade als
+           ``UNKNOWN (reconcile timeout)`` geschlossen und ein
+           ``orphan_close``-Anomaly-Event eskaliert.
+
+        Bei ungesunder Session (z. B. IBKR-Gateway disconnected) wird
+        **kein** Auto-Close ausgeführt; das in der Vergangenheit genutzte
+        ``_infer_close_reason`` ("TARGET (server/bracket)") war die Haupt-
+        Ursache der Fantasie-Fills vom 2026-04-24 und entfällt damit als
+        alleinige Quelle.
+        """
+        if not missing_symbols:
+            # Alle getrackten Symbole weiterhin bei Broker sichtbar – Orphan-
+            # Tracking zurücksetzen.
+            self._orphan_close_since.clear()
+            return
+
+        health = await self.broker.health()
+        session_healthy = bool(health.get("session_healthy", True))
+        now = datetime.now(timezone.utc)
+
+        close_execs: dict[str, Any] = {}
+        try:
+            close_execs = await self.broker.get_recent_closes(missing_symbols)
+        except Exception as e:  # noqa: BLE001
+            log.warning("runner.get_recent_closes_failed", error=str(e))
+            close_execs = {}
+
+        for sym in missing_symbols:
+            tracked = tracked_before.get(sym)
+            if tracked is None:
+                continue
+
+            close_exec = close_execs.get(sym.upper()) or close_execs.get(sym)
+
+            if close_exec is not None:
+                # ── Echter Fill liegt vor: Trade sauber schließen ──────
+                self._orphan_close_since.pop(sym, None)
+                exit_price = (
+                    float(close_exec.fill_price)
+                    if close_exec.fill_price > 0
+                    else self._safe_exit_price(None, tracked.entry)
+                )
+                qty_closed = (
+                    float(close_exec.qty)
+                    if close_exec.qty > 0 else float(tracked.qty)
+                )
+                pnl = (
+                    float(close_exec.realized_pnl)
+                    if close_exec.realized_pnl is not None
+                    else self._compute_pnl(
+                        side=tracked.side,
+                        entry=tracked.entry,
+                        exit_price=exit_price,
+                        qty=qty_closed,
+                    )
+                )
+                reason = "Position closed at broker (fill verified)"
+                await self.notifier.trade_closed(
+                    symbol=sym,
+                    side=tracked.side,
+                    exit_price=exit_price,
+                    pnl=pnl,
+                    reason=reason,
+                    qty=qty_closed,
+                    order_id=close_exec.order_id or "",
+                )
+                await self.tm.close_trade(
+                    sym, exit_price=exit_price,
+                    exit_ts=now,
+                    pnl=pnl, reason=reason, tracked=tracked,
+                )
+                continue
+
+            # ── Kein Fill vorhanden ────────────────────────────────────
+            if self._reconcile_require_healthy_session and not session_healthy:
+                # Session ungesund → Position könnte noch existieren;
+                # Auto-Close wäre ein Fantasie-Fill wie am 2026-04-24.
+                log.warning(
+                    "runner.reconcile_skipped_unhealthy",
+                    symbol=sym,
+                    last_error_code=health.get("last_error_code"),
+                    last_error_msg=str(health.get("last_error_msg", ""))[:160],
+                )
+                continue
+
+            first_seen = self._orphan_close_since.setdefault(sym, now)
+            age_s = (now - first_seen).total_seconds()
+            if age_s < self._close_verification_timeout_s:
+                log.info(
+                    "runner.orphan_close_pending",
+                    symbol=sym,
+                    age_s=int(age_s),
+                    timeout_s=int(self._close_verification_timeout_s),
+                )
+                continue
+
+            # ── Timeout überschritten: als UNKNOWN eskalieren ─────────
+            exit_price = self._safe_exit_price(None, tracked.entry)
+            pnl = self._compute_pnl(
+                side=tracked.side,
+                entry=tracked.entry,
+                exit_price=exit_price,
+                qty=float(tracked.qty),
+            )
+            reason = "UNKNOWN (reconcile timeout)"
+            log.error(
+                "runner.orphan_close_timeout",
+                symbol=sym,
+                age_s=int(age_s),
+                timeout_s=int(self._close_verification_timeout_s),
+            )
+            try:
+                if self.anomaly is not None:
+                    ev = AnomalyEvent(
+                        timestamp=now, check_name="orphan_close",
+                        severity=AlertLevel.CRITICAL,
+                        symbol=sym, strategy=self.strategy.name,
+                        bot_name=self._bot_name,
+                        message=(
+                            f"Position {sym} seit {int(age_s)}s unsichtbar, "
+                            f"kein Fill verfügbar → als UNKNOWN geschlossen"
+                        ),
+                        context={"age_s": age_s,
+                                 "timeout_s": self._close_verification_timeout_s},
+                    )
+                    await self.anomaly._emit(ev)  # noqa: SLF001
+            except Exception as e:  # noqa: BLE001
+                log.warning("runner.orphan_close_emit_failed", error=str(e))
+
+            await self.notifier.trade_closed(
+                symbol=sym,
+                side=tracked.side,
+                exit_price=exit_price,
+                pnl=pnl,
+                reason=reason,
+                qty=float(tracked.qty),
+                order_id="",
+            )
+            await self.tm.close_trade(
+                sym, exit_price=exit_price,
+                exit_ts=now,
+                pnl=pnl, reason=reason, tracked=tracked,
+            )
+            self._orphan_close_since.pop(sym, None)
 
     async def _check_drawdown_alerts(self, dd_pct: float) -> None:
         """Feuert Drawdown-Warn/Critical + Circuit-Breaker, wenn Schwellen
@@ -1083,6 +1233,34 @@ class LiveRunner:
                      limit=max_concurrent)
             return
 
+        # ── Submit-Idempotenz: keine doppelten Orders pro Symbol ──────
+        # Drei Stufen, in dieser Reihenfolge:
+        #   1. Aktuell laufende submit_order-Call für das Symbol?
+        #   2. In-Memory ManagedTrade bereits offen?
+        #   3. Broker-Seite: Position bereits existent?
+        # Der Guard ist intentional *vor* duplicate_trade-Check platziert,
+        # weil eine bestehende Position auch nach Ablauf des Duplicate-
+        # Fensters keinen zweiten Entry rechtfertigt.
+        if sig.symbol in self._pending_submit:
+            log.info("runner.submit_skipped_in_flight", symbol=sig.symbol)
+            return
+        if self.tm.get(sig.symbol) is not None:
+            log.info("runner.submit_skipped_tm_open", symbol=sig.symbol)
+            return
+        if not bool(sig.metadata.get("allow_scale_in", False)):
+            existing_pos = None
+            try:
+                existing_pos = await self.broker.get_position(sig.symbol)
+            except Exception as e:  # noqa: BLE001
+                log.warning("runner.get_position_failed",
+                            symbol=sig.symbol, error=str(e))
+            if existing_pos is not None:
+                log.info("runner.submit_skipped_broker_open",
+                         symbol=sig.symbol,
+                         qty=float(existing_pos.qty),
+                         side=existing_pos.side)
+                return
+
         if sig.metadata.get("exit_next_open"):
             ts = sig.timestamp
             if ts.tzinfo is None:
@@ -1130,12 +1308,16 @@ class LiveRunner:
         equity = float(acct["equity"])
 
         _t0 = datetime.now(timezone.utc)
-        execution = await self.broker.execute_signal(
-            sig, account_equity=equity,
-            risk_pct=float(self.cfg.get("risk_pct", 0.01)),
-            max_equity_at_risk=float(self.cfg.get("max_equity_at_risk", 0.05)),
-            max_position_value_pct=float(self.cfg.get("max_position_value_pct", 0.25)),
-        )
+        self._pending_submit.add(sig.symbol)
+        try:
+            execution = await self.broker.execute_signal(
+                sig, account_equity=equity,
+                risk_pct=float(self.cfg.get("risk_pct", 0.01)),
+                max_equity_at_risk=float(self.cfg.get("max_equity_at_risk", 0.05)),
+                max_position_value_pct=float(self.cfg.get("max_position_value_pct", 0.25)),
+            )
+        finally:
+            self._pending_submit.discard(sig.symbol)
         if not execution:
             self.metrics.record_signal(
                 sig.strategy,

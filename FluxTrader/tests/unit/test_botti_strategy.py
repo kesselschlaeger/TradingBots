@@ -323,6 +323,95 @@ class TestBottiReset:
         assert len(strat.bars) == 0
 
 
+class TestBottiReserveGroup:
+    """Regression für Live-Incident 2026-04-24: Botti setzte kein
+    reserve_group → trades.group_name blieb NULL → Sector-Guard und
+    MIT-Independence wirkten nach Restart nicht."""
+
+    def test_mr_signal_sets_reserve_group_for_sector_member(self, context):
+        context.update_account(equity=100_000.0, cash=100_000.0)
+        strat = BottiStrategy({
+            "use_fast_cross": False,
+            "use_early_golden_cross": False,
+            "use_pullback_entry_daily": False,
+            "use_mean_reversion": True,
+            "mr_rsi_max": 45,
+            "adx_threshold": 0,
+            "sector_groups": {"tech_semi": ["NVDA", "AMD", "MU"]},
+        }, context=context)
+
+        signals = []
+        for b in _make_mr_bars(symbol="NVDA"):
+            signals.extend(strat.on_bar(b))
+
+        buy = [s for s in signals if s.direction == 1]
+        assert buy, "Erwartetes MR-BUY-Signal fehlt"
+        assert buy[0].metadata.get("reserve_group") == "tech_semi"
+
+    def test_trend_signal_sets_reserve_group(self, context):
+        context.update_account(equity=100_000.0, cash=100_000.0)
+        strat = BottiStrategy({
+            "use_fast_cross": False,
+            "use_early_golden_cross": False,
+            "use_pullback_entry_daily": False,
+            "use_mean_reversion": False,
+            "sma_short": 20,
+            "sma_long": 30,
+            "adx_threshold": 0,
+            "use_rsi_filter": False,
+            "use_macd_filter": False,
+            "use_volume_filter": False,
+            "sector_groups": {"tech_semi": ["NVDA", "AMD", "MU"]},
+        }, context=context)
+
+        signals = []
+        for b in _make_golden_cross_bars(symbol="AMD"):
+            signals.extend(strat.on_bar(b))
+
+        buy = [s for s in signals if s.direction == 1]
+        assert buy, "Erwartetes Trend-BUY-Signal fehlt"
+        assert buy[0].metadata.get("reserve_group") == "tech_semi"
+
+    def test_no_reserve_group_when_symbol_not_in_sector_map(self, context):
+        context.update_account(equity=100_000.0, cash=100_000.0)
+        strat = BottiStrategy({
+            "use_fast_cross": False,
+            "use_early_golden_cross": False,
+            "use_pullback_entry_daily": False,
+            "use_mean_reversion": True,
+            "mr_rsi_max": 45,
+            "adx_threshold": 0,
+            "sector_groups": {"tech_semi": ["NVDA", "AMD", "MU"]},
+        }, context=context)
+
+        signals = []
+        for b in _make_mr_bars(symbol="SPY"):
+            signals.extend(strat.on_bar(b))
+
+        buy = [s for s in signals if s.direction == 1]
+        if buy:
+            assert "reserve_group" not in buy[0].metadata
+
+    def test_no_reserve_group_when_sector_groups_empty(self, context):
+        context.update_account(equity=100_000.0, cash=100_000.0)
+        strat = BottiStrategy({
+            "use_fast_cross": False,
+            "use_early_golden_cross": False,
+            "use_pullback_entry_daily": False,
+            "use_mean_reversion": True,
+            "mr_rsi_max": 45,
+            "adx_threshold": 0,
+        }, context=context)
+
+        signals = []
+        for b in _make_mr_bars(symbol="NVDA"):
+            signals.extend(strat.on_bar(b))
+
+        buy = [s for s in signals if s.direction == 1]
+        if buy:
+            assert "reserve_group" not in buy[0].metadata
+
+
 class TestBottiMtfProxy:
     """Tests fuer den Daily-MTF-Proxy (Phase 1: Backtest-Filter).
 
