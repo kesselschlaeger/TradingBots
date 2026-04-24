@@ -349,8 +349,7 @@ class QuickFlipStrategy(BaseStrategy):
         today = self._day_cache["date"]
         df = df_5m.copy()
         df.index = to_et(df.index)
-        day_mask = np.asarray(df.index.normalize() == pd.Timestamp(today),
-                              dtype=bool)
+        day_mask = np.asarray([d.date() == today for d in df.index], dtype=bool)
         day_df = df[day_mask]
         if day_df.empty:
             return
@@ -379,8 +378,7 @@ class QuickFlipStrategy(BaseStrategy):
         df = df_5m.copy()
         df.index = to_et(df.index)
         today = self._day_cache["date"]
-        day_mask = np.asarray(df.index.normalize() == pd.Timestamp(today),
-                              dtype=bool)
+        day_mask = np.asarray([d.date() == today for d in df.index], dtype=bool)
         day_df = df[day_mask]
         if day_df.empty:
             return False, ""
