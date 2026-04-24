@@ -12,7 +12,8 @@ from strategy.obb import OBBStrategy  # noqa: F401
 from strategy.botti import BottiStrategy  # noqa: F401
 from strategy.botti_pair import BottiPairStrategy  # noqa: F401
 from strategy.ict_ob import IctOrderBlockStrategy  # noqa: F401
+from strategy.quick_flip import QuickFlipStrategy  # noqa: F401
 
 __all__ = ["BaseStrategy", "PairStrategy", "StrategyRegistry", "register",
            "ORBStrategy", "OBBStrategy", "BottiStrategy", "BottiPairStrategy",
-           "IctOrderBlockStrategy"]
+           "IctOrderBlockStrategy", "QuickFlipStrategy"]

@@ -496,44 +496,77 @@ class LiveRunner:
             log.warning("runner.warmup_bulk_failed", error=str(e))
             return
 
-        # SPY/Benchmark nur laden wenn use_trend_filter=True ODER benchmark
-        # explizit gesetzt ist. OBB und andere filterlose Strategien brauchen
-        # kein SPY.
-        needs_spy = (
-            bool(self.cfg.get("use_trend_filter", False))
-            or "benchmark" in self.cfg
-        )
-        if needs_spy:
-            benchmark = str(self.cfg.get("benchmark", "SPY")).upper()
+        # Asset-aware Trend-Referenz laden:
+        # - equity ohne expliziten Ref-Asset: benchmark/SPY als Daily-DF
+        # - futures/crypto oder expliziter Ref-Asset: Referenzsymbol-Bars in Context
+        asset_class = str(self.cfg.get("asset_class", "equity")).lower()
+        use_trend_filter = bool(self.cfg.get("use_trend_filter", False))
+        explicit_ref = self.cfg.get("trend_reference_asset")
+        if use_trend_filter or "benchmark" in self.cfg:
+            if asset_class == "equity" and not explicit_ref:
+                benchmark = str(self.cfg.get("benchmark", "SPY")).upper()
 
-            # Für den EMA-Trend-Filter werden mindestens trend_ema_period
-            # Daily-Bars benötigt. warmup_days (typisch 5) reicht nach
-            # Resampling von 5-Min auf Daily nicht aus (5 Tage → 5 Bars,
-            # EMA(20) nicht sinnvoll). Daher: immer mit Daily-Timeframe
-            # und eigenem Lookback laden.
-            ema_period = int(self.cfg.get("trend_ema_period", 20))
-            spy_daily_days = max(warmup_days, ema_period + 15)
-            spy_start = end - timedelta(days=spy_daily_days)
+                # Für den EMA-Trend-Filter werden mindestens trend_ema_period
+                # Daily-Bars benötigt. warmup_days (typisch 5) reicht nach
+                # Resampling von 5-Min auf Daily nicht aus (5 Tage → 5 Bars,
+                # EMA(20) nicht sinnvoll). Daher: immer mit Daily-Timeframe
+                # und eigenem Lookback laden.
+                ema_period = int(self.cfg.get("trend_ema_period", 20))
+                spy_daily_days = max(warmup_days, ema_period + 15)
+                spy_start = end - timedelta(days=spy_daily_days)
 
-            spy_df = None
-            try:
-                spy_df = await self.data.get_bars(
-                    benchmark, spy_start, end, "1Day",
-                )
-            except Exception as e:  # noqa: BLE001
-                log.warning("runner.warmup_spy_failed",
-                            benchmark=benchmark, error=str(e))
-
-            if spy_df is not None and not spy_df.empty:
+                spy_df = None
                 try:
-                    from core.indicators import ensure_daily
-                    self._context.set_spy_df(ensure_daily(spy_df))
-                    log.info("runner.warmup_spy_loaded",
-                             benchmark=benchmark,
-                             daily_bars=len(spy_df),
-                             lookback_days=spy_daily_days)
+                    spy_df = await self.data.get_bars(
+                        benchmark, spy_start, end, "1Day",
+                    )
                 except Exception as e:  # noqa: BLE001
-                    log.warning("runner.warmup_spy_set_failed", error=str(e))
+                    log.warning("runner.warmup_spy_failed",
+                                benchmark=benchmark, error=str(e))
+
+                if spy_df is not None and not spy_df.empty:
+                    try:
+                        from core.indicators import ensure_daily
+                        self._context.set_spy_df(ensure_daily(spy_df))
+                        log.info("runner.warmup_spy_loaded",
+                                 benchmark=benchmark,
+                                 daily_bars=len(spy_df),
+                                 lookback_days=spy_daily_days)
+                    except Exception as e:  # noqa: BLE001
+                        log.warning("runner.warmup_spy_set_failed", error=str(e))
+            else:
+                ref_symbol = None
+                if hasattr(self.strategy, "_trend_reference_asset_key"):
+                    try:
+                        ref_symbol = self.strategy._trend_reference_asset_key()
+                    except Exception:  # noqa: BLE001
+                        ref_symbol = None
+                if ref_symbol and str(ref_symbol).upper() not in self.symbols:
+                    try:
+                        ref_df = await self.data.get_bars(
+                            str(ref_symbol).upper(), start, end, tf,
+                        )
+                        if ref_df is not None and not ref_df.empty:
+                            for ts, row in ref_df.iterrows():
+                                py_ts = ts.to_pydatetime() if hasattr(ts, "to_pydatetime") else ts
+                                if py_ts.tzinfo is None:
+                                    py_ts = py_ts.replace(tzinfo=timezone.utc)
+                                self._context.push_bar(Bar(
+                                    symbol=str(ref_symbol).upper(),
+                                    timestamp=py_ts,
+                                    open=float(row["Open"]),
+                                    high=float(row["High"]),
+                                    low=float(row["Low"]),
+                                    close=float(row["Close"]),
+                                    volume=int(row.get("Volume", 0) or 0),
+                                ))
+                            log.info("runner.warmup_ref_loaded",
+                                     reference_symbol=str(ref_symbol).upper(),
+                                     bars=len(ref_df), timeframe=tf)
+                    except Exception as e:  # noqa: BLE001
+                        log.warning("runner.warmup_ref_failed",
+                                    reference_symbol=str(ref_symbol).upper(),
+                                    error=str(e))
 
         # Strategie-Buffer befuellen (Bars chronologisch)
         if not hasattr(self.strategy, "warmup_bar"):

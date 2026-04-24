@@ -1,0 +1,63 @@
+# Quick Flip Scalper – Backtest (yfinance + PaperAdapter, kein Netzwerk zur Broker-API)
+mode: backtest
+
+strategy:
+  name: quick_flip
+  symbols: [SPY, QQQ, NVDA]     # Baseline-Liste; für Sweeps erweiterbar
+  risk_pct: 0.005               # 0.5 % Equity-Risiko je Trade
+  params:
+    # --- Opening Range & Trade-Fenster ---
+    opening_range_minutes: 15       # Länge der Opening-Range-Box in Minuten
+    max_trade_window_minutes: 90    # Maximales Handelsfenster nach Open in Minuten
+    entry_cutoff_time: "10:45"      # Kein neuer Trade-Entry nach dieser Uhrzeit ET
+
+    # --- Liquidity Candle ---
+    liquidity_atr_threshold: 0.25   # Min. Candle-Range als Anteil der 14-Tage-ATR für Liquidity-Signal
+
+    # --- Risk / Reward ---
+    min_rr_ratio: 1.5               # Mindest-Risk-Reward-Ratio; Trade wird übersprungen wenn darunter
+    buffer_ticks: 0.05              # Stop-Puffer in $ jenseits Reversal-Candle-Extremum
+    risk_per_trade: 0.005           # Risiko je Trade als Anteil der Equity (0.5 %)
+    min_signal_strength: 0.35       # Mindeststärke des Signals (0–1) für Ausgabe
+
+    # --- Richtungs-Steuerung ---
+    allow_shorts: true              # Short-Trades erlauben (false = nur Long)
+
+    # --- Trend / Gap ---
+    use_trend_filter: true          # SPY-Trendfilter aktivieren (empfohlen)
+    trend_ema_period: 20            # EMA-Periode für SPY-Trendfilter
+    use_gap_filter: true            # Gap-Filter bei Marktöffnung aktivieren
+    max_gap_pct: 0.03               # Maximaler Gap zur Vortagsclose in % (>3 % = kein Trade)
+
+    # --- VIX-Regime (im yfinance-Backtest oft ohne VIX-Feed -> neutral) ---
+    use_vix_filter: false           # VIX im Backtest optional; standardmäßig aus
+    vix_high_threshold: 30.0        # Ab diesem VIX-Wert Position Size reduzieren
+    vix_size_factor: 0.5            # Größen-Multiplikator bei hohem VIX (0.5 = halbe Größe)
+
+    # --- MIT Independence Overlay ---
+    use_mit_overlay: true           # MIT-Independence-Overlay für Position Sizing aktivieren
+    mit_correlation_groups:
+      index_etfs: [SPY, QQQ, IWM, DIA]
+      semi_ai: [NVDA, AMD, AVGO]
+      mega_cap_tech: [AAPL, MSFT, META, AMZN, GOOGL]
+
+    # --- Candlestick-Pattern-Parameter (tunable im Backtest) ---
+    hammer_shadow_ratio: 2.0        # Min. unterer Schatten als Vielfaches des Body (Hammer)
+    hammer_upper_shadow_ratio: 0.3  # Max. oberer Schatten als Anteil des Body bei Hammer
+    engulfing_min_body_ratio: 0.6   # Min. Body-Größe der Engulfing-Candle relativ zum Vorgänger
+
+    # --- Warmup / Buffer ---
+    min_bars: 120                   # Minimale Bar-Anzahl im Buffer vor erstem Signal
+    max_bars_buffer: 2000           # Max. Bar-Anzahl im Strategy-Buffer
+
+broker:
+  type: paper                 # In-Memory-Adapter, kein Netzwerk
+
+data:
+  provider: yfinance          # Backtest-Datenquelle
+  timeframe: "5Min"
+  lookback_days: 60           # ausreichend Tage für Daily-ATR(14) + Warmup
+
+notifications:
+  enabled: false              # Backtest: keine Telegram-Nachrichten
+  bot_name: FLUX_QUICK_FLIP_BT

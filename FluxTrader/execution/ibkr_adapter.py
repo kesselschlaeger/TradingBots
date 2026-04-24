@@ -12,7 +12,7 @@ from typing import Optional
 
 from core.logging import get_logger
 from core.models import CloseExecution, OrderRequest, OrderSide, Position
-from execution.contract_factory import build_contract
+from execution.contract_factory import build_contract, qualify_contract
 from execution.port import BrokerPort
 
 log = get_logger(__name__)
@@ -138,7 +138,11 @@ class IBKRAdapter(BrokerPort):
 
         def place():
             self._ensure_connected()
-            self.ib.qualifyContracts(contract)
+            resolved_contract = qualify_contract(self.ib, contract, asset_class)
+            if resolved_contract is None:
+                raise RuntimeError(
+                    f"Kein qualifizierbarer IBKR-Contract für {req.symbol} ({asset_class})"
+                )
 
             if order_type == "limit" and req.limit_price:
                 parent = LimitOrder(action, req.qty, req.limit_price)
@@ -153,7 +157,7 @@ class IBKRAdapter(BrokerPort):
 
             parent.orderRef = ref
             parent.transmit = False if (req.stop_loss or req.take_profit) else True
-            parent_trade = self.ib.placeOrder(contract, parent)
+            parent_trade = self.ib.placeOrder(resolved_contract, parent)
 
             opposite = "SELL" if action == "BUY" else "BUY"
             child_trades = []
@@ -162,13 +166,13 @@ class IBKRAdapter(BrokerPort):
                 sl.parentId = parent_trade.order.orderId
                 sl.transmit = False if req.take_profit else True
                 sl.orderRef = f"{ref}|SL"
-                child_trades.append(self.ib.placeOrder(contract, sl))
+                child_trades.append(self.ib.placeOrder(resolved_contract, sl))
             if req.take_profit:
                 tp = LimitOrder(opposite, req.qty, req.take_profit)
                 tp.parentId = parent_trade.order.orderId
                 tp.transmit = True
                 tp.orderRef = f"{ref}|TP"
-                child_trades.append(self.ib.placeOrder(contract, tp))
+                child_trades.append(self.ib.placeOrder(resolved_contract, tp))
 
             return parent_trade
 

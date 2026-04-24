@@ -13,7 +13,7 @@ strategy:
 
     # OB-Detection
     atr_period: 14                   # ATR-Fenster (MTF-Indikator)
-    displacement_mult: 1.8           # Displacement = body > mult × ATR
+    displacement_mult: 1.1 #1.8 sind viel zu hoch, keine Generierung           # Displacement = body > mult × ATR
     swing_lookback_4h: 3             # Swing-Fenster 4H OB
     swing_lookback_1h: 5             # Swing-Fenster 1H Struktur
 

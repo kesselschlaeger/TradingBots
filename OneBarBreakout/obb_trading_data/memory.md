@@ -58,3 +58,9 @@
 
 **2026-04-23 13:30** TQQQ SELL 78 @ 59.52 | 1-Bar Exit (Morning DAY)
 
+**2026-04-24 13:26** AMD SELL 15 @ 337.88 | 1-Bar Exit (Morning OPG)
+
+**2026-04-24 13:26** MRVL SELL 28 @ 171.20 | 1-Bar Exit (Morning OPG)
+
+**2026-04-24 13:26** SOXL SELL 41 @ 125.15 | 1-Bar Exit (Morning OPG)
+

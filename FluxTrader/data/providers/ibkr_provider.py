@@ -12,7 +12,7 @@ import pandas as pd
 from core.logging import get_logger
 from core.models import Bar
 from data.providers.base import DataProvider
-from execution.contract_factory import build_contract
+from execution.contract_factory import build_contract, qualify_contract
 
 log = get_logger(__name__)
 
@@ -51,6 +51,31 @@ def _to_duration_str(start: datetime, end: datetime) -> str:
     total_seconds = max((end - start).total_seconds(), 1)
     days = max(1, ceil(total_seconds / 86400.0))
     return f"{days} D"
+
+
+def _resolve_what_to_show(asset_class: str, cfg: Optional[dict] = None) -> str:
+    return _resolve_what_to_show_candidates(asset_class, cfg)[0]
+
+
+def _resolve_what_to_show_candidates(
+    asset_class: str,
+    cfg: Optional[dict] = None,
+) -> list[str]:
+    cfg = cfg or {}
+    override = str(
+        cfg.get("ibkr_what_to_show")
+        or cfg.get(f"{(asset_class or 'equity').lower()}_what_to_show")
+        or ""
+    ).strip()
+    if override:
+        return [override.upper()]
+
+    ac = (asset_class or "equity").lower()
+    if ac == "crypto":
+        return ["AGGTRADES"]
+    if ac == "futures":
+        return ["MIDPOINT", "BID_ASK"]
+    return ["TRADES"]
 
 
 def _normalize_df(raw: pd.DataFrame, start: datetime, end: datetime) -> pd.DataFrame:
@@ -207,14 +232,18 @@ class IBKRDataProvider(DataProvider):
     ) -> pd.DataFrame:
         bar_size = _to_bar_size_setting(timeframe)
         duration = _to_duration_str(start, end)
+        what_to_show_candidates = _resolve_what_to_show_candidates(
+            self._asset_class,
+            self._contract_cfg,
+        )
 
-        def _fetch() -> pd.DataFrame:
+        def _fetch(what_to_show: str) -> pd.DataFrame:
             self._ensure_connected()
             contract = build_contract(
                 symbol.upper(), self._asset_class, self._contract_cfg,
             )
-            qualified = self.ib.qualifyContracts(contract)
-            if not qualified:
+            contract = qualify_contract(self.ib, contract, self._asset_class)
+            if contract is None:
                 log.error(
                     "ibkr_provider.no_contract",
                     symbol=symbol,
@@ -223,7 +252,6 @@ class IBKRDataProvider(DataProvider):
                 return pd.DataFrame()
             end_utc = end.astimezone(timezone.utc) if end.tzinfo else end.replace(tzinfo=timezone.utc)
             end_dt_str = end_utc.strftime("%Y%m%d-%H:%M:%S")
-            what_to_show = "AGGTRADES" if self._asset_class == "crypto" else "TRADES"
             bars = self.ib.reqHistoricalData(
                 contract,
                 endDateTime=end_dt_str,
@@ -242,8 +270,20 @@ class IBKRDataProvider(DataProvider):
         last_err: Optional[str] = None
         for attempt in range(self._max_retries + 1):
             try:
-                raw = await self._run(_fetch)
-                return _normalize_df(raw, start, end)
+                for index, what_to_show in enumerate(what_to_show_candidates):
+                    raw = await self._run(_fetch, what_to_show)
+                    normalized = _normalize_df(raw, start, end)
+                    if not normalized.empty:
+                        return normalized
+                    if index < len(what_to_show_candidates) - 1:
+                        log.warning(
+                            "ibkr_data.empty_fallback",
+                            symbol=symbol,
+                            asset_class=self._asset_class,
+                            from_what_to_show=what_to_show,
+                            to_what_to_show=what_to_show_candidates[index + 1],
+                        )
+                return pd.DataFrame()
             except asyncio.TimeoutError:
                 last_err = "timeout"
                 if attempt < self._max_retries:

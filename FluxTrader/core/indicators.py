@@ -545,3 +545,115 @@ class KalmanSpreadEstimator:
     def reset(self) -> None:
         self._x = None
         self._p = 1.0
+
+
+# ─────────────────────────── Quick Flip / Reversal Helpers ──────────────────
+
+
+def is_liquidity_candle(
+    high: float,
+    low: float,
+    daily_atr: float,
+    threshold: float = 0.25,
+) -> bool:
+    """True wenn Candle-Range >= threshold * daily_atr.
+
+    Diagnostiziert institutionelle Stop-Hunt-Candles: wenn eine einzelne
+    Candle einen substanziellen Anteil der durchschnittlichen Tages-Range
+    abdeckt, ist das ein typisches Signal für erzwungene Liquidation bzw.
+    Liquidity Sweep. Wird von der Quick-Flip-Strategie genutzt.
+    """
+    if daily_atr <= 0:
+        return False
+    candle_range = float(high) - float(low)
+    if candle_range <= 0:
+        return False
+    return candle_range >= threshold * daily_atr
+
+
+def detect_reversal_pattern(
+    df: pd.DataFrame,
+    direction: str,
+    hammer_shadow_ratio: float = 2.0,
+    hammer_upper_shadow_ratio: float = 0.3,
+    engulfing_min_body_ratio: float = 0.6,
+) -> Optional[str]:
+    """Erkennt Reversal-Candlestick-Pattern im letzten Bar von df.
+
+    direction="long"  -> prüft Hammer oder Bullish Engulfing.
+    direction="short" -> prüft Inverted Hammer oder Bearish Engulfing.
+    Gibt Pattern-Name zurück oder None.
+
+    df muss Spalten Open, High, Low, Close enthalten. Alle Schwellen sind
+    Parameter – keine hardcodierten Magic Numbers – damit im Backtest
+    tunable ohne Code-Änderung.
+    """
+    if df is None or df.empty:
+        return None
+
+    last = df.iloc[-1]
+    o = float(last["Open"])
+    h = float(last["High"])
+    lo = float(last["Low"])
+    c = float(last["Close"])
+    body = abs(c - o)
+    upper_shadow = h - max(o, c)
+    lower_shadow = min(o, c) - lo
+
+    if direction == "long":
+        # Hammer: langer unterer Schatten, kleiner oberer Schatten
+        hammer_ok = (
+            lower_shadow >= hammer_shadow_ratio * body
+            and upper_shadow <= hammer_upper_shadow_ratio * body
+            and lower_shadow > 0
+        )
+        if hammer_ok:
+            return "hammer"
+        # Bullish Engulfing: braucht 2 Bars
+        if len(df) < 2:
+            return None
+        prev = df.iloc[-2]
+        po = float(prev["Open"])
+        pc = float(prev["Close"])
+        prev_body = abs(pc - po)
+        cur_bullish = c > o
+        prev_bearish = pc < po
+        if (
+            cur_bullish
+            and prev_bearish
+            and body >= engulfing_min_body_ratio * prev_body
+            and c > po
+            and o < pc
+        ):
+            return "bullish_engulfing"
+        return None
+
+    if direction == "short":
+        # Inverted Hammer: langer oberer Schatten, kleiner unterer Schatten
+        inv_hammer_ok = (
+            upper_shadow >= hammer_shadow_ratio * body
+            and lower_shadow <= hammer_upper_shadow_ratio * body
+            and upper_shadow > 0
+        )
+        if inv_hammer_ok:
+            return "inverted_hammer"
+        # Bearish Engulfing
+        if len(df) < 2:
+            return None
+        prev = df.iloc[-2]
+        po = float(prev["Open"])
+        pc = float(prev["Close"])
+        prev_body = abs(pc - po)
+        cur_bearish = c < o
+        prev_bullish = pc > po
+        if (
+            cur_bearish
+            and prev_bullish
+            and body >= engulfing_min_body_ratio * prev_body
+            and c < po
+            and o > pc
+        ):
+            return "bearish_engulfing"
+        return None
+
+    return None

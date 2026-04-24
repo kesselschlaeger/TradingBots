@@ -260,3 +260,25 @@ def mit_independence_blocked(
     if group in reserved_groups:
         return True, f"MIT Independence: Gruppe {group} heute bereits genutzt"
     return False, ""
+
+
+# ─────────────────────────── Intraday Trade Window ──────────────────────────
+
+
+def is_within_trade_window(
+    now: datetime,
+    open_time: datetime,
+    window_minutes: int = 90,
+) -> bool:
+    """True wenn 'now' innerhalb der ersten window_minutes nach open_time liegt.
+
+    Genutzt z.B. von der Quick-Flip-Strategie, die nur innerhalb der ersten
+    90 Min nach Market-Open Trades eingehen darf. Akzeptiert naive und
+    timezone-aware datetimes (ET-Konvertierung intern).
+    """
+    if window_minutes <= 0:
+        return False
+    now_et = to_et(now)
+    open_et = to_et(open_time)
+    delta_min = (now_et - open_et).total_seconds() / 60.0
+    return 0.0 <= delta_min <= float(window_minutes)

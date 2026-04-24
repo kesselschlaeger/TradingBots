@@ -258,6 +258,42 @@ class TestContractFactory:
         # Front-Month: kein lastTradeDate gesetzt
         assert not getattr(c, "lastTradeDateOrContractMonth", "")
 
+    def test_qualify_contract_futures_picks_nearest_non_expired(self):
+        from types import SimpleNamespace
+
+        from execution.contract_factory import build_contract, qualify_contract
+
+        class FakeIB:
+            def reqContractDetails(self, _contract):
+                return [
+                    SimpleNamespace(contract=SimpleNamespace(
+                        symbol="NQ",
+                        exchange="CME",
+                        lastTradeDateOrContractMonth="20271217",
+                        localSymbol="NQZ7",
+                        tradingClass="NQ",
+                        conId=2,
+                    )),
+                    SimpleNamespace(contract=SimpleNamespace(
+                        symbol="NQ",
+                        exchange="CME",
+                        lastTradeDateOrContractMonth="20260618",
+                        localSymbol="NQM6",
+                        tradingClass="NQ",
+                        conId=1,
+                    )),
+                ]
+
+            def qualifyContracts(self, contract):
+                return [contract]
+
+        contract = build_contract("NQ", "futures", {"futures_exchange": "CME"})
+        resolved = qualify_contract(FakeIB(), contract, "futures")
+
+        assert resolved is not None
+        assert resolved.lastTradeDateOrContractMonth == "20260618"
+        assert resolved.localSymbol == "NQM6"
+
     def test_contract_factory_crypto(self):
         from execution.contract_factory import (
             CRYPTO_AVAILABLE,
@@ -277,3 +313,17 @@ class TestContractFactory:
             from ib_insync import Stock
             assert isinstance(c, Stock)
             assert c.exchange == "PAXOS"
+
+
+def test_ibkr_what_to_show_defaults_and_override():
+    from data.providers.ibkr_provider import (
+        _resolve_what_to_show,
+        _resolve_what_to_show_candidates,
+    )
+
+    assert _resolve_what_to_show("equity", {}) == "TRADES"
+    assert _resolve_what_to_show("futures", {}) == "MIDPOINT"
+    assert _resolve_what_to_show("crypto", {}) == "AGGTRADES"
+    assert _resolve_what_to_show("futures", {"ibkr_what_to_show": "BID_ASK"}) == "BID_ASK"
+    assert _resolve_what_to_show_candidates("futures", {}) == ["MIDPOINT", "BID_ASK"]
+    assert _resolve_what_to_show_candidates("futures", {"ibkr_what_to_show": "BID_ASK"}) == ["BID_ASK"]

@@ -12,7 +12,7 @@ strategy:
 
     # OB-Detection
     atr_period: 14
-    displacement_mult: 1.8
+    displacement_mult: 1.2 #1.8 sind viel zu hoch, keine Generierung           # Displacement = body > mult × ATR
     swing_lookback_4h: 3
     swing_lookback_1h: 5
 

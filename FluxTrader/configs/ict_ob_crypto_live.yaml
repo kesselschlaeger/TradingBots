@@ -3,7 +3,8 @@ mode: live
 
 strategy:
   name: ict_ob_mtf
-  symbols: [BTCUSD, ETHUSD]          # IBKR Crypto-Symbole (PAXOS)
+  # symbols: [BTCUSD, ETHUSD]          # IBKR Crypto-Symbole (PAXOS)
+  symbols: [BTC, ETH]          # IBKR Crypto-Symbole (PAXOS)
   risk_pct: 0.005                    # 0.5 % pro Trade
   params:
     asset_class: crypto              # Routing-Schalter (equity | futures | crypto)
