@@ -511,21 +511,51 @@ async function updatePositions() {
 async function updateTrades() {
   try {
     const strategyFilter = document.getElementById('trade-filter-strategy');
+    const hoursEl = document.getElementById('trade-filter-hours');
+    const statusEl = document.getElementById('trade-filter-status');
     const strategy = selectedTradeStrategy || strategyFilter.value || '';
-    const days = document.getElementById('trade-filter-days').value || 30;
+    const hours = parseInt((hoursEl ? hoursEl.value : '') || '72', 10);
+    const statusFilter = statusEl ? statusEl.value : '';
+    const sinceDate = new Date(Date.now() - hours * 3600 * 1000);
+    const sinceISO = sinceDate.toISOString();
 
     const url = new URL(`${API_BASE}/trades`, window.location);
     url.searchParams.append('only_closed', 'true');
-    url.searchParams.append('limit', 100);
+    url.searchParams.append('limit', 200);
+    url.searchParams.append('since', sinceISO);
     if (strategy) url.searchParams.append('bot_name', strategy);
 
     const resp = await fetch(url);
-    tradeData = await resp.json();
+    if (!resp.ok) {
+      throw new Error(`trades http ${resp.status}`);
+    }
+    let data = await resp.json();
+
+    data = data.filter(t => {
+      if (!t.entry_ts) return true;
+      return new Date(t.entry_ts) >= sinceDate;
+    });
+
+    if (strategy) {
+      data = data.filter(t => (t.bot_name || t.strategy || '') === strategy);
+    }
+
+    if (statusFilter === 'winning') {
+      data = data.filter(t => Number(t.pnl || 0) > 0);
+    } else if (statusFilter === 'losing') {
+      data = data.filter(t => Number(t.pnl || 0) < 0);
+    }
+
+    tradeData = data;
 
     updateTradesTable();
     updateSummaryStats();
   } catch (err) {
     console.error('Trades update failed:', err);
+    const tbody = document.getElementById('trades-body');
+    if (tbody) {
+      tbody.innerHTML = '<tr><td colspan="13" class="muted">Trades konnten nicht geladen werden</td></tr>';
+    }
   }
 }
 
@@ -533,13 +563,15 @@ function updateTradesTable() {
   const tbody = document.getElementById('trades-body');
 
   if (!tradeData || tradeData.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="11" class="muted">No trades found</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="13" class="muted">No trades found</td></tr>';
     return;
   }
 
   tbody.innerHTML = tradeData.map(trade => `
     <tr>
-      <td>${new Date(trade.entry_ts).toLocaleDateString()}</td>
+      <td>${formatDateTime(trade.entry_ts)}</td>
+      <td>${formatDateTime(trade.exit_ts)}</td>
+      <td>${formatDurationMinutes(trade.held_minutes)}</td>
       <td><strong>${trade.bot_name || trade.strategy}</strong></td>
       <td><strong>${trade.symbol}</strong></td>
       <td>${trade.side.toUpperCase()}</td>
@@ -746,6 +778,19 @@ function escapeHtml(s) {
   return escapeAttr(s);
 }
 
+function formatDurationMinutes(value) {
+  if (value === null || value === undefined) return 'â€”';
+  const minutes = Number(value);
+  if (!Number.isFinite(minutes)) return 'â€”';
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  const mins = minutes % 60;
+  if (hours < 24) return mins > 0 ? `${hours}h ${mins}m` : `${hours}h`;
+  const days = Math.floor(hours / 24);
+  const remHours = hours % 24;
+  return remHours > 0 ? `${days}d ${remHours}h` : `${days}d`;
+}
+
 // ─────────────────────────────────────────────────────────────────────────
 // Event listeners
 // ─────────────────────────────────────────────────────────────────────────
@@ -755,7 +800,11 @@ document.getElementById('trade-filter-strategy').addEventListener('change', () =
   updateTrades();
 });
 
-document.getElementById('trade-filter-days').addEventListener('change', () => {
+document.getElementById('trade-filter-hours').addEventListener('change', () => {
+  updateTrades();
+});
+
+document.getElementById('trade-filter-status').addEventListener('change', () => {
   updateTrades();
 });
 

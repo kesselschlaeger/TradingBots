@@ -210,6 +210,47 @@ Fixtures in `tests/conftest.py`:
 | Neuer Indikator | `core/indicators.py` | Pure Funktion hinzufügen |
 | ML-Modell trainieren | `tools/train_ml.py` | `python tools/train_ml.py --history DB --output tools/models/` |
 
+## Architektur-Muster: Strategie-Caching
+
+### Implizites Caching (≤ 2 Schritte) – Vorlage: `orb.py`, `ict_ob.py`
+
+Caches als Dict-Tupel mit Symbol+Datum als Key. Funktioniert gut, wenn die Logik
+aus zwei unabhängigen Blöcken besteht (OR-Levels + Breakout-Check):
+
+```python
+self._orb_cache: dict[tuple[str, date], tuple[float, float, float]] = {}
+cached = self._orb_cache.get((symbol, day_key))
+if cached is None:
+    cached = _compute(...)
+    self._orb_cache[(symbol, day_key)] = cached
+```
+
+### Explizite State Machine (≥ 3 sequenzielle Schritte) – Vorlage: `quick_flip.py`
+
+**Zu verwenden wenn:** Die Strategie-Logik aus 3+ strikt sequenziellen Schritten
+besteht, die aufeinander aufbauen und in der falschen Reihenfolge nicht ausgeführt
+werden dürfen. Implizites Caching führt dort zu schwer debuggbaren Race Conditions
+(z.B. überschreibt ein zweiter Liquidity-Candle den ersten State).
+
+```python
+# _day_cache["state"] — einzige Quelle der Wahrheit für den Tages-State
+_fresh_day_cache() -> dict:
+    {"date": None, "state": "idle", ...}
+
+# State-Übergänge nur in _generate_signals():
+# idle -> or_locked (OR-Box vollständig)
+# or_locked -> liquidity_seen (Liquidity-Candle erkannt)
+# liquidity_seen -> done (Trade ausgeführt)
+# * -> done (Zeitfenster abgelaufen / Entry-Cutoff)
+```
+
+Pflicht-Konventionen für jede State-Machine-Strategie:
+- `_check_time_window_expired()` ist **immer die erste Prüfung** in `_generate_signals`
+- State `"done"` ist **terminal** für den Tag – kein weiterer Trade
+- Day-Reset via `bar.timestamp.date() != _day_cache.get("date")`
+- `_fresh_day_cache()` als statische Methode, damit `reset()` und Day-Reset
+  dieselbe Initialisierung nutzen
+
 ## ICT Order Block – Asset-Class-Routing
 
 `IctOrderBlockStrategy` unterstützt drei Asset-Klassen über den Config-Parameter

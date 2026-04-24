@@ -83,18 +83,24 @@
         <select id="trade-filter-strategy">
           <option value="">All Bots</option>
         </select>
-        <select id="trade-filter-days">
-          <option value="7">Last 7 days</option>
-          <option value="30" selected>Last 30 days</option>
-          <option value="90">Last 90 days</option>
+        <select id="trade-filter-hours">
+          <option value="24">Last 24 hours</option>
+          <option value="72" selected>Last 3 days</option>
+          <option value="168">Last 7 days</option>
+          <option value="720">Last 30 days</option>
+        </select>
+        <select id="trade-filter-status">
+          <option value="">All Trades</option>
+          <option value="winning">Winning only</option>
+          <option value="losing">Losing only</option>
         </select>
       </div>
       <table id="trades-table">
         <thead>
           <tr>
-            <th>Date</th><th>Bot</th><th>Symbol</th><th>Side</th>
-            <th>Entry</th><th>Exit</th><th>PnL</th><th>PnL%</th>
-            <th>MIT-Qty</th><th>EV</th><th>Reason</th>
+            <th>Entry Time</th><th>Exit Time</th><th>Hold</th><th>Bot</th>
+            <th>Symbol</th><th>Side</th><th>Entry</th><th>Exit</th>
+            <th>PnL</th><th>PnL%</th><th>MIT-Qty</th><th>EV</th><th>Reason</th>
           </tr>
         </thead>
         <tbody id="trades-body"></tbody>

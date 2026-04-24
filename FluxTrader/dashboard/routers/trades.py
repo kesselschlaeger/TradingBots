@@ -13,6 +13,15 @@ from fastapi import APIRouter, Query, Request
 router = APIRouter(tags=["trades"])
 
 
+def _parse_timestamp(value: Any) -> Optional[datetime]:
+    if value is None:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
 @router.get("/trades")
 async def list_trades(
     request: Request,
@@ -70,19 +79,27 @@ async def list_trades(
     # Format für Frontend
     result = []
     for t in trades:
+        entry_ts = t.get("entry_ts")
+        exit_ts = t.get("exit_ts")
+        entry_dt = _parse_timestamp(entry_ts)
+        exit_dt = _parse_timestamp(exit_ts)
+        held_minutes = None
+        if entry_dt is not None and exit_dt is not None:
+            held_minutes = max(0, int((exit_dt - entry_dt).total_seconds() // 60))
         result.append({
             "id": t.get("id"),
             "strategy": t.get("strategy"),
             "bot_name": t.get("bot_name") or t.get("strategy"),
             "symbol": t.get("symbol"),
             "side": t.get("side"),
-            "entry_ts": t.get("entry_ts"),
-            "exit_ts": t.get("exit_ts"),
+            "entry_ts": entry_ts,
+            "exit_ts": exit_ts,
             "entry_price": float(t.get("entry_price") or 0.0),
             "exit_price": float(t.get("exit_price") or 0.0),
             "qty": float(t.get("qty") or 0.0),
             "pnl": float(t.get("pnl") or 0.0),
             "pnl_pct": float(t.get("pnl_pct") or 0.0),
+            "held_minutes": held_minutes,
             "reason": t.get("reason"),
             "stop_price": float(t.get("stop_price") or 0.0),
             "signal_strength": float(t.get("signal_strength") or 0.0),
