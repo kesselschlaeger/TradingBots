@@ -66,15 +66,34 @@ async def list_trades(
         except ValueError:
             end_date = None
 
-    trades = await state.get_trades(
-        strategy=strategy if strategy else None,
-        bot_name=bot_name if bot_name else None,
-        symbol=symbol if symbol else None,
-        since=start_date,
-        until=end_date,
-        only_closed=only_closed,
-        limit=limit,
-    )
+    if bot_name and strategy:
+        trades = await state.get_trades(
+            bot_name=bot_name,
+            strategy=strategy,
+            symbol=symbol if symbol else None,
+            since=start_date,
+            until=end_date,
+            only_closed=only_closed,
+            limit=limit,
+        )
+    else:
+        instances = await state.get_bot_instances()
+        if strategy:
+            instances = [i for i in instances if i["strategy"] == strategy]
+        if bot_name:
+            instances = [i for i in instances if i["bot_name"] == bot_name]
+        trades = []
+        for inst in instances:
+            trades.extend(await state.get_trades(
+                bot_name=inst["bot_name"],
+                strategy=inst["strategy"],
+                symbol=symbol if symbol else None,
+                since=start_date,
+                until=end_date,
+                only_closed=only_closed,
+                limit=limit,
+            ))
+        trades = sorted(trades, key=lambda t: t.get("entry_ts", ""), reverse=True)[:limit]
 
     # Format für Frontend
     result = []
@@ -115,26 +134,42 @@ async def list_trades(
 @router.get("/trades/summary")
 async def trades_summary(
     request: Request,
+    bot_name: Optional[str] = None,
     strategy: Optional[str] = None,
     days: int = 30,
 ) -> dict[str, Any]:
-    """Tägliche Trade-Statistik (Aggregat): count, pnl pro Tag/Strategie."""
+    """Tägliche Trade-Statistik (Aggregat): count, pnl pro Tag/Bot."""
     state = request.app.state.persistent_state
     today = date.today()
+
+    instances = await state.get_bot_instances()
+    if strategy:
+        instances = [i for i in instances if i["strategy"] == strategy]
+    if bot_name:
+        instances = [i for i in instances if i["bot_name"] == bot_name]
 
     summary = []
     for i in range(days, -1, -1):
         d = today - timedelta(days=i)
-        pnl = await state.daily_pnl(d, strategy=strategy if strategy else None)
-        by_sym = await state.trades_today(d, strategy=strategy if strategy else None)
+        total_pnl = 0.0
+        total_count = 0
+        by_symbol: dict[str, int] = {}
+        for inst in instances:
+            pnl = await state.daily_pnl(inst["bot_name"], inst["strategy"], d)
+            by_sym = await state.trades_today(inst["bot_name"], inst["strategy"], d)
+            total_pnl += pnl
+            for sym, cnt in by_sym.items():
+                by_symbol[sym] = by_symbol.get(sym, 0) + cnt
+                total_count += cnt
         summary.append({
             "date": d.isoformat(),
-            "pnl": float(pnl),
-            "trades_count": sum(by_sym.values()),
-            "by_symbol": by_sym,
+            "pnl": float(total_pnl),
+            "trades_count": total_count,
+            "by_symbol": by_symbol,
         })
 
     return {
+        "bot_name": bot_name or "all",
         "strategy": strategy or "all",
         "days": days,
         "data": summary,

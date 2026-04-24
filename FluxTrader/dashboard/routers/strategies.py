@@ -70,17 +70,18 @@ async def strategies_health(request: Request) -> dict[str, Any]:
     # Fallback 2: SQLite
     try:
         state = request.app.state.persistent_state
-        strategies = await state.get_strategies()
+        instances = await state.get_bot_instances()
         items = []
         circuit_breaker_active = False
-        for strat in strategies:
-            snap = await state.get_health_snapshot(strat)
+        for inst in instances:
+            snap = await state.get_health_snapshot(inst["bot_name"], inst["strategy"])
             circuit_breaker_active = (
                 circuit_breaker_active
                 or bool(snap.get("circuit_breaker", False))
             )
             items.append({
-                "name": strat,
+                "name": inst["strategy"],
+                "bot_name": inst["bot_name"],
                 "last_bar_ts": snap.get("last_bar_ts"),
                 "last_bar_lag_ms": snap.get("last_bar_lag_ms"),
                 "signals_today": snap.get("signals_today", 0),

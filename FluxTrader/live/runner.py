@@ -54,6 +54,7 @@ class LiveRunner:
         metrics_collector: Optional[Any] = None,
         anomaly_detector: Optional[AnomalyDetector] = None,
         alerts_cfg: Any = None,
+        bot_name: str = "",
     ):
         self.strategy = strategy
         self.broker = broker
@@ -64,6 +65,7 @@ class LiveRunner:
         self.notifier = notifier
         self.symbols = [s.upper() for s in symbols]
         self.cfg = config
+        self._bot_name: str = bot_name or strategy.name
 
         # Monitoring (alle optional – Runner laeuft auch ohne)
         self.health: Optional[HealthState] = health_state
@@ -77,6 +79,7 @@ class LiveRunner:
             use_trailing=bool(config.get("use_trailing", False)),
             eod_close_time=config.get("eod_close_time"),
             state=state,
+            bot_name=self._bot_name,
         )
 
         self._scanner: Optional[PremarketScanner] = None
@@ -133,9 +136,10 @@ class LiveRunner:
             cash=float(acct.get("cash", 0)),
             buying_power=float(acct.get("buying_power", 0)),
         )
-        peak0 = await self.state.update_peak_equity(equity0, strategy=self.strategy.name)
+        peak0 = await self.state.update_peak_equity(self._bot_name, self.strategy.name, equity0)
         dd0 = 0.0 if peak0 <= 0 else (equity0 - peak0) / peak0 * 100.0
         await self.state.save_equity_snapshot(
+            bot_name=self._bot_name,
             strategy=self.strategy.name,
             ts=datetime.now(timezone.utc),
             equity=equity0,
@@ -201,8 +205,8 @@ class LiveRunner:
 
         try:
             await self.state.upsert_bot_heartbeat(
+                bot_name=self._bot_name,
                 strategy=self.strategy.name,
-                bot_name=self.notifier.bot_name,
                 broker_connected=False,
                 circuit_breaker=False,
                 broker_adapter=self._adapter_name,
@@ -348,13 +352,13 @@ class LiveRunner:
         self.strategy.reset()
         self.tm.reset()
         self._context.clear_reserved_groups()
-        await self.state.reset_day(date.today(), strategy=self.strategy.name)
+        await self.state.reset_day(self._bot_name, self.strategy.name, date.today())
         self._daily_trades_count = 0
         self._eod_close_done = False
 
         # Reserved Groups aus State wiederherstellen (falls Restart mitten am Tag)
-        for g in await self.state.reserved_groups(date.today(),
-                                                  strategy=self.strategy.name):
+        for g in await self.state.reserved_groups(self._bot_name, self.strategy.name,
+                                                   date.today()):
             self._context.reserve_group(g)
 
     async def _on_eod_close(self) -> None:
@@ -452,8 +456,8 @@ class LiveRunner:
         log.info("runner.post_market")
         acct = await self.broker.get_account()
         equity = float(acct["equity"])
-        pnl = await self.state.daily_pnl(date.today())
-        trades = await self.state.trades_today(date.today())
+        pnl = await self.state.daily_pnl(self._bot_name, self.strategy.name, date.today())
+        trades = await self.state.trades_today(self._bot_name, self.strategy.name, date.today())
         await self.notifier.daily_summary(
             day=date.today().isoformat(),
             pnl=pnl,
@@ -707,8 +711,8 @@ class LiveRunner:
             await self.health.set_last_bar(self.strategy.name, bar_ts, lag_ms)
         try:
             await self.state.upsert_bot_heartbeat(
+                bot_name=self._bot_name,
                 strategy=self.strategy.name,
-                bot_name=self.notifier.bot_name,
                 last_bar_ts=bar_ts,
                 last_bar_lag_ms=lag_ms,
                 broker_connected=(
@@ -763,10 +767,11 @@ class LiveRunner:
                     buying_power=float(acct.get("buying_power", 0)),
                 )
                 peak = await self.state.update_peak_equity(
-                    equity, strategy=self.strategy.name,
+                    self._bot_name, self.strategy.name, equity,
                 )
                 dd_pct = 0.0 if peak <= 0 else (equity - peak) / peak * 100.0
                 await self.state.save_equity_snapshot(
+                    bot_name=self._bot_name,
                     strategy=self.strategy.name,
                     ts=bar.timestamp,
                     equity=equity,
@@ -863,7 +868,7 @@ class LiveRunner:
         )
 
         # Drawdown + Circuit-Breaker-Alerts
-        peak = await self.state.update_peak_equity(equity, strategy=self.strategy.name)
+        peak = await self.state.update_peak_equity(self._bot_name, self.strategy.name, equity)
         dd_pct = 0.0 if peak <= 0 else (equity - peak) / peak * 100.0
         positions_count = len(self._context.open_symbols)
         self.metrics.set_equity(self.strategy.name, equity)
@@ -896,6 +901,7 @@ class LiveRunner:
                     held_min = None
             try:
                 await self.state.update_or_create_position(
+                    bot_name=self._bot_name,
                     strategy=self.strategy.name,
                     symbol=sym,
                     side=pos.side,
@@ -934,6 +940,7 @@ class LiveRunner:
                             symbol=sym, error=str(e))
         try:
             await self.state.save_equity_snapshot(
+                bot_name=self._bot_name,
                 strategy=self.strategy.name,
                 ts=bar.timestamp,
                 equity=equity,
@@ -992,6 +999,7 @@ class LiveRunner:
                     await self.health.record_signal(sig.strategy, filtered=True)
                 try:
                     await self.state.save_signal(
+                        bot_name=self._bot_name,
                         strategy=sig.strategy,
                         symbol=sig.symbol,
                         ts=sig.timestamp,
@@ -1084,6 +1092,7 @@ class LiveRunner:
                 await self.health.record_signal(sig.strategy, filtered=True)
             try:
                 await self.state.save_signal(
+                    bot_name=self._bot_name,
                     strategy=sig.strategy,
                     symbol=sig.symbol,
                     ts=sig.timestamp,
@@ -1134,7 +1143,7 @@ class LiveRunner:
         await self.tm.register_and_persist(
             managed,
             sig,
-            bot_name=self.notifier.bot_name,
+            bot_name=self._bot_name,
             broker_order_id=execution.order_id,
             order_reference=str(signal_meta.get("order_reference") or execution.order_id),
         )
@@ -1149,6 +1158,7 @@ class LiveRunner:
             feat_json = None
         try:
             await self.state.save_signal(
+                bot_name=self._bot_name,
                 strategy=sig.strategy,
                 symbol=sig.symbol,
                 ts=sig.timestamp,
@@ -1173,8 +1183,12 @@ class LiveRunner:
             self._context.reserve_group(group)
             day_key = (sig.timestamp.date()
                        if hasattr(sig.timestamp, "date") else date.today())
-            await self.state.reserve_group(group, day_key,
-                                           strategy=self.strategy.name)
+            await self.state.reserve_group(
+                bot_name=self._bot_name,
+                strategy=self.strategy.name,
+                group=group,
+                day=day_key,
+            )
 
         # Notification
         await self.notifier.trade_opened(

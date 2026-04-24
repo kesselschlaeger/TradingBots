@@ -1,40 +1,52 @@
-"""PersistentState – zentrale SQLite-Datenbank für alle Bots.
+"""PersistentState – zentrale SQLite-Datenbank für alle Bot-Instanzen.
 
-Single-Source-of-Truth für:
-  - Trade-Historie (``trades``)
-  - Equity-Zeitreihe (``equity_snapshots``)
-  - Offene Positionen (``positions``)
-  - Signal-Stream (``signals``)
-  - Anomaly-Events (``anomaly_events``)
-  - Tages-PnL-/Trade-Counter (``daily`` – read-only, abgeleitet aus trades)
-  - Account-Peak (``account``, strategy-aware)
-  - Cooldowns (``cooldowns``, strategy-aware)
-  - Reservierte Gruppen für MIT-Independence (``reserved_groups``)
+Tabellen und Zweck
+------------------
+trades             – vollständige Trade-Historie (Entry + Exit + PnL)
+equity_snapshots   – Equity-Zeitreihe (Drawdown, Peak, unrealisiertes PnL)
+positions          – aktuell offene Positionen (UPSERT per Bot+Symbol)
+signals            – vollständiger Signal-Stream (auch gefilterte Signale)
+anomaly_events     – Anomalie- und Alert-Events (Health-Monitoring)
+account            – Key/Value-Store je Bot (z.B. peak_equity)
+cooldowns          – Symbol-Cooldowns mit Ablaufzeitstempel
+reserved_groups    – MIT-Independence: reservierte Gruppen je Tag
+bot_heartbeat      – Live-Status je Bot (Broker, Circuit-Breaker, Lag)
 
-EINE DB-Datei für ALLE gleichzeitig laufenden Strategien (ORB, OBB,
-Botti, BottiPair, …). Jede neue Tabelle trägt ``strategy TEXT NOT NULL``
-als Diskriminator – so bleiben die Daten pro Strategie sauber getrennt,
-während Dashboard und probabilistische Auswertungen (EV, Kelly, MIT-
-Overlay) cross-strategy aggregieren können.
+Primäre Bot-Identität
+---------------------
+Das Tupel ``(bot_name, strategy)`` identifiziert eindeutig eine laufende
+Bot-Instanz. Beide Felder sind in jeder Tabelle ``TEXT NOT NULL`` und bilden
+gemeinsam den Composite-Key. Einzelne Felder reichen nicht zur Adressierung.
 
-Async-Implementation via ``aiosqlite``. Alle Writer-Pfade hängen an
-einem gemeinsamen ``asyncio.Lock`` (aiosqlite serialisiert Connections
-zwar intern, der Lock deckt aber zusätzlich Read-Modify-Write-Sequenzen
-ab, z.B. den UPSERT in ``update_or_create_position``).
+Connection-Pattern und Lock
+---------------------------
+Jede Methode öffnet ihre eigene aiosqlite-Connection via ``_conn()``
+(asynccontextmanager). Connections werden nach jedem Call automatisch
+geschlossen. Ein globaler ``asyncio.Lock`` serialisiert alle Writer-Pfade
+einschließlich ``upsert_bot_heartbeat`` – damit sind auch Read-Modify-Write-
+Sequenzen (z.B. UPSERT in ``update_or_create_position``) race-condition-frei.
 
-Atomare Schreib-Sequenzen: ``open_trade_atomic`` und ``close_trade_atomic``
-bündeln jeweils Trade-INSERT/UPDATE + Position-UPSERT/DELETE + ggf.
-reserved_groups in einer einzigen DB-Transaktion (alles oder nichts).
+Atomare Write-Sequenzen
+-----------------------
+``open_trade_atomic``:  trades INSERT + positions UPSERT + optional
+                        reserved_groups INSERT in einer DB-Transaktion.
+``close_trade_atomic``: trades UPDATE + positions DELETE in einer Transaktion.
+Beide sind die einzige Trade-Lifecycle-API – kein direktes INSERT/UPDATE
+außerhalb dieser Methoden.
+
+Timestamps
+----------
+Alle Timestamps werden ausschließlich Python-seitig via ``_iso()`` erzeugt
+und als ISO-8601-UTC-Strings gespeichert. Kein ``datetime('now')`` in SQL.
 """
 from __future__ import annotations
 
 import asyncio
 import json
-import warnings
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 try:
     import aiosqlite
@@ -49,173 +61,168 @@ log = get_logger(__name__)
 
 
 # ── Schema ─────────────────────────────────────────────────────────────────
-# Wichtig: Jede domain-spezifische Tabelle trägt ``strategy TEXT NOT NULL``.
 
 _SCHEMA_STATEMENTS: tuple[str, ...] = (
-    # Tages-PnL/Trade-Counter – bestehende Tabelle, PK bleibt ``day``;
-    # die strategy-Spalte wird via ALTER TABLE migriert (siehe
-    # ``_migrate_daily``) und Unique-Constraint liegt auf (day, strategy).
-    """
-    CREATE TABLE IF NOT EXISTS daily (
-        day TEXT NOT NULL,
-        strategy TEXT NOT NULL DEFAULT '',
-        pnl REAL DEFAULT 0.0,
-        trades_count INTEGER DEFAULT 0,
-        by_symbol TEXT DEFAULT '{}',
-        PRIMARY KEY (day, strategy)
-    )
-    """,
     """
     CREATE TABLE IF NOT EXISTS account (
-        key      TEXT NOT NULL,
-        strategy TEXT NOT NULL DEFAULT '',
-        value    REAL,
-        PRIMARY KEY (key, strategy)
+        key         TEXT NOT NULL,
+        bot_name    TEXT NOT NULL,
+        strategy    TEXT NOT NULL,
+        value       REAL,
+        PRIMARY KEY (key, bot_name, strategy)
     )
     """,
     """
     CREATE TABLE IF NOT EXISTS cooldowns (
-        symbol   TEXT NOT NULL,
-        strategy TEXT NOT NULL DEFAULT '',
-        until_ts TEXT NOT NULL,
-        PRIMARY KEY (symbol, strategy)
+        symbol      TEXT NOT NULL,
+        bot_name    TEXT NOT NULL,
+        strategy    TEXT NOT NULL,
+        until_ts    TEXT NOT NULL,
+        PRIMARY KEY (symbol, bot_name, strategy)
     )
     """,
     """
     CREATE TABLE IF NOT EXISTS reserved_groups (
-        group_name TEXT NOT NULL,
-        day TEXT NOT NULL,
-        strategy TEXT NOT NULL DEFAULT '',
-        PRIMARY KEY (group_name, day, strategy)
+        group_name  TEXT NOT NULL,
+        day         TEXT NOT NULL,
+        bot_name    TEXT NOT NULL,
+        strategy    TEXT NOT NULL,
+        PRIMARY KEY (group_name, day, bot_name, strategy)
     )
     """,
-    # ── Phase 1: neue Tabellen ──────────────────────────────────────────
     """
     CREATE TABLE IF NOT EXISTS trades (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        strategy TEXT NOT NULL,
-        bot_name TEXT,
-        symbol TEXT NOT NULL,
-        side TEXT NOT NULL,
-        entry_ts TEXT NOT NULL,
-        exit_ts TEXT,
-        entry_price REAL NOT NULL,
-        exit_price REAL,
-        qty REAL NOT NULL,
-        pnl REAL,
-        pnl_pct REAL,
-        reason TEXT,
-        stop_price REAL,
-        signal_strength REAL,
-        mit_qty_factor REAL,
-        ev_estimate REAL,
-        group_name TEXT,
-        features_json TEXT
+        id               INTEGER PRIMARY KEY AUTOINCREMENT,
+        bot_name         TEXT NOT NULL,
+        strategy         TEXT NOT NULL,
+        symbol           TEXT NOT NULL,
+        side             TEXT NOT NULL,
+        entry_ts         TEXT NOT NULL,
+        exit_ts          TEXT,
+        entry_price      REAL NOT NULL,
+        exit_price       REAL,
+        qty              REAL NOT NULL,
+        pnl              REAL,
+        pnl_pct          REAL,
+        reason           TEXT,
+        stop_price       REAL,
+        signal_strength  REAL,
+        mit_qty_factor   REAL,
+        ev_estimate      REAL,
+        group_name       TEXT,
+        features_json    TEXT,
+        created_at       TEXT NOT NULL
     )
     """,
     """
     CREATE TABLE IF NOT EXISTS equity_snapshots (
-        ts TEXT NOT NULL,
-        strategy TEXT NOT NULL,
-        equity REAL,
-        cash REAL,
-        drawdown_pct REAL,
-        peak_equity REAL,
-        unrealized_pnl_total REAL,
-        PRIMARY KEY (ts, strategy)
+        ts                    TEXT NOT NULL,
+        bot_name              TEXT NOT NULL,
+        strategy              TEXT NOT NULL,
+        equity                REAL,
+        cash                  REAL NOT NULL DEFAULT 0.0,
+        drawdown_pct          REAL NOT NULL DEFAULT 0.0,
+        peak_equity           REAL NOT NULL DEFAULT 0.0,
+        unrealized_pnl_total  REAL NOT NULL DEFAULT 0.0,
+        created_at            TEXT NOT NULL,
+        PRIMARY KEY (ts, bot_name, strategy)
     )
     """,
     """
     CREATE TABLE IF NOT EXISTS positions (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        trade_id INTEGER REFERENCES trades(id) ON DELETE SET NULL,
-        strategy TEXT NOT NULL,
-        symbol TEXT NOT NULL,
-        side TEXT,
-        entry_ts TEXT,
-        entry_price REAL,
-        qty REAL,
-        stop_price REAL,
-        last_update_ts TEXT,
-        current_price REAL,
-        unrealized_pnl REAL,
-        unrealized_pnl_pct REAL,
-        held_minutes INTEGER,
-        entry_signal TEXT,
-        entry_reason TEXT,
-        broker_order_id TEXT,
-        order_reference TEXT,
-        UNIQUE (strategy, symbol)
+        id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+        trade_id            INTEGER REFERENCES trades(id) ON DELETE SET NULL,
+        bot_name            TEXT NOT NULL,
+        strategy            TEXT NOT NULL,
+        symbol              TEXT NOT NULL,
+        side                TEXT,
+        entry_ts            TEXT,
+        entry_price         REAL,
+        qty                 REAL,
+        stop_price          REAL,
+        last_update_ts      TEXT,
+        current_price       REAL,
+        unrealized_pnl      REAL,
+        unrealized_pnl_pct  REAL,
+        held_minutes        INTEGER,
+        entry_signal        TEXT,
+        entry_reason        TEXT,
+        broker_order_id     TEXT,
+        order_reference     TEXT,
+        created_at          TEXT NOT NULL,
+        UNIQUE (bot_name, strategy, symbol)
     )
     """,
     """
     CREATE TABLE IF NOT EXISTS signals (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        strategy TEXT NOT NULL,
-        symbol TEXT,
-        ts TEXT,
-        action TEXT,
-        strength REAL,
-        filtered_by TEXT,
-        mit_passed INTEGER,
-        ev_value REAL,
-        features_json TEXT
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        bot_name      TEXT NOT NULL,
+        strategy      TEXT NOT NULL,
+        symbol        TEXT,
+        ts            TEXT NOT NULL,
+        action        TEXT,
+        strength      REAL,
+        filtered_by   TEXT,
+        mit_passed    INTEGER,
+        ev_value      REAL,
+        features_json TEXT,
+        created_at    TEXT NOT NULL
     )
     """,
     """
     CREATE TABLE IF NOT EXISTS anomaly_events (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        strategy TEXT NOT NULL DEFAULT '',
-        ts TEXT NOT NULL,
-        check_name TEXT NOT NULL,
-        severity TEXT NOT NULL,
-        symbol TEXT,
-        message TEXT,
-        context_json TEXT
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        bot_name     TEXT NOT NULL,
+        strategy     TEXT NOT NULL,
+        ts           TEXT NOT NULL,
+        check_name   TEXT NOT NULL,
+        severity     TEXT NOT NULL,
+        symbol       TEXT,
+        message      TEXT,
+        context_json TEXT,
+        created_at   TEXT NOT NULL
     )
     """,
     """
     CREATE TABLE IF NOT EXISTS bot_heartbeat (
-        strategy TEXT PRIMARY KEY,
-        bot_name TEXT,
-        last_bar_ts TEXT,
-        last_bar_lag_ms REAL,
-        broker_connected INTEGER NOT NULL DEFAULT 0,
-        broker_adapter TEXT NOT NULL DEFAULT '',
-        circuit_breaker INTEGER NOT NULL DEFAULT 0,
-        symbol_status_json TEXT NOT NULL DEFAULT '{}',
-        updated_at TEXT NOT NULL
+        bot_name             TEXT NOT NULL,
+        strategy             TEXT NOT NULL,
+        last_bar_ts          TEXT,
+        last_bar_lag_ms      REAL,
+        broker_connected     INTEGER NOT NULL DEFAULT 0,
+        broker_adapter       TEXT    NOT NULL DEFAULT '',
+        circuit_breaker      INTEGER NOT NULL DEFAULT 0,
+        symbol_status_json   TEXT    NOT NULL DEFAULT '{}',
+        updated_at           TEXT NOT NULL,
+        PRIMARY KEY (bot_name, strategy)
     )
     """,
 )
 
 _INDEX_STATEMENTS: tuple[str, ...] = (
-    "CREATE INDEX IF NOT EXISTS idx_trades_strategy_entry_ts "
-    "ON trades(strategy, entry_ts)",
-    "CREATE INDEX IF NOT EXISTS idx_trades_strategy_exit_ts "
-    "ON trades(strategy, exit_ts)",
+    "CREATE INDEX IF NOT EXISTS idx_trades_bot_strategy_entry_ts "
+    "ON trades(bot_name, strategy, entry_ts)",
+    "CREATE INDEX IF NOT EXISTS idx_trades_bot_strategy_exit_ts "
+    "ON trades(bot_name, strategy, exit_ts)",
     "CREATE INDEX IF NOT EXISTS idx_trades_symbol_entry_ts "
     "ON trades(symbol, entry_ts)",
-    "CREATE INDEX IF NOT EXISTS idx_equity_strategy_ts "
-    "ON equity_snapshots(strategy, ts)",
-    "CREATE INDEX IF NOT EXISTS idx_positions_strategy "
-    "ON positions(strategy)",
-    "CREATE INDEX IF NOT EXISTS idx_signals_strategy_ts "
-    "ON signals(strategy, ts)",
-    "CREATE INDEX IF NOT EXISTS idx_anomaly_strategy_ts "
-    "ON anomaly_events(strategy, ts)",
-    "CREATE INDEX IF NOT EXISTS idx_daily_strategy_day "
-    "ON daily(strategy, day)",
-    "CREATE INDEX IF NOT EXISTS idx_bot_heartbeat_updated_at "
+    "CREATE INDEX IF NOT EXISTS idx_trades_bot_strategy_exit_day "
+    "ON trades(bot_name, strategy, substr(exit_ts, 1, 10))",
+    "CREATE INDEX IF NOT EXISTS idx_equity_bot_strategy_ts "
+    "ON equity_snapshots(bot_name, strategy, ts)",
+    "CREATE INDEX IF NOT EXISTS idx_positions_bot_strategy_symbol "
+    "ON positions(bot_name, strategy, symbol)",
+    "CREATE INDEX IF NOT EXISTS idx_signals_bot_strategy_ts "
+    "ON signals(bot_name, strategy, ts)",
+    "CREATE INDEX IF NOT EXISTS idx_anomaly_bot_strategy_ts "
+    "ON anomaly_events(bot_name, strategy, ts)",
+    "CREATE INDEX IF NOT EXISTS idx_heartbeat_updated_at "
     "ON bot_heartbeat(updated_at)",
-    # Neuer Index für daily_pnl/trades_today-Queries auf trades-Tabelle
-    "CREATE INDEX IF NOT EXISTS idx_trades_strategy_exit_day "
-    "ON trades(strategy, substr(exit_ts,1,10))",
 )
 
 
 class PersistentState:
-    """SQLite-backed State – zentral für alle Strategien."""
+    """SQLite-backed State – zentral für alle Bot-Instanzen."""
 
     def __init__(self, db_path: str | Path):
         if not AIOSQLITE_AVAILABLE:
@@ -233,35 +240,17 @@ class PersistentState:
             conn.row_factory = aiosqlite.Row
             yield conn
 
-    # ── Schema / Migration ───────────────────────────────────────────
+    # ── Schema ────────────────────────────────────────────────────────
 
     async def ensure_schema(self) -> None:
-        """Idempotent: Tabellen + Indizes + WAL-Modus + Migration."""
+        """Idempotent: PRAGMAs + CREATE TABLE IF NOT EXISTS + CREATE INDEX IF NOT EXISTS."""
         async with self._lock:
             if self._schema_ready:
                 return
             async with self._conn() as conn:
-                # Concurrency-Freundlich: WAL + Normal-Sync
                 await conn.execute("PRAGMA journal_mode=WAL")
                 await conn.execute("PRAGMA synchronous=NORMAL")
                 await conn.execute("PRAGMA foreign_keys=ON")
-
-                # Legacy-daily -> neue Schema-Form migrieren (ohne Datenverlust).
-                await self._migrate_daily(conn)
-                # reserved_groups: strategy-Spalte + neuer PK (ephemere Daten).
-                await self._migrate_reserved_groups(conn)
-                # cooldowns: strategy-Spalte hinzufügen (PK → composite).
-                await self._migrate_cooldowns(conn)
-                # account: strategy-Spalte hinzufügen (PK → composite).
-                await self._migrate_account(conn)
-                # positions: trade_id FK hinzufügen.
-                await self._migrate_positions_trade_id(conn)
-                # positions: Zusatz-Metadaten (Signal/Reason/Refs) hinzufügen.
-                await self._migrate_positions_metadata(conn)
-                # trades/bot_heartbeat: bot_name-Spalte hinzufügen.
-                await self._migrate_trade_bot_name(conn)
-                await self._migrate_heartbeat_bot_name(conn)
-
                 for stmt in _SCHEMA_STATEMENTS:
                     await conn.execute(stmt)
                 for stmt in _INDEX_STATEMENTS:
@@ -270,294 +259,178 @@ class PersistentState:
             self._schema_ready = True
         log.info("state.schema_ready", path=str(self.db_path))
 
-    async def _migrate_daily(self, conn: Any) -> None:
-        """Legacy daily (PK=day) -> (day, strategy) ohne Datenverlust."""
-        cur = await conn.execute("PRAGMA table_info(daily)")
-        cols = {row[1] for row in await cur.fetchall()}
-        if not cols:
-            return  # Tabelle existiert noch nicht – normale CREATE-Pfad
-        if "strategy" in cols:
-            return  # bereits migriert
-
-        log.info("state.migrate_daily_add_strategy")
-        # SQLite kann PK nicht online ändern – rebuild via shadow-table.
-        await conn.execute("ALTER TABLE daily RENAME TO daily_legacy")
-        await conn.execute(
-            """
-            CREATE TABLE daily (
-                day TEXT NOT NULL,
-                strategy TEXT NOT NULL DEFAULT '',
-                pnl REAL DEFAULT 0.0,
-                trades_count INTEGER DEFAULT 0,
-                by_symbol TEXT DEFAULT '{}',
-                PRIMARY KEY (day, strategy)
-            )
-            """
-        )
-        await conn.execute(
-            """
-            INSERT INTO daily (day, strategy, pnl, trades_count, by_symbol)
-            SELECT day, '', pnl, trades_count, COALESCE(by_symbol, '{}')
-            FROM daily_legacy
-            """
-        )
-        await conn.execute("DROP TABLE daily_legacy")
-
-    async def _migrate_reserved_groups(self, conn: Any) -> None:
-        """reserved_groups ohne strategy-Spalte → mit strategy + neuem PK.
-
-        Die Tabelle enthält nur tagesaktuelle Daten (MIT-Independence-
-        Gruppen) – ein Datenverlust durch DROP/RECREATE ist unkritisch.
-        """
-        cur = await conn.execute("PRAGMA table_info(reserved_groups)")
-        cols = {row[1] for row in await cur.fetchall()}
-        if not cols:
-            return  # Tabelle existiert noch nicht – normaler CREATE-Pfad
-        if "strategy" in cols:
-            return  # bereits migriert
-
-        log.info("state.migrate_reserved_groups_add_strategy")
-        # reserved_groups ist ephemer (täglich gecleart) – einfaches
-        # DROP/RECREATE ohne Datenmigration ist sicher.
-        await conn.execute("DROP TABLE reserved_groups")
-
-    async def _migrate_cooldowns(self, conn: Any) -> None:
-        """cooldowns (PK=symbol) → (symbol, strategy) ohne Datenverlust."""
-        cur = await conn.execute("PRAGMA table_info(cooldowns)")
-        cols = {row[1] for row in await cur.fetchall()}
-        if not cols:
-            return  # Tabelle existiert noch nicht
-        if "strategy" in cols:
-            return  # bereits migriert
-
-        log.info("state.migrate_cooldowns_add_strategy")
-        await conn.execute("ALTER TABLE cooldowns RENAME TO cooldowns_legacy")
-        await conn.execute(
-            """
-            CREATE TABLE cooldowns (
-                symbol   TEXT NOT NULL,
-                strategy TEXT NOT NULL DEFAULT '',
-                until_ts TEXT NOT NULL,
-                PRIMARY KEY (symbol, strategy)
-            )
-            """
-        )
-        await conn.execute(
-            """
-            INSERT INTO cooldowns (symbol, strategy, until_ts)
-            SELECT symbol, '', until_ts FROM cooldowns_legacy
-            """
-        )
-        await conn.execute("DROP TABLE cooldowns_legacy")
-
-    async def _migrate_account(self, conn: Any) -> None:
-        """account (PK=key) → (key, strategy) ohne Datenverlust."""
-        cur = await conn.execute("PRAGMA table_info(account)")
-        cols = {row[1] for row in await cur.fetchall()}
-        if not cols:
-            return  # Tabelle existiert noch nicht
-        if "strategy" in cols:
-            return  # bereits migriert
-
-        log.info("state.migrate_account_add_strategy")
-        await conn.execute("ALTER TABLE account RENAME TO account_legacy")
-        await conn.execute(
-            """
-            CREATE TABLE account (
-                key      TEXT NOT NULL,
-                strategy TEXT NOT NULL DEFAULT '',
-                value    REAL,
-                PRIMARY KEY (key, strategy)
-            )
-            """
-        )
-        await conn.execute(
-            """
-            INSERT INTO account (key, strategy, value)
-            SELECT key, '', value FROM account_legacy
-            """
-        )
-        await conn.execute("DROP TABLE account_legacy")
-
-    async def _migrate_positions_trade_id(self, conn: Any) -> None:
-        """positions: trade_id-Spalte hinzufügen (FK zu trades)."""
-        cur = await conn.execute("PRAGMA table_info(positions)")
-        cols = {row[1] for row in await cur.fetchall()}
-        if not cols:
-            return  # Tabelle existiert noch nicht
-        if "trade_id" in cols:
-            return  # bereits migriert
-
-        log.info("state.migrate_positions_add_trade_id")
-        # SQLite kann FK nicht inline per ALTER hinzufügen – rebuild.
-        await conn.execute("ALTER TABLE positions RENAME TO positions_legacy")
-        await conn.execute(
-            """
-            CREATE TABLE positions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                trade_id INTEGER REFERENCES trades(id) ON DELETE SET NULL,
-                strategy TEXT NOT NULL,
-                symbol TEXT NOT NULL,
-                side TEXT,
-                entry_ts TEXT,
-                entry_price REAL,
-                qty REAL,
-                stop_price REAL,
-                last_update_ts TEXT,
-                current_price REAL,
-                unrealized_pnl REAL,
-                unrealized_pnl_pct REAL,
-                held_minutes INTEGER,
-                entry_signal TEXT,
-                entry_reason TEXT,
-                broker_order_id TEXT,
-                order_reference TEXT,
-                UNIQUE (strategy, symbol)
-            )
-            """
-        )
-        await conn.execute(
-            """
-            INSERT INTO positions (
-                id, strategy, symbol, side, entry_ts, entry_price, qty,
-                stop_price, last_update_ts, current_price,
-                unrealized_pnl, unrealized_pnl_pct, held_minutes,
-                entry_signal, entry_reason, broker_order_id, order_reference
-            )
-            SELECT id, strategy, symbol, side, entry_ts, entry_price, qty,
-                   stop_price, last_update_ts, current_price,
-                   unrealized_pnl, unrealized_pnl_pct, held_minutes,
-                   NULL, NULL, NULL, NULL
-            FROM positions_legacy
-            """
-        )
-        await conn.execute("DROP TABLE positions_legacy")
-
-    async def _migrate_positions_metadata(self, conn: Any) -> None:
-        """positions: zusätzliche Entry-Metadaten-Spalten ergänzen."""
-        cur = await conn.execute("PRAGMA table_info(positions)")
-        cols = {row[1] for row in await cur.fetchall()}
-        if not cols:
-            return
-
-        if "entry_signal" not in cols:
-            await conn.execute("ALTER TABLE positions ADD COLUMN entry_signal TEXT")
-        if "entry_reason" not in cols:
-            await conn.execute("ALTER TABLE positions ADD COLUMN entry_reason TEXT")
-        if "broker_order_id" not in cols:
-            await conn.execute("ALTER TABLE positions ADD COLUMN broker_order_id TEXT")
-        if "order_reference" not in cols:
-            await conn.execute("ALTER TABLE positions ADD COLUMN order_reference TEXT")
-
-    async def _migrate_trade_bot_name(self, conn: Any) -> None:
-        """trades: bot_name-Spalte ergänzen."""
-        cur = await conn.execute("PRAGMA table_info(trades)")
-        cols = {row[1] for row in await cur.fetchall()}
-        if cols and "bot_name" not in cols:
-            await conn.execute("ALTER TABLE trades ADD COLUMN bot_name TEXT")
-
-    async def _migrate_heartbeat_bot_name(self, conn: Any) -> None:
-        """bot_heartbeat: bot_name-Spalte ergänzen."""
-        cur = await conn.execute("PRAGMA table_info(bot_heartbeat)")
-        cols = {row[1] for row in await cur.fetchall()}
-        if cols and "bot_name" not in cols:
-            await conn.execute("ALTER TABLE bot_heartbeat ADD COLUMN bot_name TEXT")
-
     async def init(self) -> None:
-        """Abwärtskompatibler Alias für ``ensure_schema``."""
         await self.ensure_schema()
 
     async def close(self) -> None:
-        return None  # aiosqlite-Connections werden pro Call geschlossen
+        return None
 
     # ══════════════════════════════════════════════════════════════════
-    # Writer: trades
+    # Trade Lifecycle
     # ══════════════════════════════════════════════════════════════════
 
-    async def save_trade(
+    async def open_trade_atomic(
         self,
         *,
+        bot_name: str,
         strategy: str,
-        bot_name: Optional[str] = None,
         symbol: str,
         side: str,
         entry_ts: datetime | str,
         entry_price: float,
         qty: float,
-        stop_price: Optional[float] = None,
-        signal_strength: Optional[float] = None,
-        mit_qty_factor: Optional[float] = None,
-        ev_estimate: Optional[float] = None,
-        group_name: Optional[str] = None,
-        features_json: Optional[str] = None,
-        reason: Optional[str] = None,
+        stop_price: float | None = None,
+        signal_strength: float | None = None,
+        mit_qty_factor: float | None = None,
+        ev_estimate: float | None = None,
+        group_name: str | None = None,
+        features_json: str | None = None,
+        reason: str | None = None,
+        current_price: float | None = None,
+        entry_signal: str | None = None,
+        broker_order_id: str | None = None,
+        order_reference: str | None = None,
+        reserve_group_name: str | None = None,
+        reserve_day: date | None = None,
     ) -> int:
-        """Legt einen neuen offenen Trade an. Gibt die ID zurück."""
+        """Atomare Eröffnung: trades INSERT + positions UPSERT + optional reserved_groups
+        in einer einzigen Transaktion. Gibt trade_id zurück."""
         ts = _iso(entry_ts)
+        now = _iso(datetime.now(timezone.utc))
+        c_price = current_price if current_price is not None else float(entry_price)
+
         async with self._lock:
             async with self._conn() as conn:
                 cur = await conn.execute(
                     """
                     INSERT INTO trades (
-                        strategy, bot_name, symbol, side, entry_ts, entry_price, qty,
-                        stop_price, signal_strength, mit_qty_factor,
-                        ev_estimate, group_name, features_json, reason
-                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                        bot_name, strategy, symbol, side, entry_ts,
+                        entry_price, qty, stop_price, signal_strength,
+                        mit_qty_factor, ev_estimate, group_name,
+                        features_json, reason, created_at
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                     """,
                     (
-                        strategy, bot_name, symbol, side, ts, float(entry_price),
-                        float(qty), stop_price, signal_strength,
-                        mit_qty_factor, ev_estimate, group_name,
-                        features_json, reason,
+                        bot_name, strategy, symbol, side, ts,
+                        float(entry_price), float(qty), stop_price,
+                        signal_strength, mit_qty_factor, ev_estimate,
+                        group_name, features_json, reason, now,
                     ),
                 )
-                trade_id = cur.lastrowid
-                await conn.commit()
-        log.info("state.trade_opened", id=trade_id, strategy=strategy,
-                 symbol=symbol, side=side)
-        return int(trade_id or 0)
+                trade_id = int(cur.lastrowid or 0)
 
-    async def close_trade(
+                pos_row = await (
+                    await conn.execute(
+                        "SELECT id FROM positions "
+                        "WHERE bot_name=? AND strategy=? AND symbol=?",
+                        (bot_name, strategy, symbol),
+                    )
+                ).fetchone()
+                if pos_row is None:
+                    await conn.execute(
+                        """
+                        INSERT INTO positions (
+                            trade_id, bot_name, strategy, symbol, side,
+                            entry_ts, entry_price, qty, stop_price,
+                            last_update_ts, current_price,
+                            unrealized_pnl, unrealized_pnl_pct, held_minutes,
+                            entry_signal, entry_reason,
+                            broker_order_id, order_reference, created_at
+                        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                        """,
+                        (
+                            trade_id, bot_name, strategy, symbol, side,
+                            ts, float(entry_price), float(qty), stop_price,
+                            now, c_price, 0.0, 0.0, 0,
+                            entry_signal, reason,
+                            broker_order_id, order_reference, now,
+                        ),
+                    )
+                else:
+                    await conn.execute(
+                        """
+                        UPDATE positions SET
+                            trade_id=?, side=?, entry_ts=?,
+                            entry_price=?, qty=?, stop_price=?,
+                            last_update_ts=?, current_price=?,
+                            unrealized_pnl=0.0, unrealized_pnl_pct=0.0,
+                            held_minutes=0,
+                            entry_signal=COALESCE(?, entry_signal),
+                            entry_reason=COALESCE(?, entry_reason),
+                            broker_order_id=COALESCE(?, broker_order_id),
+                            order_reference=COALESCE(?, order_reference)
+                        WHERE id=?
+                        """,
+                        (
+                            trade_id, side, ts, float(entry_price),
+                            float(qty), stop_price, now, c_price,
+                            entry_signal, reason,
+                            broker_order_id, order_reference,
+                            pos_row["id"],
+                        ),
+                    )
+
+                if reserve_group_name and reserve_day is not None:
+                    await conn.execute(
+                        "INSERT OR IGNORE INTO reserved_groups "
+                        "(group_name, day, bot_name, strategy) VALUES (?,?,?,?)",
+                        (reserve_group_name, reserve_day.isoformat(),
+                         bot_name, strategy),
+                    )
+
+                await conn.commit()
+
+        log.info("state.trade_opened_atomic", bot_name=bot_name,
+                 strategy=strategy, symbol=symbol, trade_id=trade_id)
+        return trade_id
+
+    async def close_trade_atomic(
         self,
         *,
-        trade_id: Optional[int] = None,
-        strategy: Optional[str] = None,
-        symbol: Optional[str] = None,
+        bot_name: str,
+        strategy: str,
+        trade_id: int | None = None,
+        symbol: str | None = None,
         exit_ts: datetime | str,
         exit_price: float,
-        pnl: Optional[float] = None,
-        pnl_pct: Optional[float] = None,
-        reason: Optional[str] = None,
+        pnl: float | None = None,
+        pnl_pct: float | None = None,
+        reason: str | None = None,
     ) -> None:
-        """Schließt den neuesten offenen Trade (``exit_ts IS NULL``)
-        anhand ``trade_id`` ODER (``strategy``, ``symbol``)."""
+        """Atomarer Exit: trades UPDATE + positions DELETE in einer Transaktion."""
         ts = _iso(exit_ts)
         async with self._lock:
             async with self._conn() as conn:
                 if trade_id is not None:
                     row = await (
                         await conn.execute(
-                            "SELECT id FROM trades WHERE id=? AND exit_ts IS NULL",
-                            (int(trade_id),),
+                            "SELECT id, symbol FROM trades "
+                            "WHERE id=? AND bot_name=? AND strategy=? "
+                            "AND exit_ts IS NULL",
+                            (int(trade_id), bot_name, strategy),
                         )
                     ).fetchone()
                 else:
                     row = await (
                         await conn.execute(
                             """
-                            SELECT id FROM trades
-                            WHERE strategy=? AND symbol=? AND exit_ts IS NULL
+                            SELECT id, symbol FROM trades
+                            WHERE bot_name=? AND strategy=? AND symbol=?
+                            AND exit_ts IS NULL
                             ORDER BY entry_ts DESC LIMIT 1
                             """,
-                            (strategy or "", symbol or ""),
+                            (bot_name, strategy, symbol or ""),
                         )
                     ).fetchone()
                 if row is None:
-                    log.warning("state.close_trade_no_match",
-                                trade_id=trade_id, strategy=strategy,
-                                symbol=symbol)
+                    log.warning("state.close_trade_atomic_no_match",
+                                bot_name=bot_name, strategy=strategy,
+                                trade_id=trade_id, symbol=symbol)
                     return
+
                 tid = int(row["id"])
+                sym = row["symbol"]
+
                 await conn.execute(
                     """
                     UPDATE trades
@@ -566,16 +439,24 @@ class PersistentState:
                     """,
                     (ts, float(exit_price), pnl, pnl_pct, reason, tid),
                 )
+                await conn.execute(
+                    "DELETE FROM positions "
+                    "WHERE bot_name=? AND strategy=? AND symbol=?",
+                    (bot_name, strategy, sym),
+                )
                 await conn.commit()
-        log.info("state.trade_closed", id=tid, pnl=pnl, reason=reason)
+
+        log.info("state.trade_closed_atomic", bot_name=bot_name,
+                 strategy=strategy, trade_id=tid, pnl=pnl, reason=reason)
 
     # ══════════════════════════════════════════════════════════════════
-    # Writer: equity_snapshots
+    # Equity
     # ══════════════════════════════════════════════════════════════════
 
     async def save_equity_snapshot(
         self,
         *,
+        bot_name: str,
         strategy: str,
         ts: datetime | str,
         equity: float,
@@ -585,74 +466,78 @@ class PersistentState:
         unrealized_pnl_total: float = 0.0,
     ) -> None:
         ts_iso = _iso(ts)
+        now = _iso(datetime.now(timezone.utc))
         async with self._lock:
             async with self._conn() as conn:
                 await conn.execute(
                     """
                     INSERT OR REPLACE INTO equity_snapshots
-                    (ts, strategy, equity, cash, drawdown_pct, peak_equity,
-                     unrealized_pnl_total)
-                    VALUES (?,?,?,?,?,?,?)
+                    (ts, bot_name, strategy, equity, cash, drawdown_pct,
+                     peak_equity, unrealized_pnl_total, created_at)
+                    VALUES (?,?,?,?,?,?,?,?,?)
                     """,
                     (
-                        ts_iso, strategy, float(equity), float(cash),
-                        float(drawdown_pct), float(peak_equity),
-                        float(unrealized_pnl_total),
+                        ts_iso, bot_name, strategy, float(equity),
+                        float(cash), float(drawdown_pct),
+                        float(peak_equity), float(unrealized_pnl_total), now,
                     ),
                 )
                 await conn.commit()
 
     # ══════════════════════════════════════════════════════════════════
-    # Writer: positions (UPSERT)
+    # Positionen
     # ══════════════════════════════════════════════════════════════════
 
     async def update_or_create_position(
         self,
         *,
+        bot_name: str,
         strategy: str,
         symbol: str,
-        side: Optional[str] = None,
-        entry_ts: Optional[datetime | str] = None,
-        entry_price: Optional[float] = None,
-        qty: Optional[float] = None,
-        stop_price: Optional[float] = None,
-        current_price: Optional[float] = None,
-        unrealized_pnl: Optional[float] = None,
-        unrealized_pnl_pct: Optional[float] = None,
-        held_minutes: Optional[int] = None,
-        trade_id: Optional[int] = None,
-        entry_signal: Optional[str] = None,
-        entry_reason: Optional[str] = None,
-        broker_order_id: Optional[str] = None,
-        order_reference: Optional[str] = None,
+        side: str | None = None,
+        entry_ts: datetime | str | None = None,
+        entry_price: float | None = None,
+        qty: float | None = None,
+        stop_price: float | None = None,
+        current_price: float | None = None,
+        unrealized_pnl: float | None = None,
+        unrealized_pnl_pct: float | None = None,
+        held_minutes: int | None = None,
+        trade_id: int | None = None,
+        entry_signal: str | None = None,
+        entry_reason: str | None = None,
+        broker_order_id: str | None = None,
+        order_reference: str | None = None,
     ) -> None:
-        last = _iso(datetime.now(timezone.utc))
+        now = _iso(datetime.now(timezone.utc))
         entry_iso = _iso(entry_ts) if entry_ts is not None else None
         async with self._lock:
             async with self._conn() as conn:
                 cur = await conn.execute(
-                    "SELECT id FROM positions WHERE strategy=? AND symbol=?",
-                    (strategy, symbol),
+                    "SELECT id FROM positions "
+                    "WHERE bot_name=? AND strategy=? AND symbol=?",
+                    (bot_name, strategy, symbol),
                 )
                 row = await cur.fetchone()
                 if row is None:
                     await conn.execute(
                         """
                         INSERT INTO positions (
-                            trade_id, strategy, symbol, side, entry_ts,
-                            entry_price, qty, stop_price, last_update_ts,
-                            current_price, unrealized_pnl, unrealized_pnl_pct,
-                            held_minutes, entry_signal, entry_reason,
-                            broker_order_id, order_reference
-                        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                            trade_id, bot_name, strategy, symbol, side,
+                            entry_ts, entry_price, qty, stop_price,
+                            last_update_ts, current_price,
+                            unrealized_pnl, unrealized_pnl_pct, held_minutes,
+                            entry_signal, entry_reason,
+                            broker_order_id, order_reference, created_at
+                        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                         """,
                         (
-                            trade_id, strategy, symbol, side, entry_iso,
-                            entry_price, qty, stop_price, last,
-                            current_price, unrealized_pnl,
+                            trade_id, bot_name, strategy, symbol, side,
+                            entry_iso, entry_price, qty, stop_price,
+                            now, current_price, unrealized_pnl,
                             unrealized_pnl_pct, held_minutes,
                             entry_signal, entry_reason,
-                            broker_order_id, order_reference,
+                            broker_order_id, order_reference, now,
                         ),
                     )
                 else:
@@ -678,7 +563,7 @@ class PersistentState:
                         """,
                         (
                             trade_id, side, entry_iso, entry_price, qty,
-                            stop_price, last, current_price, unrealized_pnl,
+                            stop_price, now, current_price, unrealized_pnl,
                             unrealized_pnl_pct, held_minutes,
                             entry_signal, entry_reason,
                             broker_order_id, order_reference,
@@ -687,273 +572,210 @@ class PersistentState:
                     )
                 await conn.commit()
 
-    async def remove_position(self, strategy: str, symbol: str) -> None:
+    async def remove_position(
+        self, *, bot_name: str, strategy: str, symbol: str,
+    ) -> None:
         async with self._lock:
             async with self._conn() as conn:
                 await conn.execute(
-                    "DELETE FROM positions WHERE strategy=? AND symbol=?",
-                    (strategy, symbol),
+                    "DELETE FROM positions "
+                    "WHERE bot_name=? AND strategy=? AND symbol=?",
+                    (bot_name, strategy, symbol),
                 )
                 await conn.commit()
 
+    async def get_open_positions(
+        self, bot_name: str, strategy: str,
+    ) -> list[dict[str, Any]]:
+        async with self._conn() as conn:
+            cur = await conn.execute(
+                "SELECT * FROM positions WHERE bot_name=? AND strategy=?",
+                (bot_name, strategy),
+            )
+            rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+
     # ══════════════════════════════════════════════════════════════════
-    # Writer: signals
+    # Signale
     # ══════════════════════════════════════════════════════════════════
 
     async def save_signal(
         self,
         *,
+        bot_name: str,
         strategy: str,
-        symbol: Optional[str] = None,
-        ts: Optional[datetime | str] = None,
-        action: Optional[str] = None,
-        strength: Optional[float] = None,
-        filtered_by: Optional[str] = None,
-        mit_passed: Optional[bool] = None,
-        ev_value: Optional[float] = None,
-        features_json: Optional[str] = None,
+        ts: datetime | str,
+        symbol: str | None = None,
+        action: str | None = None,
+        strength: float | None = None,
+        filtered_by: str | None = None,
+        mit_passed: bool | None = None,
+        ev_value: float | None = None,
+        features_json: str | None = None,
     ) -> int:
-        ts_iso = _iso(ts) if ts is not None else _iso(datetime.now(timezone.utc))
-        mit_int: Optional[int] = None if mit_passed is None else int(bool(mit_passed))
+        ts_iso = _iso(ts)
+        now = _iso(datetime.now(timezone.utc))
+        mit_int: int | None = None if mit_passed is None else int(bool(mit_passed))
         async with self._lock:
             async with self._conn() as conn:
                 cur = await conn.execute(
                     """
                     INSERT INTO signals (
-                        strategy, symbol, ts, action, strength,
-                        filtered_by, mit_passed, ev_value, features_json
-                    ) VALUES (?,?,?,?,?,?,?,?,?)
+                        bot_name, strategy, symbol, ts, action, strength,
+                        filtered_by, mit_passed, ev_value, features_json,
+                        created_at
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
                     """,
                     (
-                        strategy, symbol, ts_iso, action, strength,
-                        filtered_by, mit_int, ev_value, features_json,
+                        bot_name, strategy, symbol, ts_iso, action,
+                        strength, filtered_by, mit_int, ev_value,
+                        features_json, now,
                     ),
                 )
                 await conn.commit()
                 return int(cur.lastrowid or 0)
 
+    # ══════════════════════════════════════════════════════════════════
+    # Heartbeat
+    # ══════════════════════════════════════════════════════════════════
+
     async def upsert_bot_heartbeat(
         self,
         *,
+        bot_name: str,
         strategy: str,
-        bot_name: str = "",
-        last_bar_ts: Optional[datetime | str] = None,
-        last_bar_lag_ms: Optional[float] = None,
+        last_bar_ts: datetime | str | None = None,
+        last_bar_lag_ms: float | None = None,
         broker_connected: bool = False,
         broker_adapter: str = "",
         circuit_breaker: bool = False,
-        symbol_status: Optional[dict] = None,
+        symbol_status: dict | None = None,
     ) -> None:
-        """UPSERT der Heartbeat-Zeile fuer eine Strategie."""
-        last_bar_ts_iso: Optional[str] = None
+        last_bar_ts_iso: str | None = None
         if last_bar_ts is not None:
-            if isinstance(last_bar_ts, str):
-                last_bar_ts_iso = last_bar_ts
-            else:
-                last_bar_ts_iso = _iso(last_bar_ts)
+            last_bar_ts_iso = (
+                last_bar_ts if isinstance(last_bar_ts, str) else _iso(last_bar_ts)
+            )
         status_json = "{}"
         if symbol_status is not None:
             try:
                 status_json = json.dumps(symbol_status, default=str)
             except (TypeError, ValueError):
                 status_json = "{}"
-
-        async with self._conn() as conn:
-            await conn.execute(
-                """
-                INSERT OR REPLACE INTO bot_heartbeat (
-                    strategy,
-                    bot_name,
-                    last_bar_ts,
-                    last_bar_lag_ms,
-                    broker_connected,
-                    broker_adapter,
-                    circuit_breaker,
-                    symbol_status_json,
-                    updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
-                """,
-                (
-                    strategy,
-                    str(bot_name or ""),
-                    last_bar_ts_iso,
-                    float(last_bar_lag_ms) if last_bar_lag_ms is not None else None,
-                    int(bool(broker_connected)),
-                    str(broker_adapter or ""),
-                    int(bool(circuit_breaker)),
-                    status_json,
-                ),
-            )
-            await conn.commit()
-
-    # ══════════════════════════════════════════════════════════════════
-    # Writer: anomaly_events
-    # ══════════════════════════════════════════════════════════════════
-
-    async def log_anomaly(self, event: AnomalyEvent) -> None:
-        ctx_json: Optional[str] = None
-        try:
-            ctx_json = json.dumps(event.context, default=str)
-        except (TypeError, ValueError):
-            ctx_json = None
-        sev = event.severity.value if hasattr(event.severity, "value") else str(event.severity)
+        now = _iso(datetime.now(timezone.utc))
         async with self._lock:
             async with self._conn() as conn:
                 await conn.execute(
                     """
-                    INSERT INTO anomaly_events (
-                        strategy, ts, check_name, severity, symbol,
-                        message, context_json
-                    ) VALUES (?,?,?,?,?,?,?)
+                    INSERT OR REPLACE INTO bot_heartbeat (
+                        bot_name, strategy, last_bar_ts, last_bar_lag_ms,
+                        broker_connected, broker_adapter,
+                        circuit_breaker, symbol_status_json, updated_at
+                    ) VALUES (?,?,?,?,?,?,?,?,?)
                     """,
                     (
-                        event.strategy or "", _iso(event.timestamp),
-                        event.check_name, sev, event.symbol,
-                        event.message, ctx_json,
+                        bot_name, strategy, last_bar_ts_iso,
+                        float(last_bar_lag_ms) if last_bar_lag_ms is not None else None,
+                        int(bool(broker_connected)),
+                        str(broker_adapter),
+                        int(bool(circuit_breaker)),
+                        status_json, now,
                     ),
                 )
                 await conn.commit()
 
     # ══════════════════════════════════════════════════════════════════
-    # Writer: daily – DEPRECATED (daily-Tabelle wird nicht mehr befüllt,
-    # alle Reads laufen jetzt direkt über trades-Tabelle)
+    # Anomalien
     # ══════════════════════════════════════════════════════════════════
 
-    async def update_daily_record(
-        self,
-        *,
-        day: date,
-        strategy: str,
-        pnl_delta: float = 0.0,
-        symbol: Optional[str] = None,
-    ) -> None:
-        """DEPRECATED – no-op Stub. Daten werden aus trades rekonstruiert."""
-        warnings.warn(
-            "update_daily_record() is deprecated – daily data is now "
-            "derived from the trades table",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-
-    # ── Legacy-API (bleibt für Abwärtskompatibilität) ───────────────
-
-    async def add_trade(
-        self, day: date, symbol: str, pnl: float, strategy: str = "",
-    ) -> None:
-        """DEPRECATED – no-op Stub."""
-        warnings.warn(
-            "add_trade() is deprecated – daily data is now "
-            "derived from the trades table",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-
-    async def daily_pnl(self, day: date, strategy: Optional[str] = None) -> float:
-        """PnL eines Tages, abgeleitet aus der trades-Tabelle."""
-        async with self._conn() as conn:
-            if strategy is None:
-                cur = await conn.execute(
+    async def log_anomaly(self, event: AnomalyEvent) -> None:
+        ctx_json: str | None = None
+        try:
+            ctx_json = json.dumps(event.context, default=str)
+        except (TypeError, ValueError):
+            ctx_json = None
+        sev = event.severity.value if hasattr(event.severity, "value") else str(event.severity)
+        now = _iso(datetime.now(timezone.utc))
+        async with self._lock:
+            async with self._conn() as conn:
+                await conn.execute(
                     """
-                    SELECT COALESCE(SUM(pnl), 0.0) AS s FROM trades
-                    WHERE exit_ts IS NOT NULL AND substr(exit_ts,1,10)=?
+                    INSERT INTO anomaly_events (
+                        bot_name, strategy, ts, check_name, severity,
+                        symbol, message, context_json, created_at
+                    ) VALUES (?,?,?,?,?,?,?,?,?)
                     """,
-                    (day.isoformat(),),
+                    (
+                        event.bot_name, event.strategy or "",
+                        _iso(event.timestamp), event.check_name,
+                        sev, event.symbol, event.message,
+                        ctx_json, now,
+                    ),
                 )
-            else:
-                cur = await conn.execute(
-                    """
-                    SELECT COALESCE(SUM(pnl), 0.0) AS s FROM trades
-                    WHERE strategy=? AND exit_ts IS NOT NULL
-                    AND substr(exit_ts,1,10)=?
-                    """,
-                    (strategy, day.isoformat()),
-                )
-            row = await cur.fetchone()
-            return float(row["s"]) if row else 0.0
-
-    async def trades_today(
-        self, day: date, strategy: Optional[str] = None,
-    ) -> dict[str, int]:
-        """Trade-Count pro Symbol eines Tages, abgeleitet aus trades-Tabelle."""
-        async with self._conn() as conn:
-            if strategy is None:
-                cur = await conn.execute(
-                    """
-                    SELECT symbol, COUNT(*) AS cnt FROM trades
-                    WHERE exit_ts IS NOT NULL AND substr(exit_ts,1,10)=?
-                    GROUP BY symbol
-                    """,
-                    (day.isoformat(),),
-                )
-            else:
-                cur = await conn.execute(
-                    """
-                    SELECT symbol, COUNT(*) AS cnt FROM trades
-                    WHERE strategy=? AND exit_ts IS NOT NULL
-                    AND substr(exit_ts,1,10)=?
-                    GROUP BY symbol
-                    """,
-                    (strategy, day.isoformat()),
-                )
-            rows = await cur.fetchall()
-        return {r["symbol"]: int(r["cnt"]) for r in rows}
+                await conn.commit()
 
     # ══════════════════════════════════════════════════════════════════
     # Account-Peak
     # ══════════════════════════════════════════════════════════════════
 
-    async def update_peak_equity(self, equity: float,
-                                strategy: str = "") -> float:
+    async def update_peak_equity(
+        self, bot_name: str, strategy: str, equity: float,
+    ) -> float:
         async with self._lock:
             async with self._conn() as conn:
                 cur = await conn.execute(
                     "SELECT value FROM account "
-                    "WHERE key='peak_equity' AND strategy=?",
-                    (strategy,),
+                    "WHERE key='peak_equity' AND bot_name=? AND strategy=?",
+                    (bot_name, strategy),
                 )
                 row = await cur.fetchone()
                 current_peak = float(row["value"]) if row else 0.0
                 new_peak = max(current_peak, float(equity))
                 if new_peak != current_peak:
                     await conn.execute(
-                        "INSERT OR REPLACE INTO account(key, strategy, value) "
-                        "VALUES ('peak_equity', ?, ?)",
-                        (strategy, new_peak),
+                        "INSERT OR REPLACE INTO account "
+                        "(key, bot_name, strategy, value) "
+                        "VALUES ('peak_equity',?,?,?)",
+                        (bot_name, strategy, new_peak),
                     )
                     await conn.commit()
                 return new_peak
 
-    async def get_peak_equity(self, strategy: str = "") -> float:
+    async def get_peak_equity(self, bot_name: str, strategy: str) -> float:
         async with self._conn() as conn:
             cur = await conn.execute(
                 "SELECT value FROM account "
-                "WHERE key='peak_equity' AND strategy=?",
-                (strategy,),
+                "WHERE key='peak_equity' AND bot_name=? AND strategy=?",
+                (bot_name, strategy),
             )
             row = await cur.fetchone()
-            return float(row["value"]) if row else 0.0
+        return float(row["value"]) if row else 0.0
 
     # ══════════════════════════════════════════════════════════════════
     # Cooldowns
     # ══════════════════════════════════════════════════════════════════
 
-    async def set_cooldown(self, symbol: str, until: datetime,
-                          strategy: str = "") -> None:
+    async def set_cooldown(
+        self, *, bot_name: str, strategy: str, symbol: str, until: datetime,
+    ) -> None:
         async with self._lock:
             async with self._conn() as conn:
                 await conn.execute(
-                    "INSERT OR REPLACE INTO cooldowns(symbol, strategy, until_ts) "
-                    "VALUES (?,?,?)",
-                    (symbol, strategy,
+                    "INSERT OR REPLACE INTO cooldowns "
+                    "(symbol, bot_name, strategy, until_ts) VALUES (?,?,?,?)",
+                    (symbol, bot_name, strategy,
                      until.astimezone(timezone.utc).isoformat()),
                 )
                 await conn.commit()
 
-    async def get_cooldowns(self, strategy: str = "") -> dict[str, datetime]:
+    async def get_cooldowns(
+        self, bot_name: str, strategy: str,
+    ) -> dict[str, datetime]:
         async with self._conn() as conn:
             cur = await conn.execute(
-                "SELECT symbol, until_ts FROM cooldowns WHERE strategy=?",
-                (strategy,),
+                "SELECT symbol, until_ts FROM cooldowns "
+                "WHERE bot_name=? AND strategy=?",
+                (bot_name, strategy),
             )
             rows = await cur.fetchall()
         out: dict[str, datetime] = {}
@@ -964,9 +786,10 @@ class PersistentState:
                 continue
         return out
 
-    async def is_in_cooldown(self, symbol: str, now: datetime,
-                             strategy: str = "") -> bool:
-        cools = await self.get_cooldowns(strategy=strategy)
+    async def is_in_cooldown(
+        self, *, bot_name: str, strategy: str, symbol: str, now: datetime,
+    ) -> bool:
+        cools = await self.get_cooldowns(bot_name, strategy)
         until = cools.get(symbol)
         if until is None:
             return False
@@ -974,97 +797,77 @@ class PersistentState:
             until = until.replace(tzinfo=timezone.utc)
         return now < until
 
-    async def clear_expired_cooldowns(self, now: datetime,
-                                      strategy: str = "") -> int:
-        cools = await self.get_cooldowns(strategy=strategy)
-        expired = [s for s, u in cools.items()
-                   if (u.tzinfo or timezone.utc) and now >= u]
-        if not expired:
-            return 0
+    async def clear_expired_cooldowns(
+        self, bot_name: str, strategy: str, now: datetime,
+    ) -> int:
+        until_ts = now.astimezone(timezone.utc).isoformat()
         async with self._lock:
             async with self._conn() as conn:
-                for s in expired:
-                    await conn.execute(
-                        "DELETE FROM cooldowns "
-                        "WHERE symbol=? AND strategy=?",
-                        (s, strategy),
-                    )
+                cur = await conn.execute(
+                    "DELETE FROM cooldowns "
+                    "WHERE bot_name=? AND strategy=? AND until_ts <= ?",
+                    (bot_name, strategy, until_ts),
+                )
                 await conn.commit()
-        return len(expired)
+                return cur.rowcount
 
     # ══════════════════════════════════════════════════════════════════
-    # Reserved-Groups (MIT-Independence, täglich)
+    # Reserved Groups (MIT-Independence)
     # ══════════════════════════════════════════════════════════════════
 
     async def reserve_group(
-        self, group: str, day: date, strategy: str = "",
+        self, *, bot_name: str, strategy: str, group: str, day: date,
     ) -> None:
         async with self._lock:
             async with self._conn() as conn:
                 await conn.execute(
-                    """
-                    INSERT OR IGNORE INTO reserved_groups(group_name, day, strategy)
-                    VALUES (?,?,?)
-                    """,
-                    (group, day.isoformat(), strategy),
+                    "INSERT OR IGNORE INTO reserved_groups "
+                    "(group_name, day, bot_name, strategy) VALUES (?,?,?,?)",
+                    (group, day.isoformat(), bot_name, strategy),
                 )
                 await conn.commit()
 
     async def reserved_groups(
-        self, day: date, strategy: Optional[str] = None,
+        self, bot_name: str, strategy: str, day: date,
     ) -> set[str]:
         async with self._conn() as conn:
-            if strategy is None:
-                cur = await conn.execute(
-                    "SELECT group_name FROM reserved_groups WHERE day=?",
-                    (day.isoformat(),),
-                )
-            else:
-                cur = await conn.execute(
-                    "SELECT group_name FROM reserved_groups "
-                    "WHERE day=? AND strategy=?",
-                    (day.isoformat(), strategy),
-                )
+            cur = await conn.execute(
+                "SELECT group_name FROM reserved_groups "
+                "WHERE bot_name=? AND strategy=? AND day=?",
+                (bot_name, strategy, day.isoformat()),
+            )
             rows = await cur.fetchall()
         return {r["group_name"] for r in rows}
 
-    async def reset_day(self, day: date, strategy: Optional[str] = None) -> None:
+    async def reset_day(
+        self, bot_name: str, strategy: str, day: date,
+    ) -> None:
         async with self._lock:
             async with self._conn() as conn:
-                if strategy is None:
-                    await conn.execute(
-                        "DELETE FROM reserved_groups WHERE day=?",
-                        (day.isoformat(),),
-                    )
-                else:
-                    await conn.execute(
-                        "DELETE FROM reserved_groups "
-                        "WHERE day=? AND strategy=?",
-                        (day.isoformat(), strategy),
-                    )
+                await conn.execute(
+                    "DELETE FROM reserved_groups "
+                    "WHERE bot_name=? AND strategy=? AND day=?",
+                    (bot_name, strategy, day.isoformat()),
+                )
                 await conn.commit()
 
     # ══════════════════════════════════════════════════════════════════
-    # Reader: Dashboard + probabilistische Auswertungen
+    # Reader
     # ══════════════════════════════════════════════════════════════════
 
     async def get_trades(
         self,
         *,
-        strategy: Optional[str] = None,
-        bot_name: Optional[str] = None,
-        symbol: Optional[str] = None,
-        since: Optional[datetime | str] = None,
-        until: Optional[datetime | str] = None,
+        bot_name: str,
+        strategy: str,
+        symbol: str | None = None,
+        since: datetime | str | None = None,
+        until: datetime | str | None = None,
         only_closed: bool = False,
-        limit: Optional[int] = None,
+        limit: int | None = None,
     ) -> list[dict[str, Any]]:
-        where: list[str] = []
-        params: list[Any] = []
-        if strategy:
-            where.append("strategy=?"); params.append(strategy)
-        if bot_name:
-            where.append("COALESCE(bot_name, strategy)=?"); params.append(bot_name)
+        where: list[str] = ["bot_name=?", "strategy=?"]
+        params: list[Any] = [bot_name, strategy]
         if symbol:
             where.append("symbol=?"); params.append(symbol)
         if since is not None:
@@ -1073,37 +876,8 @@ class PersistentState:
             where.append("entry_ts <= ?"); params.append(_iso(until))
         if only_closed:
             where.append("exit_ts IS NOT NULL")
-        sql = "SELECT * FROM trades"
-        if where:
-            sql += " WHERE " + " AND ".join(where)
+        sql = "SELECT * FROM trades WHERE " + " AND ".join(where)
         sql += " ORDER BY entry_ts DESC"
-        if limit is not None:
-            sql += f" LIMIT {int(limit)}"
-        async with self._conn() as conn:
-            cur = await conn.execute(sql, params)
-            rows = await cur.fetchall()
-        return [dict(r) for r in rows]
-
-    async def get_anomalies(
-        self,
-        *,
-        strategy: Optional[str] = None,
-        severity: Optional[str] = None,
-        since: Optional[datetime | str] = None,
-        limit: Optional[int] = None,
-    ) -> list[dict[str, Any]]:
-        where: list[str] = []
-        params: list[Any] = []
-        if strategy:
-            where.append("strategy=?"); params.append(strategy)
-        if severity:
-            where.append("severity=?"); params.append(severity)
-        if since is not None:
-            where.append("ts >= ?"); params.append(_iso(since))
-        sql = "SELECT * FROM anomaly_events"
-        if where:
-            sql += " WHERE " + " AND ".join(where)
-        sql += " ORDER BY ts DESC"
         if limit is not None:
             sql += f" LIMIT {int(limit)}"
         async with self._conn() as conn:
@@ -1114,163 +888,239 @@ class PersistentState:
     async def get_signals(
         self,
         *,
-        strategy: Optional[str] = None,
-        symbol: Optional[str] = None,
+        bot_name: str,
+        strategy: str,
+        symbol: str | None = None,
         filtered_only: bool = False,
-        since: Optional[datetime | str] = None,
-        limit: Optional[int] = None,
+        since: datetime | str | None = None,
+        limit: int | None = None,
     ) -> list[dict[str, Any]]:
-        where: list[str] = []
-        params: list[Any] = []
-        if strategy:
-            where.append("strategy=?"); params.append(strategy)
+        where: list[str] = ["bot_name=?", "strategy=?"]
+        params: list[Any] = [bot_name, strategy]
         if symbol:
             where.append("symbol=?"); params.append(symbol)
         if filtered_only:
             where.append("filtered_by IS NOT NULL AND filtered_by != ''")
         if since is not None:
             where.append("ts >= ?"); params.append(_iso(since))
-
-        sql = "SELECT * FROM signals"
-        if where:
-            sql += " WHERE " + " AND ".join(where)
+        sql = "SELECT * FROM signals WHERE " + " AND ".join(where)
         sql += " ORDER BY ts DESC"
         if limit is not None:
             sql += f" LIMIT {int(limit)}"
-
         async with self._conn() as conn:
             cur = await conn.execute(sql, params)
             rows = await cur.fetchall()
         return [dict(r) for r in rows]
 
-    async def get_open_positions(
-        self, strategy: Optional[str] = None,
+    async def get_anomalies(
+        self,
+        *,
+        bot_name: str,
+        strategy: str,
+        severity: str | None = None,
+        since: datetime | str | None = None,
+        limit: int | None = None,
     ) -> list[dict[str, Any]]:
+        where: list[str] = ["bot_name=?", "strategy=?"]
+        params: list[Any] = [bot_name, strategy]
+        if severity:
+            where.append("severity=?"); params.append(severity)
+        if since is not None:
+            where.append("ts >= ?"); params.append(_iso(since))
+        sql = "SELECT * FROM anomaly_events WHERE " + " AND ".join(where)
+        sql += " ORDER BY ts DESC"
+        if limit is not None:
+            sql += f" LIMIT {int(limit)}"
         async with self._conn() as conn:
-            if strategy is None:
-                cur = await conn.execute("SELECT * FROM positions")
-            else:
-                cur = await conn.execute(
-                    "SELECT * FROM positions WHERE strategy=?", (strategy,),
-                )
+            cur = await conn.execute(sql, params)
             rows = await cur.fetchall()
         return [dict(r) for r in rows]
 
     async def get_latest_equity_curve(
-        self, strategy: Optional[str] = None, limit: int = 500,
+        self, bot_name: str, strategy: str, limit: int = 500,
     ) -> list[dict[str, Any]]:
         async with self._conn() as conn:
-            if strategy is None:
-                cur = await conn.execute(
-                    "SELECT * FROM equity_snapshots ORDER BY ts DESC LIMIT ?",
-                    (int(limit),),
-                )
-            else:
-                cur = await conn.execute(
-                    "SELECT * FROM equity_snapshots WHERE strategy=? "
-                    "ORDER BY ts DESC LIMIT ?",
-                    (strategy, int(limit)),
-                )
+            cur = await conn.execute(
+                "SELECT * FROM equity_snapshots "
+                "WHERE bot_name=? AND strategy=? "
+                "ORDER BY ts DESC LIMIT ?",
+                (bot_name, strategy, int(limit)),
+            )
             rows = await cur.fetchall()
         return list(reversed([dict(r) for r in rows]))
 
-    async def get_bot_heartbeats(
-        self,
-        active_only: bool = False,
-        active_threshold_seconds: int = 180,
-    ) -> list[dict[str, Any]]:
-        """Liest Heartbeat-Zeilen, optional gefiltert auf aktive Bots."""
-        sql = "SELECT * FROM bot_heartbeat"
-        params: list[Any] = []
-        if active_only:
-            threshold = max(1, int(active_threshold_seconds))
-            sql += " WHERE updated_at > datetime('now', ?)"
-            params.append(f"-{threshold} seconds")
-        sql += " ORDER BY updated_at DESC"
-
-        try:
-            async with self._conn() as conn:
-                cur = await conn.execute(sql, params)
-                rows = await cur.fetchall()
-        except Exception:
-            return []
-
-        out: list[dict[str, Any]] = []
-        for row in rows:
-            item = dict(row)
-            raw_status = item.get("symbol_status_json")
-            status: dict[str, Any] = {}
-            if raw_status:
-                try:
-                    parsed = json.loads(raw_status)
-                    if isinstance(parsed, dict):
-                        status = parsed
-                except (TypeError, ValueError):
-                    status = {}
-            item["broker_connected"] = bool(item.get("broker_connected", 0))
-            item["circuit_breaker"] = bool(item.get("circuit_breaker", 0))
-            item["symbol_status"] = status
-            out.append(item)
-        return out
-
-    async def get_strategies(self) -> list[str]:
-        """Liefert alle Strategien, die Trades oder Equity-Einträge haben."""
+    async def daily_pnl(
+        self, bot_name: str, strategy: str, day: date,
+    ) -> float:
         async with self._conn() as conn:
             cur = await conn.execute(
                 """
-                SELECT DISTINCT strategy FROM (
-                    SELECT strategy FROM trades
-                    UNION SELECT strategy FROM equity_snapshots
-                    UNION SELECT strategy FROM positions
-                    UNION SELECT strategy FROM bot_heartbeat
-                ) WHERE strategy IS NOT NULL AND strategy <> ''
+                SELECT COALESCE(SUM(pnl), 0.0) AS s FROM trades
+                WHERE bot_name=? AND strategy=? AND exit_ts IS NOT NULL
+                AND substr(exit_ts, 1, 10)=?
+                """,
+                (bot_name, strategy, day.isoformat()),
+            )
+            row = await cur.fetchone()
+        return float(row["s"]) if row else 0.0
+
+    async def trades_today(
+        self, bot_name: str, strategy: str, day: date,
+    ) -> dict[str, int]:
+        async with self._conn() as conn:
+            cur = await conn.execute(
                 """
+                SELECT symbol, COUNT(*) AS cnt FROM trades
+                WHERE bot_name=? AND strategy=? AND exit_ts IS NOT NULL
+                AND substr(exit_ts, 1, 10)=?
+                GROUP BY symbol
+                """,
+                (bot_name, strategy, day.isoformat()),
             )
             rows = await cur.fetchall()
-        return [r["strategy"] for r in rows]
+        return {r["symbol"]: int(r["cnt"]) for r in rows}
 
-    async def get_strategy_status(
-        self, strategy: str,
+    # ══════════════════════════════════════════════════════════════════
+    # Monitoring
+    # ══════════════════════════════════════════════════════════════════
+
+    async def get_health_snapshot(
+        self, bot_name: str, strategy: str,
     ) -> dict[str, Any]:
-        """Aggregierter Bot-Status für das Dashboard."""
-        today = datetime.now(timezone.utc).date()
+        """Alle Monitoring-Daten für einen Bot in einem DB-Roundtrip."""
+        today = datetime.now(timezone.utc).date().isoformat()
+        one_hour_ago = _iso(datetime.now(timezone.utc) - timedelta(hours=1))
         async with self._conn() as conn:
-            heartbeat = await (
-                await conn.execute(
-                    "SELECT bot_name FROM bot_heartbeat WHERE strategy=?",
-                    (strategy,),
-                )
-            ).fetchone()
             eq = await (
                 await conn.execute(
-                    "SELECT equity, drawdown_pct, peak_equity, ts "
-                    "FROM equity_snapshots WHERE strategy=? "
+                    "SELECT equity, cash, drawdown_pct, peak_equity, ts "
+                    "FROM equity_snapshots WHERE bot_name=? AND strategy=? "
                     "ORDER BY ts DESC LIMIT 1",
-                    (strategy,),
+                    (bot_name, strategy),
                 )
             ).fetchone()
             opn = await (
                 await conn.execute(
-                    "SELECT COUNT(*) AS c FROM positions WHERE strategy=?",
-                    (strategy,),
+                    "SELECT COUNT(*) AS c FROM positions "
+                    "WHERE bot_name=? AND strategy=?",
+                    (bot_name, strategy),
+                )
+            ).fetchone()
+            td = await (
+                await conn.execute(
+                    """
+                    SELECT COUNT(*) AS c, COALESCE(SUM(pnl), 0.0) AS pnl
+                    FROM trades WHERE bot_name=? AND strategy=?
+                    AND exit_ts IS NOT NULL AND substr(exit_ts, 1, 10)=?
+                    """,
+                    (bot_name, strategy, today),
+                )
+            ).fetchone()
+            sigs = await (
+                await conn.execute(
+                    "SELECT COUNT(*) AS c FROM signals "
+                    "WHERE bot_name=? AND strategy=? AND substr(ts,1,10)=?",
+                    (bot_name, strategy, today),
+                )
+            ).fetchone()
+            sigs_filtered = await (
+                await conn.execute(
+                    """
+                    SELECT COUNT(*) AS c FROM signals
+                    WHERE bot_name=? AND strategy=? AND substr(ts,1,10)=?
+                    AND filtered_by IS NOT NULL AND filtered_by != ''
+                    """,
+                    (bot_name, strategy, today),
+                )
+            ).fetchone()
+            anom = await (
+                await conn.execute(
+                    "SELECT COUNT(*) AS c FROM anomaly_events "
+                    "WHERE bot_name=? AND strategy=? AND ts >= ?",
+                    (bot_name, strategy, one_hour_ago),
+                )
+            ).fetchone()
+            hb = None
+            try:
+                hb = await (
+                    await conn.execute(
+                        "SELECT * FROM bot_heartbeat "
+                        "WHERE bot_name=? AND strategy=?",
+                        (bot_name, strategy),
+                    )
+                ).fetchone()
+            except Exception:
+                pass
+
+        symbol_status: dict[str, Any] = {}
+        if hb and hb["symbol_status_json"]:
+            try:
+                parsed = json.loads(hb["symbol_status_json"])
+                if isinstance(parsed, dict):
+                    symbol_status = parsed
+            except (TypeError, ValueError):
+                pass
+
+        return {
+            "bot_name": bot_name,
+            "strategy": strategy,
+            "equity": float(eq["equity"]) if eq else None,
+            "cash": float(eq["cash"]) if eq else None,
+            "drawdown_pct": float(eq["drawdown_pct"]) if eq else None,
+            "peak_equity": float(eq["peak_equity"]) if eq else None,
+            "last_equity_ts": eq["ts"] if eq else None,
+            "last_bar_ts": hb["last_bar_ts"] if hb else None,
+            "last_bar_lag_ms": (
+                float(hb["last_bar_lag_ms"])
+                if hb and hb["last_bar_lag_ms"] is not None else None
+            ),
+            "broker_connected": bool(hb["broker_connected"]) if hb else False,
+            "broker_adapter": hb["broker_adapter"] if hb else "",
+            "circuit_breaker": bool(hb["circuit_breaker"]) if hb else False,
+            "symbol_status": symbol_status,
+            "bot_last_seen": hb["updated_at"] if hb else None,
+            "open_positions": int(opn["c"]) if opn else 0,
+            "trades_today": int(td["c"]) if td else 0,
+            "pnl_today": float(td["pnl"]) if td else 0.0,
+            "signals_today": int(sigs["c"]) if sigs else 0,
+            "signals_filtered_today": int(sigs_filtered["c"]) if sigs_filtered else 0,
+            "anomalies_last_hour": int(anom["c"]) if anom else 0,
+        }
+
+    async def get_strategy_status(
+        self, bot_name: str, strategy: str,
+    ) -> dict[str, Any]:
+        """Aggregierter Bot-Status für das Dashboard."""
+        today = datetime.now(timezone.utc).date()
+        async with self._conn() as conn:
+            eq = await (
+                await conn.execute(
+                    "SELECT equity, drawdown_pct, peak_equity, ts "
+                    "FROM equity_snapshots WHERE bot_name=? AND strategy=? "
+                    "ORDER BY ts DESC LIMIT 1",
+                    (bot_name, strategy),
+                )
+            ).fetchone()
+            opn = await (
+                await conn.execute(
+                    "SELECT COUNT(*) AS c FROM positions "
+                    "WHERE bot_name=? AND strategy=?",
+                    (bot_name, strategy),
                 )
             ).fetchone()
             todays = await (
                 await conn.execute(
                     """
                     SELECT COUNT(*) AS c, COALESCE(SUM(pnl), 0.0) AS pnl
-                    FROM trades WHERE strategy=? AND exit_ts IS NOT NULL
-                    AND substr(exit_ts,1,10)=?
+                    FROM trades WHERE bot_name=? AND strategy=?
+                    AND exit_ts IS NOT NULL AND substr(exit_ts, 1, 10)=?
                     """,
-                    (strategy, today.isoformat()),
+                    (bot_name, strategy, today.isoformat()),
                 )
             ).fetchone()
         return {
+            "bot_name": bot_name,
             "strategy": strategy,
-            "bot_name": (
-                heartbeat["bot_name"] if heartbeat and heartbeat["bot_name"]
-                else strategy
-            ),
             "equity": float(eq["equity"]) if eq else None,
             "drawdown_pct": float(eq["drawdown_pct"]) if eq else None,
             "peak_equity": float(eq["peak_equity"]) if eq else None,
@@ -1280,350 +1130,66 @@ class PersistentState:
             "pnl_today": float(todays["pnl"]) if todays else 0.0,
         }
 
-    # ══════════════════════════════════════════════════════════════════
-    # Atomare Write-Sequenzen
-    # ══════════════════════════════════════════════════════════════════
-
-    async def open_trade_atomic(
+    async def get_bot_heartbeats(
         self,
-        *,
-        strategy: str,
-        bot_name: Optional[str] = None,
-        symbol: str,
-        side: str,
-        entry_ts: datetime | str,
-        entry_price: float,
-        qty: float,
-        stop_price: Optional[float] = None,
-        signal_strength: Optional[float] = None,
-        mit_qty_factor: Optional[float] = None,
-        ev_estimate: Optional[float] = None,
-        group_name: Optional[str] = None,
-        features_json: Optional[str] = None,
-        reason: Optional[str] = None,
-        current_price: Optional[float] = None,
-        entry_signal: Optional[str] = None,
-        broker_order_id: Optional[str] = None,
-        order_reference: Optional[str] = None,
-        reserve_group_name: Optional[str] = None,
-        reserve_day: Optional[date] = None,
-    ) -> int:
-        """Atomare Eröffnung: trades INSERT + positions UPSERT + reserved_groups INSERT
-        in einer einzigen DB-Transaktion. Gibt trade_id zurück.
-        Entweder alles oder nichts – kein Partial-State möglich."""
-        ts = _iso(entry_ts)
-        last = _iso(datetime.now(timezone.utc))
-        c_price = current_price if current_price is not None else float(entry_price)
-
-        async with self._lock:
+        active_only: bool = False,
+        active_threshold_seconds: int = 180,
+    ) -> list[dict[str, Any]]:
+        sql = "SELECT * FROM bot_heartbeat"
+        params: list[Any] = []
+        if active_only:
+            threshold_ts = _iso(
+                datetime.now(timezone.utc)
+                - timedelta(seconds=active_threshold_seconds)
+            )
+            sql += " WHERE updated_at > ?"
+            params.append(threshold_ts)
+        sql += " ORDER BY updated_at DESC"
+        try:
             async with self._conn() as conn:
-                # 1) Trade anlegen
-                cur = await conn.execute(
-                    """
-                    INSERT INTO trades (
-                        strategy, bot_name, symbol, side, entry_ts, entry_price, qty,
-                        stop_price, signal_strength, mit_qty_factor,
-                        ev_estimate, group_name, features_json, reason
-                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-                    """,
-                    (
-                        strategy, bot_name, symbol, side, ts, float(entry_price),
-                        float(qty), stop_price, signal_strength,
-                        mit_qty_factor, ev_estimate, group_name,
-                        features_json, reason,
-                    ),
-                )
-                trade_id = int(cur.lastrowid or 0)
+                cur = await conn.execute(sql, params)
+                rows = await cur.fetchall()
+        except Exception:
+            return []
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            status: dict[str, Any] = {}
+            raw = item.get("symbol_status_json")
+            if raw:
+                try:
+                    parsed = json.loads(raw)
+                    if isinstance(parsed, dict):
+                        status = parsed
+                except (TypeError, ValueError):
+                    pass
+            item["broker_connected"] = bool(item.get("broker_connected", 0))
+            item["circuit_breaker"] = bool(item.get("circuit_breaker", 0))
+            item["symbol_status"] = status
+            out.append(item)
+        return out
 
-                # 2) Position UPSERT (mit trade_id FK)
-                pos_row = await (
-                    await conn.execute(
-                        "SELECT id FROM positions "
-                        "WHERE strategy=? AND symbol=?",
-                        (strategy, symbol),
-                    )
-                ).fetchone()
-                if pos_row is None:
-                    await conn.execute(
-                        """
-                        INSERT INTO positions (
-                            trade_id, strategy, symbol, side, entry_ts,
-                            entry_price, qty, stop_price, last_update_ts,
-                            current_price, unrealized_pnl,
-                            unrealized_pnl_pct, held_minutes,
-                            entry_signal, entry_reason,
-                            broker_order_id, order_reference
-                        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-                        """,
-                        (
-                            trade_id, strategy, symbol, side, ts,
-                            float(entry_price), float(qty), stop_price,
-                            last, c_price, 0.0, 0.0, 0,
-                            entry_signal, reason,
-                            broker_order_id, order_reference,
-                        ),
-                    )
-                else:
-                    await conn.execute(
-                        """
-                        UPDATE positions SET
-                            trade_id=?, side=?, entry_ts=?,
-                            entry_price=?, qty=?, stop_price=?,
-                            last_update_ts=?, current_price=?,
-                            unrealized_pnl=0.0, unrealized_pnl_pct=0.0,
-                            held_minutes=0,
-                            entry_signal=COALESCE(?, entry_signal),
-                            entry_reason=COALESCE(?, entry_reason),
-                            broker_order_id=COALESCE(?, broker_order_id),
-                            order_reference=COALESCE(?, order_reference)
-                        WHERE id=?
-                        """,
-                        (
-                            trade_id, side, ts, float(entry_price),
-                            float(qty), stop_price, last, c_price,
-                            entry_signal, reason,
-                            broker_order_id, order_reference,
-                            pos_row["id"],
-                        ),
-                    )
-
-                # 3) Optionale MIT-Independence Gruppenreservierung
-                if reserve_group_name and reserve_day is not None:
-                    await conn.execute(
-                        """
-                        INSERT OR IGNORE INTO reserved_groups
-                            (group_name, day, strategy)
-                        VALUES (?,?,?)
-                        """,
-                        (reserve_group_name, reserve_day.isoformat(),
-                         strategy),
-                    )
-
-                await conn.commit()
-
-        log.info("state.trade_opened_atomic", id=trade_id,
-                 strategy=strategy, symbol=symbol, side=side)
-        return trade_id
-
-    async def close_trade_atomic(
-        self,
-        *,
-        trade_id: Optional[int] = None,
-        strategy: Optional[str] = None,
-        symbol: Optional[str] = None,
-        exit_ts: datetime | str,
-        exit_price: float,
-        pnl: Optional[float] = None,
-        pnl_pct: Optional[float] = None,
-        reason: Optional[str] = None,
-    ) -> None:
-        """Atomarer Exit: trades UPDATE + positions DELETE in einer Transaktion."""
-        ts = _iso(exit_ts)
-        async with self._lock:
-            async with self._conn() as conn:
-                # 1) Trade finden
-                if trade_id is not None:
-                    row = await (
-                        await conn.execute(
-                            "SELECT id, strategy, symbol FROM trades "
-                            "WHERE id=? AND exit_ts IS NULL",
-                            (int(trade_id),),
-                        )
-                    ).fetchone()
-                else:
-                    row = await (
-                        await conn.execute(
-                            """
-                            SELECT id, strategy, symbol FROM trades
-                            WHERE strategy=? AND symbol=? AND exit_ts IS NULL
-                            ORDER BY entry_ts DESC LIMIT 1
-                            """,
-                            (strategy or "", symbol or ""),
-                        )
-                    ).fetchone()
-                if row is None:
-                    log.warning("state.close_trade_atomic_no_match",
-                                trade_id=trade_id, strategy=strategy,
-                                symbol=symbol)
-                    return
-
-                tid = int(row["id"])
-                strat = row["strategy"]
-                sym = row["symbol"]
-
-                # 2) Trade schließen
-                await conn.execute(
-                    """
-                    UPDATE trades
-                    SET exit_ts=?, exit_price=?, pnl=?, pnl_pct=?, reason=?
-                    WHERE id=?
-                    """,
-                    (ts, float(exit_price), pnl, pnl_pct, reason, tid),
-                )
-
-                # 3) Position entfernen
-                await conn.execute(
-                    "DELETE FROM positions "
-                    "WHERE strategy=? AND symbol=?",
-                    (strat, sym),
-                )
-
-                await conn.commit()
-
-        log.info("state.trade_closed_atomic", id=tid, pnl=pnl,
-                 reason=reason)
-
-    # ══════════════════════════════════════════════════════════════════
-    # Monitoring-Integration (Read-Cache Quelle)
-    # ══════════════════════════════════════════════════════════════════
-
-    async def get_health_snapshot(self, strategy: str) -> dict[str, Any]:
-        """Liefert alle Monitoring-Daten für eine Strategie in einem Roundtrip.
-        Wird von HealthState/MetricsCollector als Cache-Quelle genutzt (≤5s TTL).
-        """
-        today = datetime.now(timezone.utc).date().isoformat()
-        one_hour_ago = _iso(
-            datetime.now(timezone.utc) - timedelta(hours=1)
-        )
+    async def get_bot_instances(self) -> list[dict[str, str]]:
+        """Alle bekannten (bot_name, strategy)-Paare aus allen Tabellen."""
         async with self._conn() as conn:
-            # Equity + Drawdown
-            eq = await (
-                await conn.execute(
-                    "SELECT equity, cash, drawdown_pct, peak_equity, ts "
-                    "FROM equity_snapshots WHERE strategy=? "
-                    "ORDER BY ts DESC LIMIT 1",
-                    (strategy,),
+            cur = await conn.execute(
+                """
+                SELECT DISTINCT bot_name, strategy FROM (
+                    SELECT bot_name, strategy FROM trades
+                    UNION SELECT bot_name, strategy FROM equity_snapshots
+                    UNION SELECT bot_name, strategy FROM positions
+                    UNION SELECT bot_name, strategy FROM bot_heartbeat
                 )
-            ).fetchone()
-
-            # Open positions count
-            opn = await (
-                await conn.execute(
-                    "SELECT COUNT(*) AS c FROM positions WHERE strategy=?",
-                    (strategy,),
-                )
-            ).fetchone()
-
-            # Trades + PnL today
-            td = await (
-                await conn.execute(
-                    """
-                    SELECT COUNT(*) AS c, COALESCE(SUM(pnl), 0.0) AS pnl
-                    FROM trades WHERE strategy=? AND exit_ts IS NOT NULL
-                    AND substr(exit_ts,1,10)=?
-                    """,
-                    (strategy, today),
-                )
-            ).fetchone()
-
-            # Signals today (alle) + gefilterte heute
-            sigs = await (
-                await conn.execute(
-                    """
-                    SELECT COUNT(*) AS c FROM signals
-                    WHERE strategy=? AND substr(ts,1,10)=?
-                    """,
-                    (strategy, today),
-                )
-            ).fetchone()
-            sigs_filtered = await (
-                await conn.execute(
-                    """
-                    SELECT COUNT(*) AS c FROM signals
-                    WHERE strategy=? AND substr(ts,1,10)=?
-                    AND filtered_by IS NOT NULL AND filtered_by != ''
-                    """,
-                    (strategy, today),
-                )
-            ).fetchone()
-
-            # Anomalies last hour
-            anom = await (
-                await conn.execute(
-                    """
-                    SELECT COUNT(*) AS c FROM anomaly_events
-                    WHERE strategy=? AND ts >= ?
-                    """,
-                    (strategy, one_hour_ago),
-                )
-            ).fetchone()
-
-            heartbeat = None
-            try:
-                heartbeat = await (
-                    await conn.execute(
-                        "SELECT * FROM bot_heartbeat WHERE strategy=?",
-                        (strategy,),
-                    )
-                ).fetchone()
-            except Exception:
-                heartbeat = None
-
-        symbol_status: dict[str, Any] = {}
-        if heartbeat and heartbeat["symbol_status_json"]:
-            try:
-                parsed = json.loads(heartbeat["symbol_status_json"])
-                if isinstance(parsed, dict):
-                    symbol_status = parsed
-            except (TypeError, ValueError):
-                symbol_status = {}
-
-        return {
-            "strategy": strategy,
-            "bot_name": (
-                heartbeat["bot_name"] if heartbeat and heartbeat["bot_name"]
-                else strategy
-            ),
-            "equity": float(eq["equity"]) if eq else None,
-            "cash": float(eq["cash"]) if eq else None,
-            "drawdown_pct": float(eq["drawdown_pct"]) if eq else None,
-            "peak_equity": float(eq["peak_equity"]) if eq else None,
-            "last_equity_ts": eq["ts"] if eq else None,
-            "last_bar_ts": heartbeat["last_bar_ts"] if heartbeat else None,
-            "last_bar_lag_ms": (
-                float(heartbeat["last_bar_lag_ms"])
-                if heartbeat and heartbeat["last_bar_lag_ms"] is not None
-                else None
-            ),
-            "broker_connected": (
-                bool(heartbeat["broker_connected"]) if heartbeat else False
-            ),
-            "broker_adapter": heartbeat["broker_adapter"] if heartbeat else "",
-            "circuit_breaker": (
-                bool(heartbeat["circuit_breaker"]) if heartbeat else False
-            ),
-            "symbol_status": symbol_status,
-            "bot_last_seen": heartbeat["updated_at"] if heartbeat else None,
-            "open_positions": int(opn["c"]) if opn else 0,
-            "trades_today": int(td["c"]) if td else 0,
-            "pnl_today": float(td["pnl"]) if td else 0.0,
-            "signals_today": int(sigs["c"]) if sigs else 0,
-            "signals_filtered_today": int(sigs_filtered["c"]) if sigs_filtered else 0,
-            "anomalies_last_hour": int(anom["c"]) if anom else 0,
-        }
-
-    # ══════════════════════════════════════════════════════════════════
-    # Convenience-Snapshot (Legacy – für Alt-Aufrufer)
-    # ══════════════════════════════════════════════════════════════════
-
-    async def snapshot(self, day: Optional[date] = None) -> dict:
-        d = day or datetime.now(timezone.utc).date()
-        return {
-            "day": d.isoformat(),
-            "daily_pnl": await self.daily_pnl(d),
-            "trades_today": await self.trades_today(d),
-            "peak_equity": await self.get_peak_equity(),
-            "reserved_groups": list(await self.reserved_groups(d)),
-            "cooldowns": {
-                s: u.isoformat() for s, u in (await self.get_cooldowns()).items()
-            },
-        }
+                """
+            )
+            rows = await cur.fetchall()
+        return [{"bot_name": r["bot_name"], "strategy": r["strategy"]} for r in rows]
 
 
 # ── Helpers ───────────────────────────────────────────────────────────
 
 def _iso(ts: datetime | str) -> str:
-    """Normalisiert Timestamps zu ISO-8601 (UTC bevorzugt)."""
+    """Normalisiert Timestamps zu ISO-8601 UTC."""
     if isinstance(ts, str):
         return ts
     if ts.tzinfo is None:

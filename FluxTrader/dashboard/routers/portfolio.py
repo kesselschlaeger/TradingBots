@@ -1,10 +1,10 @@
-"""Portfolio-Status: Live-Positionen + Equity-Kurven pro Strategie.
+"""Portfolio-Status: Live-Positionen + Equity-Kurven pro Bot.
 
 Endpunkte:
 - /api/portfolio – Gesamtstatus (Peak-Equity, HealthState wenn vorhanden)
 - /api/positions – Offene Positionen mit Live-Unrealized-PnL
-- /api/equity – Equity-Zeitreihe pro Strategie (für Chart)
-- /api/strategies – Liste aller aktiven Strategien + ihre Bot-Status
+- /api/equity – Equity-Zeitreihe pro Bot (für Chart)
+- /api/strategies – Liste aller aktiven Bots + ihr Status
 """
 from __future__ import annotations
 
@@ -17,84 +17,68 @@ from core.logging import get_logger
 router = APIRouter(tags=["portfolio"])
 
 
-async def _get_active_strategy_names(request: Request) -> set[str]:
-    """Aktive Strategien via DB-Recency (kein HTTP)."""
+async def _get_bot_instances(state: Any) -> list[dict[str, str]]:
+    try:
+        return await state.get_bot_instances()
+    except Exception:
+        return []
+
+
+async def _get_active_bot_keys(request: Request) -> set[tuple[str, str]]:
+    """Aktive (bot_name, strategy)-Paare via DB-Recency."""
     hs = request.app.state.health_state
     if hs is not None:
         snap = hs.snapshot()
         return {
-            str(s.get("name", "")).strip()
+            (str(s.get("bot_name", s.get("name", ""))).strip(),
+             str(s.get("strategy", s.get("name", ""))).strip())
             for s in snap.get("strategies", [])
             if str(s.get("name", "")).strip()
         }
 
     state = request.app.state.persistent_state
     heartbeats = await state.get_bot_heartbeats(active_only=True)
-    if heartbeats:
-        return {str(h.get("strategy", "")).strip() for h in heartbeats if str(h.get("strategy", "")).strip()}
-
-    strategies = await state.get_strategies()
-    active: set[str] = set()
-    for strat in strategies:
-        curve = await state.get_latest_equity_curve(strat, limit=1)
-        if not curve:
-            continue
-        try:
-            last_ts = datetime.fromisoformat(
-                str(curve[-1]["ts"]).replace("Z", "+00:00")
-            )
-            age = (datetime.now(timezone.utc) - last_ts).total_seconds()
-            if age < 300:
-                active.add(strat)
-        except (ValueError, KeyError, TypeError):
-            continue
-    return active
+    return {
+        (str(h.get("bot_name", "")).strip(), str(h.get("strategy", "")).strip())
+        for h in heartbeats
+        if str(h.get("bot_name", "")).strip()
+    }
 
 
 @router.get("/portfolio")
 async def get_portfolio(request: Request) -> dict[str, Any]:
-    """Gesamt-Portfolio aus PersistentState + optional HealthState.
-
-    Zeigt:
-    - peak_equity: globales Allzeit-High
-    - open_positions: aktuelle Anzahl
-    - equity: aktuelle Equity aus letztem Snapshot
-    - drawdown_pct: aktueller Drawdown
-    - health: HealthState-Snapshot (falls vorhanden)
-    """
+    """Gesamt-Portfolio aus PersistentState + optional HealthState."""
     hs = request.app.state.health_state
     state = request.app.state.persistent_state
-    peak = await state.get_peak_equity()
+    instances = await _get_bot_instances(state)
 
-    # Letzter Equity-Snapshot über alle Strategien
     latest_equity = {
         "equity": 0.0,
         "cash": 0.0,
         "drawdown_pct": 0.0,
         "open_positions": 0,
+        "peak_equity": 0.0,
     }
-    strats = await state.get_strategies()
-    if strats:
-        # Aggregier alle offenen Positionen
-        all_positions = []
-        for s in strats:
-            all_positions.extend(await state.get_open_positions(s))
-        latest_equity["open_positions"] = len(all_positions)
 
-        # Letzter Snapshot (von beliebiger Strategie)
-        for s in strats:
-            curve = await state.get_latest_equity_curve(s, limit=1)
-            if curve:
-                latest_equity.update({
-                    "equity": float(curve[-1].get("equity", 0.0)),
-                    "cash": float(curve[-1].get("cash", 0.0)),
-                    "drawdown_pct": float(curve[-1].get("drawdown_pct", 0.0)),
-                })
-                break
+    for inst in instances:
+        bn, strat = inst["bot_name"], inst["strategy"]
+        positions = await state.get_open_positions(bn, strat)
+        latest_equity["open_positions"] += len(positions)
+
+        peak = await state.get_peak_equity(bn, strat)
+        if peak > latest_equity["peak_equity"]:
+            latest_equity["peak_equity"] = peak
+
+        curve = await state.get_latest_equity_curve(bn, strat, limit=1)
+        if curve:
+            latest_equity.update({
+                "equity": latest_equity["equity"] + float(curve[-1].get("equity", 0.0)),
+                "cash": latest_equity["cash"] + float(curve[-1].get("cash", 0.0)),
+            })
 
     snap = hs.snapshot() if hs is not None else {}
     return {
-        "peak_equity": peak,
+        "peak_equity": latest_equity["peak_equity"],
         "latest_equity": latest_equity.get("equity", 0.0),
         "open_positions": latest_equity.get("open_positions", 0),
         "drawdown_pct": latest_equity.get("drawdown_pct", 0.0),
@@ -106,29 +90,28 @@ async def get_portfolio(request: Request) -> dict[str, Any]:
 @router.get("/positions")
 async def get_positions(
     request: Request,
+    bot_name: Optional[str] = None,
     strategy: Optional[str] = None,
 ) -> list[dict[str, Any]]:
-    """Offene Positionen mit Live-PnL aus der zentralen DB.
-
-    Fields:
-    - strategy/bot, symbol, side, entry_price, qty
-    - stop_price, current_price, unrealized_pnl, unrealized_pnl_pct
-    - order_ts, held_minutes (wie lange die Position offen ist)
-    - entry_signal, entry_reason, order_reference, broker_order_id
-    """
+    """Offene Positionen mit Live-PnL aus der zentralen DB."""
     state = request.app.state.persistent_state
 
-    if strategy:
-        positions = await state.get_open_positions(strategy)
+    if bot_name and strategy:
+        raw_positions = await state.get_open_positions(bot_name, strategy)
     else:
-        # Alle offenen Positionen über alle Strategien
-        strats = await state.get_strategies()
-        positions = []
-        for s in strats:
-            positions.extend(await state.get_open_positions(s))
+        instances = await _get_bot_instances(state)
+        if strategy:
+            instances = [i for i in instances if i["strategy"] == strategy]
+        if bot_name:
+            instances = [i for i in instances if i["bot_name"] == bot_name]
+        raw_positions = []
+        for inst in instances:
+            raw_positions.extend(
+                await state.get_open_positions(inst["bot_name"], inst["strategy"])
+            )
 
     result = []
-    for p in positions:
+    for p in raw_positions:
         entry_ts = p.get("entry_ts")
         held_minutes = p.get("held_minutes") or 0
         if entry_ts:
@@ -141,8 +124,9 @@ async def get_positions(
             except (TypeError, ValueError):
                 pass
         result.append({
+            "bot_name": p.get("bot_name"),
             "strategy": p.get("strategy"),
-            "bot": p.get("strategy"),
+            "bot": p.get("bot_name") or p.get("strategy"),
             "symbol": p.get("symbol"),
             "side": p.get("side"),
             "order_ts": entry_ts,
@@ -166,6 +150,7 @@ async def get_positions(
 @router.get("/equity")
 async def get_equity(
     request: Request,
+    bot_name: Optional[str] = None,
     strategy: Optional[str] = None,
     limit: int = 500,
 ) -> list[dict[str, Any]]:
@@ -175,38 +160,70 @@ async def get_equity(
     """
     state = request.app.state.persistent_state
 
-    curve = await state.get_latest_equity_curve(strategy, limit=limit)
-    result = []
-    for snap in curve:
-        result.append({
+    if bot_name and strategy:
+        curve = await state.get_latest_equity_curve(bot_name, strategy, limit=limit)
+    else:
+        instances = await _get_bot_instances(state)
+        if strategy:
+            instances = [i for i in instances if i["strategy"] == strategy]
+        if bot_name:
+            instances = [i for i in instances if i["bot_name"] == bot_name]
+        if instances:
+            first = instances[0]
+            curve = await state.get_latest_equity_curve(
+                first["bot_name"], first["strategy"], limit=limit
+            )
+        else:
+            curve = []
+
+    return [
+        {
             "ts": snap.get("ts"),
             "equity": float(snap.get("equity") or 0.0),
             "cash": float(snap.get("cash") or 0.0),
             "drawdown_pct": float(snap.get("drawdown_pct") or 0.0),
             "peak_equity": float(snap.get("peak_equity") or 0.0),
             "unrealized_pnl_total": float(snap.get("unrealized_pnl_total") or 0.0),
-        })
-
-    return result
+        }
+        for snap in curve
+    ]
 
 
 @router.get("/anomalies")
 async def get_anomalies(
     request: Request,
+    bot_name: Optional[str] = None,
     strategy: Optional[str] = None,
     limit: int = 20,
 ) -> list[dict[str, Any]]:
     """Letzte Anomalien aus ``anomaly_events`` fuer das Dashboard."""
     state = request.app.state.persistent_state
-    anomalies = await state.get_anomalies(
-        strategy=strategy,
-        limit=max(1, min(int(limit), 100)),
-    )
+    cap = max(1, min(int(limit), 100))
 
-    result = []
-    for item in anomalies:
-        result.append({
+    if bot_name and strategy:
+        anomalies = await state.get_anomalies(
+            bot_name=bot_name, strategy=strategy, limit=cap,
+        )
+    else:
+        instances = await _get_bot_instances(state)
+        if strategy:
+            instances = [i for i in instances if i["strategy"] == strategy]
+        if bot_name:
+            instances = [i for i in instances if i["bot_name"] == bot_name]
+        anomalies = []
+        for inst in instances:
+            anomalies.extend(
+                await state.get_anomalies(
+                    bot_name=inst["bot_name"], strategy=inst["strategy"],
+                    limit=cap,
+                )
+            )
+        anomalies = sorted(anomalies, key=lambda x: x.get("ts", ""), reverse=True)[:cap]
+
+    return [
+        {
             "id": item.get("id"),
+            "bot_name": item.get("bot_name"),
             "strategy": item.get("strategy"),
             "ts": item.get("ts"),
             "check_name": item.get("check_name"),
@@ -214,13 +231,15 @@ async def get_anomalies(
             "symbol": item.get("symbol"),
             "message": item.get("message"),
             "context_json": item.get("context_json"),
-        })
-    return result
+        }
+        for item in anomalies
+    ]
 
 
 @router.get("/signals")
 async def get_signals(
     request: Request,
+    bot_name: Optional[str] = None,
     strategy: Optional[str] = None,
     symbol: Optional[str] = None,
     since: Optional[str] = Query(None, description="ISO-8601 timestamp"),
@@ -228,24 +247,41 @@ async def get_signals(
 ) -> list[dict[str, Any]]:
     """Letzte Signale aus ``signals`` fuer das Dashboard."""
     state = request.app.state.persistent_state
+    cap = max(1, min(int(limit), 200))
     since_dt: Optional[datetime] = None
     if since:
         try:
             since_dt = datetime.fromisoformat(since.replace("Z", "+00:00"))
         except ValueError:
             since_dt = None
-    signals = await state.get_signals(
-        strategy=strategy,
-        symbol=symbol,
-        since=since_dt,
-        limit=max(1, min(int(limit), 200)),
-    )
+
+    if bot_name and strategy:
+        signals = await state.get_signals(
+            bot_name=bot_name, strategy=strategy,
+            symbol=symbol, since=since_dt, limit=cap,
+        )
+    else:
+        instances = await _get_bot_instances(state)
+        if strategy:
+            instances = [i for i in instances if i["strategy"] == strategy]
+        if bot_name:
+            instances = [i for i in instances if i["bot_name"] == bot_name]
+        signals = []
+        for inst in instances:
+            signals.extend(
+                await state.get_signals(
+                    bot_name=inst["bot_name"], strategy=inst["strategy"],
+                    symbol=symbol, since=since_dt, limit=cap,
+                )
+            )
+        signals = sorted(signals, key=lambda x: x.get("ts", ""), reverse=True)[:cap]
 
     result = []
     for item in signals:
         filtered_by = item.get("filtered_by")
         result.append({
             "id": item.get("id"),
+            "bot_name": item.get("bot_name"),
             "strategy": item.get("strategy"),
             "symbol": item.get("symbol"),
             "ts": item.get("ts"),
@@ -264,25 +300,22 @@ async def list_strategies(
     request: Request,
     active_only: bool = Query(True),
 ) -> dict[str, Any]:
-    """Alle aktiven Strategien + ihr aktueller Status.
+    """Alle aktiven Bots + ihr aktueller Status.
 
-    Pro Strategie:
-    - equity, drawdown_pct, peak_equity
-    - open_positions, trades_today, pnl_today
-    - last_equity_ts (wann der letzte Snapshot war)
-    - symbol_status (HealthState): {SYMBOL: {code, reason, ts}}
-    - last_bar_ts, last_bar_lag_ms, signals_today, signals_filtered_today
+    Pro Bot: equity, drawdown_pct, open_positions, trades_today, pnl_today,
+    last_equity_ts, symbol_status, last_bar_ts, last_bar_lag_ms, signals_today.
     """
     state = request.app.state.persistent_state
+    instances = await _get_bot_instances(state)
+    active_keys = await _get_active_bot_keys(request)
+    health_map = await _get_bot_health_map(request)
 
-    active_names = await _get_active_strategy_names(request)
-    health_by_strat = await _get_strategy_health_map(request)
-    strategies = await state.get_strategies()
     result = []
-    for strat in strategies:
-        status = await state.get_strategy_status(strat)
-        health = health_by_strat.get(strat, {})
-        status["running"] = strat in active_names
+    for inst in instances:
+        bn, strat = inst["bot_name"], inst["strategy"]
+        status = await state.get_strategy_status(bn, strat)
+        health = health_map.get((bn, strat), health_map.get(strat, {}))
+        status["running"] = (bn, strat) in active_keys or strat in active_keys
         status["symbol_status"] = health.get("symbol_status", {})
         status["last_bar_ts"] = health.get("last_bar_ts")
         status["last_bar_lag_ms"] = health.get("last_bar_lag_ms")
@@ -292,44 +325,48 @@ async def list_strategies(
         )
         result.append(status)
 
-    # Im Dashboard ist "Active Bots" gewünscht: nur wirklich laufende Bots.
     if active_only:
         result = [r for r in result if r.get("running", False)]
 
     return {
-        "total_strategies": len(strategies),
-        "active_strategies": len(result),
+        "total_bots": len(instances),
+        "active_bots": len(result),
         "active_source": "in_process" if request.app.state.health_state else "db_recency",
         "strategies": result,
     }
 
 
-async def _get_strategy_health_map(request: Request) -> dict[str, dict[str, Any]]:
-    """Health-Telemetrie aus SQLite (kein HTTP)."""
+async def _get_bot_health_map(request: Request) -> dict[Any, dict[str, Any]]:
+    """Health-Telemetrie aus SQLite, indexiert nach (bot_name, strategy)."""
     log = get_logger(__name__)
     hs = request.app.state.health_state
     if hs is not None:
         snapshots = list(hs.snapshot().get("strategies", []))
-        out: dict[str, dict[str, Any]] = {}
+        out: dict[Any, dict[str, Any]] = {}
         for s in snapshots:
             name = str(s.get("name", "")).strip()
             if name:
-                out[name] = {
+                data = {
                     "symbol_status": s.get("symbol_status", {}) or {},
                     "last_bar_ts": s.get("last_bar_ts"),
                     "last_bar_lag_ms": s.get("last_bar_lag_ms"),
                     "signals_today": s.get("signals_today", 0),
                     "signals_filtered_today": s.get("signals_filtered_today", 0),
                 }
+                out[name] = data
+                bn = str(s.get("bot_name", "")).strip()
+                if bn:
+                    out[(bn, name)] = data
         return out
 
     state = request.app.state.persistent_state
-    strategies = await state.get_strategies()
-    out: dict[str, dict[str, Any]] = {}
-    for strat in strategies:
+    instances = await _get_bot_instances(state)
+    out: dict[Any, dict[str, Any]] = {}
+    for inst in instances:
+        bn, strat = inst["bot_name"], inst["strategy"]
         try:
-            snap = await state.get_health_snapshot(strat)
-            out[strat] = {
+            snap = await state.get_health_snapshot(bn, strat)
+            data = {
                 "symbol_status": snap.get("symbol_status", {}),
                 "last_bar_ts": snap.get("last_bar_ts"),
                 "last_bar_lag_ms": snap.get("last_bar_lag_ms"),
@@ -338,6 +375,8 @@ async def _get_strategy_health_map(request: Request) -> dict[str, dict[str, Any]
                 "broker_connected": snap.get("broker_connected", False),
                 "circuit_breaker": snap.get("circuit_breaker", False),
             }
+            out[(bn, strat)] = data
+            out[strat] = data
         except Exception as e:
-            log.warning("health_map.db_failed", strategy=strat, error=str(e))
+            log.warning("health_map.db_failed", bot_name=bn, strategy=strat, error=str(e))
     return out

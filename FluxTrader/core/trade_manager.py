@@ -76,7 +76,8 @@ class TradeManager:
                  eod_close_time: Optional[time] = None,
                  market_close: time = time(16, 0),
                  state: Optional["PersistentState"] = None,
-                 log_registers: bool = True):
+                 log_registers: bool = True,
+                 bot_name: str = ""):
         self.trail_after_r = trail_after_r
         self.trail_distance_r = trail_distance_r
         self.use_trailing = use_trailing
@@ -84,6 +85,7 @@ class TradeManager:
         self.market_close = market_close
         self.state = state
         self.log_registers = log_registers
+        self._bot_name: str = bot_name
         self._trades: dict[str, ManagedTrade] = {}
 
     # ── Register / Remove ─────────────────────────────────────────────
@@ -155,10 +157,11 @@ class TradeManager:
             from datetime import date as _date
             reserve_day = trade.opened_at.date() if hasattr(trade.opened_at, "date") else _date.today()
 
+        effective_bot_name = bot_name or self._bot_name or trade.strategy_id
         try:
             trade_id = await self.state.open_trade_atomic(
+                bot_name=effective_bot_name,
                 strategy=trade.strategy_id,
-                bot_name=bot_name,
                 symbol=trade.symbol,
                 side=trade.side,
                 entry_ts=trade.opened_at,
@@ -184,6 +187,7 @@ class TradeManager:
             return None
 
         trade.metadata["trade_id"] = trade_id
+        trade.metadata["bot_name"] = effective_bot_name
         return trade_id
 
     def forget(self, symbol: str) -> None:
@@ -221,10 +225,17 @@ class TradeManager:
                 pnl_pct = (pnl / (tracked.entry * tracked.qty)) * 100.0
 
         if self.state is not None:
+            tracked_bot_name = (
+                (tracked.metadata.get("bot_name") if tracked else None)
+                or self._bot_name
+                or strategy
+                or ""
+            )
             try:
                 await self.state.close_trade_atomic(
+                    bot_name=tracked_bot_name,
+                    strategy=strategy or "",
                     trade_id=trade_id,
-                    strategy=strategy,
                     symbol=symbol,
                     exit_ts=ts,
                     exit_price=float(exit_price),

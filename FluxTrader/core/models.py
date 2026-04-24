@@ -238,6 +238,7 @@ class AnomalyEvent:
     severity: AlertLevel
     symbol: Optional[str] = None
     strategy: Optional[str] = None
+    bot_name: str = ""
     message: str = ""
     context: dict[str, Any] = field(default_factory=dict)
 

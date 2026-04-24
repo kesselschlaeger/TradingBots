@@ -134,6 +134,7 @@ class AppConfig(BaseModel):
     backtest_export: BacktestExportConfig = Field(
         default_factory=BacktestExportConfig,
     )
+    bot_name: str = ""              # YAML-Instanzname, z.B. "botti_nq_live"; leer → aus strategy+broker abgeleitet
     initial_capital: float = 10_000.0
     currency: str = "USD"
     benchmark: str = "SPY"

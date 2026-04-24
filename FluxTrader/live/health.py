@@ -59,7 +59,8 @@ class HealthState:
                  on_ready_alert: Optional[Callable[..., Coroutine]] = None,
                  bar_max_age_seconds: int = _READY_BAR_MAX_AGE_S,
                  persistent_state: Optional["PersistentState"] = None,
-                 cache_ttl_seconds: float = 5.0) -> None:
+                 cache_ttl_seconds: float = 5.0,
+                 bot_name: str = "") -> None:
         self._start_ts = _time.time()
         self._lock = asyncio.Lock()
         self._bar_max_age_seconds = max(1, int(bar_max_age_seconds))
@@ -88,12 +89,13 @@ class HealthState:
         self._on_ready_alert = on_ready_alert  # Callback für Alerts
         self._last_alert_ts: Optional[float] = None
         self._alert_cooldown_s = 60  # Verhindert Alert-Spam
+        self._bot_name: str = bot_name
 
         # Read-Cache: Portfolio-Daten werden aus SQLite gelesen (TTL-Cache).
         self._persistent_state = persistent_state
         self._cache_ttl = max(0.1, float(cache_ttl_seconds))
-        self._db_cache: dict[str, dict[str, Any]] = {}  # strategy → snapshot
-        self._db_cache_ts: dict[str, float] = {}  # strategy → monotonic ts
+        self._db_cache: dict[tuple[str, str], dict[str, Any]] = {}  # (bot_name, strategy) → snapshot
+        self._db_cache_ts: dict[tuple[str, str], float] = {}  # (bot_name, strategy) → monotonic ts
 
     # ── DB-Cache (Read-Only) ──────────────────────────────────────────
 
@@ -105,20 +107,23 @@ class HealthState:
         """
         if self._persistent_state is None:
             return None
+        cache_key = (self._bot_name, strategy)
         now = _time.monotonic()
-        cached_ts = self._db_cache_ts.get(strategy, 0.0)
+        cached_ts = self._db_cache_ts.get(cache_key, 0.0)
         if (now - cached_ts) < self._cache_ttl:
-            return self._db_cache.get(strategy)
+            return self._db_cache.get(cache_key)
 
         try:
-            snap = await self._persistent_state.get_health_snapshot(strategy)
+            snap = await self._persistent_state.get_health_snapshot(
+                self._bot_name, strategy
+            )
         except Exception as e:  # noqa: BLE001
             log.warning("health.db_refresh_failed", strategy=strategy,
-                        error=str(e))
-            return self._db_cache.get(strategy)
+                        bot_name=self._bot_name, error=str(e))
+            return self._db_cache.get(cache_key)
 
-        self._db_cache[strategy] = snap
-        self._db_cache_ts[strategy] = now
+        self._db_cache[cache_key] = snap
+        self._db_cache_ts[cache_key] = now
 
         # Portfolio-Felder aus DB-Cache in In-Memory-State übernehmen
         async with self._lock:

@@ -24,16 +24,21 @@ from core.logging import get_logger, setup_logging
 log = get_logger(__name__)
 
 
+def _resolve_bot_name(cfg: AppConfig) -> str:
+    """Effektiver bot_name für PersistentState: YAML-Feld > ibkr_bot_id > Ableitung."""
+    if cfg.bot_name.strip():
+        return cfg.bot_name.strip()
+    if cfg.broker.type == "ibkr" and cfg.broker.ibkr_bot_id.strip():
+        return cfg.broker.ibkr_bot_id.strip()
+    mode_suffix = "paper" if cfg.broker.paper else "live"
+    return f"{cfg.strategy.name}_{cfg.broker.type}_{mode_suffix}"
+
+
 def _resolve_notifier_bot_name(cfg: AppConfig) -> str:
     configured = cfg.notifications.bot_name.strip()
     if configured:
         return configured
-    if cfg.broker.type == "ibkr" and cfg.broker.ibkr_bot_id.strip():
-        return cfg.broker.ibkr_bot_id.strip()
-    strategy_name = cfg.strategy.name.upper()
-    broker_name = cfg.broker.type.upper()
-    mode_name = "PAPER" if cfg.broker.paper else "LIVE"
-    return f"FLUX_{strategy_name}_{broker_name}_{mode_name}"
+    return _resolve_bot_name(cfg).upper()
 
 
 # ─────────────────────────── Strategy-Factory ─────────────────────────────
@@ -358,11 +363,13 @@ async def cmd_live(cfg: AppConfig) -> None:
     )
 
     # ── Monitoring-Infrastruktur ─────────────────────────────────────
-    health_state = HealthState(persistent_state=state)
+    effective_bot_name = _resolve_bot_name(cfg)
+    health_state = HealthState(persistent_state=state, bot_name=effective_bot_name)
     metrics_collector = MetricsCollector.create(
         enabled=cfg.monitoring.prometheus_enabled
     )
-    anomaly_detector = AnomalyDetector(notifier=notifier, state=state, cfg=cfg)
+    anomaly_detector = AnomalyDetector(notifier=notifier, state=state, cfg=cfg,
+                                       bot_name=effective_bot_name)
     await health_state.set_broker_status(
         connected=False, adapter=cfg.broker.type,
     )
@@ -397,6 +404,7 @@ async def cmd_live(cfg: AppConfig) -> None:
                 state=state,
                 config=cfg.strategy.params,
                 health_state=health_state,
+                bot_name=effective_bot_name,
             )
             await pair_engine.run()
         else:
@@ -414,6 +422,7 @@ async def cmd_live(cfg: AppConfig) -> None:
                 metrics_collector=metrics_collector,
                 anomaly_detector=anomaly_detector,
                 alerts_cfg=cfg.alerts,
+                bot_name=effective_bot_name,
             )
             await runner.start()
     finally:

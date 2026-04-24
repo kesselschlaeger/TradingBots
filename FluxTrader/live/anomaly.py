@@ -44,11 +44,13 @@ class AnomalyDetector:
 
     def __init__(self, notifier: TelegramNotifier,
                  state: PersistentState,
-                 cfg: AppConfig) -> None:
+                 cfg: AppConfig,
+                 bot_name: str = "") -> None:
         self.notifier = notifier
         self.state = state
         self.cfg = cfg
         self.acfg: AnomalyConfig = cfg.anomaly
+        self._bot_name: str = bot_name
 
         # Duplicate-Cache: (strategy, symbol, action) -> timestamp
         self._dup_cache: dict[tuple[str, str, str], datetime] = {}
@@ -66,6 +68,8 @@ class AnomalyDetector:
         return datetime.now(timezone.utc)
 
     async def _emit(self, event: AnomalyEvent) -> None:
+        if not event.bot_name and self._bot_name:
+            event.bot_name = self._bot_name
         log.warning("anomaly.detected", check=event.check_name,
                     severity=event.severity.value, symbol=event.symbol,
                     strategy=event.strategy, message=event.message)

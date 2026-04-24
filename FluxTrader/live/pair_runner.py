@@ -43,6 +43,7 @@ class PairEngine:
         state: PersistentState,
         config: dict,
         health_state: Optional[HealthState] = None,
+        bot_name: str = "",
     ):
         self.strategy = strategy
         self.broker = broker
@@ -52,6 +53,7 @@ class PairEngine:
         self.state = state
         self.cfg = config
         self.health: Optional[HealthState] = health_state
+        self._bot_name: str = bot_name or strategy.name
         self._adapter_name = type(broker).__name__.replace("Adapter", "").lower()
 
         self.tm = TradeManager(
@@ -110,8 +112,8 @@ class PairEngine:
                     await self.health.set_last_bar(self.strategy.name, bar_a.timestamp, lag_ms)
 
                 await self.state.upsert_bot_heartbeat(
+                    bot_name=self._bot_name,
                     strategy=self.strategy.name,
-                    bot_name=self.strategy.name,
                     last_bar_ts=bar_a.timestamp,
                     last_bar_lag_ms=lag_ms,
                     broker_connected=(
@@ -143,8 +145,8 @@ class PairEngine:
         # Task zu Ende schreibt.
         try:
             await asyncio.shield(self.state.upsert_bot_heartbeat(
+                bot_name=self._bot_name,
                 strategy=self.strategy.name,
-                bot_name=self.strategy.name,
                 broker_connected=False,
                 circuit_breaker=False,
                 broker_adapter=self._adapter_name,
