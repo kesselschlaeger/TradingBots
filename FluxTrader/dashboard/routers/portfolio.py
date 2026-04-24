@@ -190,6 +190,75 @@ async def get_equity(
     return result
 
 
+@router.get("/anomalies")
+async def get_anomalies(
+    request: Request,
+    strategy: Optional[str] = None,
+    limit: int = 20,
+) -> list[dict[str, Any]]:
+    """Letzte Anomalien aus ``anomaly_events`` fuer das Dashboard."""
+    state = request.app.state.persistent_state
+    anomalies = await state.get_anomalies(
+        strategy=strategy,
+        limit=max(1, min(int(limit), 100)),
+    )
+
+    result = []
+    for item in anomalies:
+        result.append({
+            "id": item.get("id"),
+            "strategy": item.get("strategy"),
+            "ts": item.get("ts"),
+            "check_name": item.get("check_name"),
+            "severity": item.get("severity"),
+            "symbol": item.get("symbol"),
+            "message": item.get("message"),
+            "context_json": item.get("context_json"),
+        })
+    return result
+
+
+@router.get("/signals")
+async def get_signals(
+    request: Request,
+    strategy: Optional[str] = None,
+    symbol: Optional[str] = None,
+    since: Optional[str] = Query(None, description="ISO-8601 timestamp"),
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    """Letzte Signale aus ``signals`` fuer das Dashboard."""
+    state = request.app.state.persistent_state
+    since_dt: Optional[datetime] = None
+    if since:
+        try:
+            since_dt = datetime.fromisoformat(since.replace("Z", "+00:00"))
+        except ValueError:
+            since_dt = None
+    signals = await state.get_signals(
+        strategy=strategy,
+        symbol=symbol,
+        since=since_dt,
+        limit=max(1, min(int(limit), 200)),
+    )
+
+    result = []
+    for item in signals:
+        filtered_by = item.get("filtered_by")
+        result.append({
+            "id": item.get("id"),
+            "strategy": item.get("strategy"),
+            "symbol": item.get("symbol"),
+            "ts": item.get("ts"),
+            "action": item.get("action"),
+            "strength": float(item.get("strength") or 0.0),
+            "filtered_by": filtered_by,
+            "filtered": bool(filtered_by),
+            "mit_passed": bool(item.get("mit_passed")) if item.get("mit_passed") is not None else None,
+            "ev_value": float(item.get("ev_value") or 0.0),
+        })
+    return result
+
+
 @router.get("/strategies/list")
 async def list_strategies(
     request: Request,

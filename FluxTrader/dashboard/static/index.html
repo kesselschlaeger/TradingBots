@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>FluxTrader Dashboard</title>
-  <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="/static/style.css?v=20260424c">
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
 <body>
@@ -123,8 +123,38 @@
         <p class="muted">No anomalies detected</p>
       </div>
     </article>
+
+    <!-- Recent Signals -->
+    <article class="panel full-width">
+      <h2>🧭 Recent Signals</h2>
+      <div class="filter-bar">
+        <select id="signal-filter-strategy">
+          <option value="">All Bots</option>
+        </select>
+        <select id="signal-filter-hours">
+          <option value="1">Last 1 hour</option>
+          <option value="6" selected>Last 6 hours</option>
+          <option value="24">Last 24 hours</option>
+          <option value="72">Last 3 days</option>
+        </select>
+        <select id="signal-filter-status">
+          <option value="">All Signals</option>
+          <option value="passed">Passed only</option>
+          <option value="filtered">Filtered only</option>
+        </select>
+      </div>
+      <table id="signals-table">
+        <thead>
+          <tr>
+            <th>Time</th><th>Bot</th><th>Symbol</th><th>Action</th>
+            <th>Strength</th><th>MIT</th><th>EV</th><th>Status</th><th>Filter</th>
+          </tr>
+        </thead>
+        <tbody id="signals-body"></tbody>
+      </table>
+    </article>
   </section>
 
-  <script src="/static/dashboard.js"></script>
+  <script src="/static/dashboard.js?v=20260424c"></script>
 </body>
 </html>

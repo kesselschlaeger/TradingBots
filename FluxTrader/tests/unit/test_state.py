@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from core.models import AlertLevel, AnomalyEvent
 from live.state import PersistentState
 
 
@@ -369,6 +370,37 @@ async def test_get_health_snapshot(state: PersistentState):
     assert snap["signals_today"] == 1
     assert snap["signals_filtered_today"] == 0
     assert snap["anomalies_last_hour"] == 0
+
+
+@pytest.mark.asyncio
+async def test_get_anomalies_returns_latest_first(state: PersistentState):
+    """Anomalie-Reader liefert Dashboard-Daten in absteigender Zeitfolge."""
+    older = datetime.now(timezone.utc) - timedelta(minutes=10)
+    newer = datetime.now(timezone.utc) - timedelta(minutes=1)
+
+    await state.log_anomaly(AnomalyEvent(
+        timestamp=older,
+        strategy="orb",
+        check_name="duplicate_trade",
+        severity=AlertLevel.WARNING,
+        symbol="AAPL",
+        message="Older warning",
+    ))
+    await state.log_anomaly(AnomalyEvent(
+        timestamp=newer,
+        strategy="orb",
+        check_name="signal_flood",
+        severity=AlertLevel.CRITICAL,
+        symbol="MSFT",
+        message="Newer critical",
+    ))
+
+    items = await state.get_anomalies(strategy="orb", limit=10)
+
+    assert len(items) == 2
+    assert items[0]["check_name"] == "signal_flood"
+    assert items[0]["severity"] == "critical"
+    assert items[1]["check_name"] == "duplicate_trade"
 
 
 # ── Atomicity-Crash-Simulation ───────────────────────────────────────

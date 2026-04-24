@@ -1084,6 +1084,65 @@ class PersistentState:
             rows = await cur.fetchall()
         return [dict(r) for r in rows]
 
+    async def get_anomalies(
+        self,
+        *,
+        strategy: Optional[str] = None,
+        severity: Optional[str] = None,
+        since: Optional[datetime | str] = None,
+        limit: Optional[int] = None,
+    ) -> list[dict[str, Any]]:
+        where: list[str] = []
+        params: list[Any] = []
+        if strategy:
+            where.append("strategy=?"); params.append(strategy)
+        if severity:
+            where.append("severity=?"); params.append(severity)
+        if since is not None:
+            where.append("ts >= ?"); params.append(_iso(since))
+        sql = "SELECT * FROM anomaly_events"
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY ts DESC"
+        if limit is not None:
+            sql += f" LIMIT {int(limit)}"
+        async with self._conn() as conn:
+            cur = await conn.execute(sql, params)
+            rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+
+    async def get_signals(
+        self,
+        *,
+        strategy: Optional[str] = None,
+        symbol: Optional[str] = None,
+        filtered_only: bool = False,
+        since: Optional[datetime | str] = None,
+        limit: Optional[int] = None,
+    ) -> list[dict[str, Any]]:
+        where: list[str] = []
+        params: list[Any] = []
+        if strategy:
+            where.append("strategy=?"); params.append(strategy)
+        if symbol:
+            where.append("symbol=?"); params.append(symbol)
+        if filtered_only:
+            where.append("filtered_by IS NOT NULL AND filtered_by != ''")
+        if since is not None:
+            where.append("ts >= ?"); params.append(_iso(since))
+
+        sql = "SELECT * FROM signals"
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY ts DESC"
+        if limit is not None:
+            sql += f" LIMIT {int(limit)}"
+
+        async with self._conn() as conn:
+            cur = await conn.execute(sql, params)
+            rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+
     async def get_open_positions(
         self, strategy: Optional[str] = None,
     ) -> list[dict[str, Any]]:

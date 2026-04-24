@@ -7,7 +7,9 @@ const REFRESH_INTERVAL = 3000; // 3s
 let equityChart = null;
 let tradeData = [];
 let strategies = [];
+let signalData = [];
 let selectedTradeStrategy = '';
+let selectedSignalStrategy = '';
 // Persistent UI-State: welche Bot-Cards sind ausgeklappt?
 const expandedBots = new Set();
 
@@ -150,6 +152,7 @@ async function refreshDashboard() {
       updateHealth(),
       updatePositions(),
       updateTrades(),
+      updateSignals(),
       updateAnomalies(),
     ]);
     document.getElementById('last-update').textContent = new Date().toLocaleTimeString();
@@ -440,17 +443,25 @@ async function updateStrategies() {
     `;
     }).join('');
 
-    // Update strategy filter
+    // Update strategy filters (trades + signals share the same bot list)
+    const botNames = [...new Set(strategies.map(s => s.bot_name || s.strategy).filter(Boolean))];
+
     const strategyFilter = document.getElementById('trade-filter-strategy');
     const currentValue = selectedTradeStrategy || strategyFilter.value || '';
-    const botNames = [...new Set(strategies.map(s => s.bot_name || s.strategy).filter(Boolean))];
-    if (currentValue && !botNames.includes(currentValue)) {
-      botNames.push(currentValue);
-    }
+    if (currentValue && !botNames.includes(currentValue)) botNames.push(currentValue);
     strategyFilter.innerHTML = '<option value="">All Bots</option>' +
       botNames.map(name => `<option value="${name}">${name}</option>`).join('');
     strategyFilter.value = currentValue;
     selectedTradeStrategy = strategyFilter.value || '';
+
+    const sigFilter = document.getElementById('signal-filter-strategy');
+    if (sigFilter) {
+      const sigCurrent = selectedSignalStrategy || sigFilter.value || '';
+      sigFilter.innerHTML = '<option value="">All Bots</option>' +
+        botNames.map(name => `<option value="${name}">${name}</option>`).join('');
+      sigFilter.value = sigCurrent;
+      selectedSignalStrategy = sigFilter.value || '';
+    }
   } catch (err) {
     console.error('Strategies update failed:', err);
   }
@@ -566,12 +577,134 @@ function updateSummaryStats() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
+// Signals
+// ─────────────────────────────────────────────────────────────────────────
+
+async function updateSignals() {
+  try {
+    const strategyEl = document.getElementById('signal-filter-strategy');
+    const hoursEl    = document.getElementById('signal-filter-hours');
+    const statusEl   = document.getElementById('signal-filter-status');
+
+    const strategy    = selectedSignalStrategy || (strategyEl ? strategyEl.value : '') || '';
+    const hours       = parseInt((hoursEl ? hoursEl.value : '') || '6', 10);
+    const statusFilter = statusEl ? statusEl.value : '';
+
+    const sinceMs   = Date.now() - hours * 3600 * 1000;
+    const sinceDate = new Date(sinceMs);
+    const sinceISO  = sinceDate.toISOString(); // e.g. 2026-04-24T12:00:00.000Z
+
+    const url = new URL(`${API_BASE}/signals`, window.location);
+    url.searchParams.append('limit', 200);
+    url.searchParams.append('since', sinceISO);        // server-side hint
+    if (strategy) url.searchParams.append('strategy', strategy);
+
+    const resp = await fetch(url);
+    if (!resp.ok) {
+      throw new Error(`signals http ${resp.status}`);
+    }
+    let data = await resp.json();
+
+    // Client-side time filter (works even if server ignores since param)
+    data = data.filter(s => {
+      if (!s.ts) return true;
+      return new Date(s.ts) >= sinceDate;
+    });
+
+    // Client-side bot filter (works even if server ignores strategy param)
+    if (strategy) {
+      data = data.filter(s => (s.strategy || '') === strategy);
+    }
+
+    // Status filter (always client-side)
+    if (statusFilter === 'passed') {
+      data = data.filter(s => !s.filtered);
+    } else if (statusFilter === 'filtered') {
+      data = data.filter(s => s.filtered);
+    }
+
+    signalData = data;
+    updateSignalsTable();
+  } catch (err) {
+    console.error('Signals update failed:', err);
+    const tbody = document.getElementById('signals-body');
+    if (tbody) {
+      tbody.innerHTML = '<tr><td colspan="9" class="muted">Signals konnten nicht geladen werden</td></tr>';
+    }
+  }
+}
+
+function updateSignalsTable() {
+  const tbody = document.getElementById('signals-body');
+  if (!tbody) return;
+
+  if (!signalData || signalData.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="9" class="muted">No signals found</td></tr>';
+    return;
+  }
+
+  tbody.innerHTML = signalData.map(sig => {
+    const filtered = !!sig.filtered;
+    const status = filtered ? 'Filtered' : 'Passed';
+    const action = sig.action || '—';
+    const strength = Number(sig.strength || 0);
+    const evValue = sig.ev_value;
+
+    return `
+      <tr>
+        <td>${formatDateTime(sig.ts)}</td>
+        <td><strong>${sig.strategy || '—'}</strong></td>
+        <td><strong>${sig.symbol || '—'}</strong></td>
+        <td>${escapeHtml(String(action).toUpperCase())}</td>
+        <td>${Number.isFinite(strength) ? strength.toFixed(2) : '—'}</td>
+        <td>${sig.mit_passed === null || sig.mit_passed === undefined ? '—' : (sig.mit_passed ? 'yes' : 'no')}</td>
+        <td>${evValue === null || evValue === undefined ? '—' : Number(evValue).toFixed(3)}</td>
+        <td class="${filtered ? 'pnl-negative' : 'pnl-positive'}">${status}</td>
+        <td class="muted">${sig.filtered_by || '—'}</td>
+      </tr>
+    `;
+  }).join('');
+}
+
+// ─────────────────────────────────────────────────────────────────────────
 // Anomalies
 // ─────────────────────────────────────────────────────────────────────────
 
 async function updateAnomalies() {
-  // Future: fetch anomaly_events table and display recent ones
-  // For now, just show "No anomalies" placeholder
+  try {
+    const resp = await fetch(`${API_BASE}/anomalies?limit=20`);
+    if (!resp.ok) {
+      throw new Error(`anomalies http ${resp.status}`);
+    }
+    const anomalies = await resp.json();
+
+    const container = document.getElementById('anomalies-container');
+    if (!anomalies || anomalies.length === 0) {
+      container.innerHTML = '<p class="muted">No anomalies detected</p>';
+      return;
+    }
+
+    container.innerHTML = anomalies.map(item => {
+      const severity = String(item.severity || 'warning').toLowerCase();
+      const ts = formatDateTime(item.ts);
+      const strategy = item.strategy || 'system';
+      const symbol = item.symbol ? ` · ${item.symbol}` : '';
+      const check = item.check_name || 'anomaly';
+      const message = escapeHtml(item.message || 'No message');
+      return `
+        <div class="anomaly-item ${severity}">
+          <div class="anomaly-time">${ts} · ${escapeHtml(strategy)}${escapeHtml(symbol)}</div>
+          <div class="anomaly-message"><strong>${escapeHtml(check)}</strong>: ${message}</div>
+        </div>
+      `;
+    }).join('');
+  } catch (err) {
+    console.error('Anomalies update failed:', err);
+    const container = document.getElementById('anomalies-container');
+    if (container) {
+      container.innerHTML = '<p class="muted">Anomalies konnten nicht geladen werden</p>';
+    }
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -609,6 +742,10 @@ function escapeAttr(s) {
     .replaceAll('>', '&gt;');
 }
 
+function escapeHtml(s) {
+  return escapeAttr(s);
+}
+
 // ─────────────────────────────────────────────────────────────────────────
 // Event listeners
 // ─────────────────────────────────────────────────────────────────────────
@@ -620,6 +757,19 @@ document.getElementById('trade-filter-strategy').addEventListener('change', () =
 
 document.getElementById('trade-filter-days').addEventListener('change', () => {
   updateTrades();
+});
+
+document.getElementById('signal-filter-strategy').addEventListener('change', () => {
+  selectedSignalStrategy = document.getElementById('signal-filter-strategy').value || '';
+  updateSignals();
+});
+
+document.getElementById('signal-filter-hours').addEventListener('change', () => {
+  updateSignals();
+});
+
+document.getElementById('signal-filter-status').addEventListener('change', () => {
+  updateSignals();
 });
 
 // Bot-Card Toggle: Symbol-Status-Tabelle ein-/ausklappen
