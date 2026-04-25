@@ -362,6 +362,36 @@ log.warning("event.warn", error=str(e))
 
 Niemals `print()` für Diagnose-Output. Immer `log.*`.
 
+## IBKR-Connection-Konfiguration
+
+**Eine** Auflösungsschicht: `core/config._apply_env_overrides`. Adapter und Provider haben keinen eigenen `os.getenv`-Fallback.
+
+```
+YAML-spezifisch > YAML-base > .env > Pydantic-Default (127.0.0.1:4002)
+```
+
+Leerer String `ibkr_host: ""` in YAML wird wie `None` behandelt → ENV/Default greift.
+ENV-Variablen: `IBKR_HOST`, `IBKR_PORT`, `IBKR_CLIENT_ID`, `IBKR_PAPER`, `IBKR_DATA_CLIENT_ID`.
+
+Bot-ID/Client-ID-Mapping → `docs/bot_registry.md` (Quelle der Wahrheit). Runtime-Validator wirft `RuntimeError` bei Kollision.
+
+## PairEngine-Persistenz
+
+PairEngine schreibt **beide** Legs (Long + Short) in `trades` via `register_and_persist`:
+- `reserve_group = f"pair_{long_symbol}_{short_symbol}"` – gleiche Gruppe für beide Legs
+- `bot_name` identisch für beide Legs
+- Exits via `close_trade` mit echten Fills aus `broker.get_recent_closes`
+- Reconcile pro Bar: wenn nur ein Leg im Broker → `pair_leg_orphan`-Log + Schließung des verbleibenden Legs
+
+## Health-Vertrag (BrokerPort)
+
+Jeder Adapter implementiert `async health() -> dict` mit den Pflicht-Keys:
+`connected: bool`, `session_healthy: bool`, `last_error_code: int | None`, `last_error_msg: str`, `managed_accounts: list[str]`.
+
+- `IBKRAdapter`: prüft `isConnected()` + `_session_healthy`
+- `AlpacaAdapter`: Probe via `get_clock()`
+- `PaperAdapter`: immer `connected=True, session_healthy=True`
+
 ## Bekannte Gotchas
 
 - **`asyncio.get_event_loop()`** in Tests kann deprecation-Warnings erzeugen

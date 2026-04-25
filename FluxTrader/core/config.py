@@ -1,13 +1,16 @@
 """Pydantic-v2 Config + YAML-Loader mit Merge von base.yaml."""
 from __future__ import annotations
 
+import logging as _logging
 from datetime import time
 from pathlib import Path
 from typing import Any, Literal, Optional
 
 import yaml
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+_cfg_log = _logging.getLogger(__name__)
 
 
 # ─────────────────────────── Nested Config Models ──────────────────────────
@@ -18,12 +21,21 @@ class BrokerConfig(BaseModel):
     type: Literal["paper", "alpaca", "ibkr"] = "paper"
     paper: bool = True
     # Alpaca
-    alpaca_data_feed: Literal["iex", "sip"] = "iex"
+    alpaca_data_feed: Literal["iex", "sip"] = "iex"                     # iex = 15-Min-delayed; sip = Real-Time (bezahlpflichtig)
     # IBKR
-    ibkr_host: str = "127.0.0.1"
-    ibkr_port: int = 4002
-    ibkr_client_id: int = 1
-    ibkr_bot_id: str = "FLUX"
+    ibkr_host: str = "127.0.0.1"   # leer/"" = aus IBKR_HOST .env oder 127.0.0.1; IP/Hostname des TWS/Gateway
+    ibkr_port: int = 4002           # 4001 = Live, 4002 = Paper, 7496/7497 für TWS-Direktverbindung
+    ibkr_client_id: int = 1         # pro Bot-Instanz eindeutig; Kollision → IBKR Error 326
+    ibkr_bot_id: str = "FLUX"       # Prefix für orderRef-Isolation; Default FLUX kollidiert bei Mehrfach-Bots
+
+    @model_validator(mode="after")
+    def _warn_default_host(self) -> "BrokerConfig":
+        if self.type == "ibkr" and self.ibkr_host == "127.0.0.1":
+            _cfg_log.warning(
+                "BrokerConfig: ibkr_host ist '127.0.0.1' (Pydantic-Default). "
+                "Wenn TWS/Gateway auf einem anderen Host läuft, IBKR_HOST in .env setzen."
+            )
+        return self
 
 
 class DataConfig(BaseModel):
@@ -32,6 +44,7 @@ class DataConfig(BaseModel):
     provider: Literal["alpaca", "yfinance", "ibkr"] = "alpaca"
     timeframe: str = "5Min"
     lookback_days: int = 5
+    ibkr_data_client_id: Optional[int] = None  # Override für IBKR-Data-Provider-Client-ID; None = broker.ibkr_client_id+100
 
 
 class NotificationConfig(BaseModel):
@@ -123,7 +136,7 @@ class AnomalyConfig(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     duplicate_window_minutes: int = 5           # Fensterbreite des Duplicate-Signal-Guards in Minuten
-    duplicate_hard_block: bool = False          # True = identisches Signal innerhalb des Fensters wird blockiert
+    duplicate_hard_block: bool = True           # True = identisches Signal innerhalb des Fensters wird hart blockiert
     max_single_order_pct: float = 0.25          # Maximalanteil einer Einzelorder am Equity (0.25 = 25 %)
     max_volume_pct: float = 0.01                # Maximalanteil der Order am Tagesvolumen des Symbols
     pnl_spike_sigma: float = 3.0                # σ-Schwelle für PnL-Spike-Erkennung
@@ -157,6 +170,7 @@ class ExecutionConfig(BaseModel):
     order_confirm_timeout_s: float = 10.0               # Timeout für IBKR orderStatus-Bestätigung nach placeOrder (Sekunden)
     close_verification_timeout_s: float = 120.0         # Timeout bis fehlender Fill als orphan_close eskaliert (Sekunden)
     reconcile_require_healthy_session: bool = True      # Reconcile (Fantasie-Close-Block) nur bei gesunder Broker-Session
+    allow_scale_in: bool = False                        # False = zweiter Entry in bereits offene Position wird blockiert (kein Pyramiding)
     scanner_provider: Literal["auto", "alpaca", "ibkr", "yfinance"] = "auto"  # Datenquelle für Premarket-Gap-Scan
     scanner_premarket_hours: int = 4                    # Zeitfenster (Stunden vor Open), das der Scanner als Premarket fetcht
 
@@ -199,7 +213,8 @@ class EnvSettings(BaseSettings):
     IBKR_HOST: Optional[str] = None
     IBKR_PORT: Optional[int] = None
     IBKR_CLIENT_ID: Optional[int] = None
-    IBKR_PAPER: Optional[str] = None
+    IBKR_PAPER: Optional[str] = None            # "true"/"false"/"1"/"0"/"yes"/"no"
+    IBKR_DATA_CLIENT_ID: Optional[int] = None   # Override für Data-Provider-Client-ID; None = broker_client_id+100
 
     TELEGRAM_TOKEN: Optional[str] = Field(
         default=None,
@@ -259,17 +274,41 @@ def _load_yaml(path: Path) -> dict:
         return yaml.safe_load(f) or {}
 
 
+def _parse_bool_env(value: str) -> bool:
+    """Parst boolean-ähnliche Strings: true/1/yes → True, false/0/no → False."""
+    return value.strip().lower() in {"true", "1", "yes"}
+
+
 def _apply_env_overrides(raw: dict, env: EnvSettings) -> dict:
+    """Wendet ENV-Overrides auf das rohe YAML-Dict an.
+
+    Auflösungs-Reihenfolge:  YAML-spezifisch > YAML-base > .env > Pydantic-Default
+    Leerer String in YAML für ibkr_host/"" wird wie None behandelt → ENV/Default greift.
+    """
     out = dict(raw)
     broker = dict(out.get("broker", {}))
+
+    # Leerer ibkr_host in YAML → als nicht gesetzt behandeln
+    if not broker.get("ibkr_host", "127.0.0.1"):
+        broker.pop("ibkr_host", None)
 
     if env.IBKR_HOST:
         broker["ibkr_host"] = env.IBKR_HOST
     if env.IBKR_PORT is not None:
         broker["ibkr_port"] = env.IBKR_PORT
+    if env.IBKR_CLIENT_ID is not None:
+        broker["ibkr_client_id"] = env.IBKR_CLIENT_ID
+    if env.IBKR_PAPER is not None:
+        broker["paper"] = _parse_bool_env(env.IBKR_PAPER)
 
     if broker:
         out["broker"] = broker
+
+    # Data-Provider: IBKR_DATA_CLIENT_ID überschreibt data.ibkr_data_client_id
+    if env.IBKR_DATA_CLIENT_ID is not None:
+        data = dict(out.get("data", {}))
+        data["ibkr_data_client_id"] = env.IBKR_DATA_CLIENT_ID
+        out["data"] = data
 
     return out
 

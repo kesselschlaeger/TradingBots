@@ -52,8 +52,8 @@ strategy:
 broker: 
   type: ibkr
   paper: true
-  ibkr_client_id: 19
-  ibkr_bot_id: Flux_OBB
+  ibkr_client_id: 12             # OBB Bot; umgezogen von 19 (Kollision mit ICT-Futures)
+  ibkr_bot_id: Flux_OBB          # orderRef-Präfix für OBB-Bot
 
 data:
   provider: ibkr

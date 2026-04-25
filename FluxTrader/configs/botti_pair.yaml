@@ -42,6 +42,8 @@ broker:
   type: paper
   paper: true
   alpaca_data_feed: iex
+  ibkr_client_id: 23             # Botti-Pair Bot; eindeutig vergeben (nächste freie ID)
+  ibkr_bot_id: Flux_BOTTI_PAIR   # orderRef-Präfix; isoliert Pair-Fills von Einzelsymbol-Bots
 
 data:
   provider: ibkr

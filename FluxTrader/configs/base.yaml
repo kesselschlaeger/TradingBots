@@ -11,9 +11,11 @@ benchmark: SPY
 broker:
   type: paper
   paper: true
-  alpaca_data_feed: iex
-  ibkr_client_id: 1
-  ibkr_bot_id: FLUX
+  alpaca_data_feed: iex           # iex = 15-Min-delayed; sip = Real-Time (kostenpflichtig)
+  ibkr_host: ""                   # leer = aus IBKR_HOST .env oder 127.0.0.1; IP/Hostname des TWS/Gateway
+  ibkr_port: 4002                 # 4001 = Live, 4002 = Paper, 7496/7497 für TWS-Direktverbindung
+  ibkr_client_id: 1               # BITTE in jeder Bot-Config überschreiben; Kollision → Error 326
+  ibkr_bot_id: FLUX               # BITTE überschreiben; Default kollidiert bei Mehrfach-Bots
 
 data:
   provider: ibkr
@@ -38,6 +40,12 @@ monitoring:
     premarket_alert: false         # Kein Alert vor Marktöffnung
     after_cutoff_alert: false      # Kein Alert nach Entry-Cutoff
     after_eod_alert: false         # Kein Alert nach EOD-Close
+
+anomaly:
+  duplicate_hard_block: true      # Live-Default: identisches Signal im Fenster wird hart blockiert
+
+execution:
+  allow_scale_in: false           # False = kein zweiter Entry in bereits offene Position (kein Pyramiding)
 
 alerts:
   routing:

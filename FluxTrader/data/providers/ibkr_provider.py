@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
 from datetime import datetime, timedelta, timezone
 from math import ceil
 from typing import AsyncIterator, Optional
@@ -135,15 +134,13 @@ class IBKRDataProvider(DataProvider):
         if not IBKR_AVAILABLE:
             raise RuntimeError("ib_insync fehlt – pip install ib_insync")
 
-        self._host = host or os.getenv("IBKR_HOST", "127.0.0.1")
-        self._port = port or int(os.getenv("IBKR_PORT", "4002"))
-        if client_id is None:
-            env_id = os.getenv("IBKR_DATA_CLIENT_ID")
-            if env_id:
-                client_id = int(env_id)
-            else:
-                client_id = int(os.getenv("IBKR_CLIENT_ID", "1")) + 100
-        self._client_id = client_id
+        # Verbindungsparameter kommen ausschließlich aus AppConfig (_apply_env_overrides).
+        # Kein eigener os.getenv-Fallback – siehe feedback_ibkr_env_layering.md.
+        self._host = host or "127.0.0.1"
+        self._port = port or 4002
+        # client_id: main.py reicht immer broker_client_id+100 durch;
+        # None-Fallback 101 gilt nur für direkten Aufruf (Tests/Diagnose via load_config).
+        self._client_id = client_id if client_id is not None else 101
         self._asset_class = (asset_class or "equity").lower()
         self._contract_cfg = dict(contract_cfg or {})
         # Futures/Crypto haben 24h bzw. Overnight-Sessions – RTH-Fenster
@@ -151,13 +148,9 @@ class IBKRDataProvider(DataProvider):
         if self._asset_class in ("futures", "crypto"):
             use_rth = False
         self._use_rth = use_rth
-        self._fetch_timeout_s = float(
-            os.getenv("IBKR_DATA_TIMEOUT_S", fetch_timeout_s)
-        )
-        self._pacing_sleep_s = float(
-            os.getenv("IBKR_DATA_PACING_S", pacing_sleep_s)
-        )
-        self._max_retries = int(os.getenv("IBKR_DATA_MAX_RETRIES", max_retries))
+        self._fetch_timeout_s = float(fetch_timeout_s)
+        self._pacing_sleep_s = float(pacing_sleep_s)
+        self._max_retries = int(max_retries)
 
         self.ib = IB()
         try:

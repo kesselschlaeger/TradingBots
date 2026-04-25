@@ -115,10 +115,15 @@ def _build_data_provider(cfg: AppConfig):
     if cfg.data.provider == "ibkr":
         from data.providers.ibkr_provider import IBKRDataProvider
         strategy_params = cfg.strategy.params or {}
+        data_client_id = (
+            cfg.data.ibkr_data_client_id
+            if cfg.data.ibkr_data_client_id is not None
+            else cfg.broker.ibkr_client_id + 100
+        )
         return IBKRDataProvider(
             host=cfg.broker.ibkr_host,
             port=cfg.broker.ibkr_port,
-            client_id=cfg.broker.ibkr_client_id + 100,
+            client_id=data_client_id,
             use_rth=bool(cfg.data.model_extra.get("ibkr_use_rth", True)),
             asset_class=str(strategy_params.get("asset_class", "equity")),
             contract_cfg=dict(strategy_params),

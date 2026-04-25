@@ -15,7 +15,7 @@ from typing import Optional
 
 from core.logging import get_logger
 from core.models import CloseExecution, OrderRequest, OrderSide, Position
-from execution.port import BrokerPort
+from execution.port import BrokerPort, OrderSubmitError
 
 log = get_logger(__name__)
 
@@ -40,6 +40,15 @@ except ImportError:
 
 _MAX_RETRIES = 3
 _BASE_BACKOFF = 1.0
+
+# Status-Werte, die einen harten Reject signalisieren → OrderSubmitError werfen.
+_REJECT_STATUSES: frozenset[str] = frozenset({"rejected", "canceled", "expired", "suspended"})
+
+# Status-Werte, die als "akzeptiert" gelten → sicherer Rückgabepfad.
+_ACCEPTED_STATUSES: frozenset[str] = frozenset({
+    "new", "accepted", "accepted_for_bidding", "pending_new",
+    "pending_replace", "partially_filled", "filled",
+})
 
 
 def _map_tif(tif: str) -> TimeInForce:
@@ -80,11 +89,13 @@ class AlpacaAdapter(BrokerPort):
     def __init__(self,
                  api_key: Optional[str] = None,
                  secret_key: Optional[str] = None,
-                 paper: bool = True):
+                 paper: bool = True,
+                 bot_id: Optional[str] = None):
         if not ALPACA_AVAILABLE:
             raise RuntimeError("alpaca-py fehlt – pip install alpaca-py")
 
         self.paper = paper
+        self._bot_id: Optional[str] = bot_id.upper() if bot_id else None
         api_key = api_key or os.getenv("APCA_API_KEY_ID")
         secret_key = secret_key or os.getenv("APCA_API_SECRET_KEY")
         if not api_key or not secret_key:
@@ -93,7 +104,8 @@ class AlpacaAdapter(BrokerPort):
             )
         self._client = TradingClient(api_key=api_key, secret_key=secret_key,
                                      paper=paper)
-        log.info("alpaca.connected", mode="PAPER" if paper else "LIVE")
+        log.info("alpaca.connected", mode="PAPER" if paper else "LIVE",
+                 bot_id=self._bot_id)
 
     # ── Order-Execution ─────────────────────────────────────────────
 
@@ -122,10 +134,19 @@ class AlpacaAdapter(BrokerPort):
             order_req = MarketOrderRequest(**kwargs)
 
         resp = await _with_backoff(self._client.submit_order, order_req)
+        status_val = str(getattr(getattr(resp, "status", None), "value", "")).lower()
         log.info("alpaca.order.submitted", symbol=req.symbol,
                  side=req.side.value, qty=req.qty, id=str(resp.id),
                  order_type=order_type, tif=(req.time_in_force or "day"),
-                 status=resp.status.value)
+                 status=status_val)
+
+        if status_val in _REJECT_STATUSES:
+            raise OrderSubmitError(
+                f"Alpaca hat Order für {req.symbol} sofort abgelehnt (status={status_val})",
+                status=status_val,
+                order_id=str(resp.id),
+            )
+
         return str(resp.id)
 
     async def cancel_order(self, order_id: str) -> bool:
@@ -233,6 +254,27 @@ class AlpacaAdapter(BrokerPort):
             for o in orders
         ]
 
+    async def health(self) -> dict:
+        """Probe via get_clock() – schlägt bei Netzwerkfehler fehl."""
+        try:
+            await _with_backoff(self._client.get_clock)
+            return {
+                "connected": True,
+                "session_healthy": True,
+                "last_error_code": None,
+                "last_error_msg": "",
+                "managed_accounts": [],
+            }
+        except Exception as e:  # noqa: BLE001
+            log.warning("alpaca.health_failed", error=str(e))
+            return {
+                "connected": False,
+                "session_healthy": False,
+                "last_error_code": None,
+                "last_error_msg": str(e),
+                "managed_accounts": [],
+            }
+
     async def get_recent_closes(
         self,
         symbols: Optional[list[str]] = None,
@@ -274,6 +316,12 @@ class AlpacaAdapter(BrokerPort):
 
             if sym in out:
                 continue
+
+            # Multi-Bot-Isolation: client_order_id-Prefix muss zum Bot passen.
+            if self._bot_id:
+                coid = str(getattr(o, "client_order_id", "") or "")
+                if coid and not coid.upper().startswith(self._bot_id):
+                    continue
 
             side = str(getattr(getattr(o, "side", None), "value", "")).lower()
             out[sym] = CloseExecution(

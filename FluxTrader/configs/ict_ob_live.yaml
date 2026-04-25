@@ -47,8 +47,8 @@ strategy:
 broker:
   type: ibkr
   paper: true
-  ibkr_client_id: 18
-  ibkr_bot_id: Flux_BOTTI
+  ibkr_client_id: 18             # ICT Equity Bot; eindeutig (Botti=8, ORB=11, OBB=12)
+  ibkr_bot_id: Flux_ICT_EQ       # orderRef-Präfix; korrigiert von Flux_BOTTI (Copy-Paste-Bug)
 
 data:
   provider: ibkr

@@ -14,7 +14,7 @@ from typing import Optional
 
 from core.logging import get_logger
 from core.models import CloseExecution, OrderRequest, OrderSide, Position, Trade
-from execution.port import BrokerPort
+from execution.port import BrokerPort, OrderSubmitError
 
 log = get_logger(__name__)
 
@@ -56,6 +56,7 @@ class PaperAdapter(BrokerPort):
         # PaperOrder.filled_at aus dieser Bar-Zeit statt wall-clock gespeist.
         # Live-Modus l\u00e4sst dies auf None und nutzt utcnow().
         self._sim_clock: Optional[datetime] = None
+        self._reject_symbols: set[str] = set()  # Test-Hook: simulate_reject_for()
 
     # ── Preis-Injection (Backtest ruft dies) ───────────────────────
 
@@ -89,8 +90,23 @@ class PaperAdapter(BrokerPort):
 
     # ── Port-Implementation ────────────────────────────────────────
 
+    async def health(self) -> dict:
+        return {
+            "connected": True,
+            "session_healthy": True,
+            "last_error_code": None,
+            "last_error_msg": "",
+            "managed_accounts": ["DU_PAPER"],
+        }
+
     async def submit_order(self, req: OrderRequest) -> str:
         async with self._lock:
+            if req.symbol in self._reject_symbols:
+                raise OrderSubmitError(
+                    f"PaperAdapter: simulierter Reject für {req.symbol} (Test-Hook)",
+                    status="rejected",
+                    order_id=None,
+                )
             price = self._resolve_price(req)
             if req.side == OrderSide.BUY:
                 filled = price * (1 + self._slippage)
@@ -329,9 +345,18 @@ class PaperAdapter(BrokerPort):
     def trade_log(self) -> list[Trade]:
         return list(self._trade_log)
 
+    def simulate_reject_for(self, symbol: str) -> None:
+        """Test-Hook: nächster submit_order-Aufruf für dieses Symbol wirft OrderSubmitError."""
+        self._reject_symbols.add(symbol.upper())
+
+    def clear_reject_hooks(self) -> None:
+        """Test-Hook: alle simulierten Rejects entfernen."""
+        self._reject_symbols.clear()
+
     def reset(self) -> None:
         self._cash = self._initial
         self._positions.clear()
         self._orders.clear()
         self._market_prices.clear()
         self._trade_log.clear()
+        self._reject_symbols.clear()

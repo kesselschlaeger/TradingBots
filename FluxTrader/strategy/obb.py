@@ -19,6 +19,7 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
+from core.filters import correlation_group
 from core.indicators import rolling_high_low
 from core.logging import get_logger
 from core.models import Bar, FeatureVector, Signal
@@ -43,6 +44,15 @@ OBB_DEFAULT_PARAMS: dict = {
 
     "max_daily_trades": 3,
     "max_concurrent_positions": 10,
+
+    # MIT-Independence: ETF-Cluster verhindern doppelte Exposure (z.B. SPY+QQQ gleichzeitig)
+    "mit_correlation_groups": {
+        "equity_us_large": ["SPY", "QQQ", "IVV", "VOO"],   # US-Large-Cap ETFs
+        "equity_us_tech": ["QQQ", "XLK", "SMH", "SOXX"],   # Tech-Sektor ETFs
+        "equity_us_finance": ["XLF", "KRE", "JPM", "BAC"], # Finanz-Sektor
+        "equity_us_energy": ["XLE", "OIH", "CVX", "XOM"],  # Energie-Sektor
+        "equity_us_health": ["XLV", "IBB", "UNH", "JNJ"],  # Healthcare
+    },
 }
 
 
@@ -157,6 +167,8 @@ class OBBStrategy(BaseStrategy):
 
         qty_hint = self._qty_hint(current_close)
 
+        cfg = self.config
+        groups = cfg.get("mit_correlation_groups", OBB_DEFAULT_PARAMS["mit_correlation_groups"])
         signal = Signal(
             strategy=self.name,
             symbol=symbol,
@@ -173,6 +185,7 @@ class OBBStrategy(BaseStrategy):
                 "qty_hint": qty_hint,
                 "exit_next_open": True,     # TradeManager-Hook
                 "reason": reason,
+                "reserve_group": correlation_group(symbol, groups),  # MIT-Independence
             },
         )
         self._record_status(symbol, "SIGNAL", reason)

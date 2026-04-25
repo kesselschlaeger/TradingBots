@@ -59,8 +59,8 @@ strategy:
 broker:
   type: ibkr
   paper: true
-  ibkr_client_id: 8
-  ibkr_bot_id: Flux_ORB
+  ibkr_client_id: 11             # ORB Bot; korrigiert von 8 (Kollision mit Botti)
+  ibkr_bot_id: Flux_ORB          # orderRef-Präfix für ORB-Bot
   alpaca_data_feed: iex
 
 data:

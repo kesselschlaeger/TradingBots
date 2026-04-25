@@ -97,11 +97,13 @@ class BrokerPort(ABC):
     async def health(self) -> dict:
         """Liefert Gesundheitsstatus der Broker-Session.
 
-        Keys: ``connected`` (bool), ``session_healthy`` (bool),
+        Pflicht-Keys: ``connected`` (bool), ``session_healthy`` (bool),
         ``last_error_code`` (int | None), ``last_error_msg`` (str),
-        ``managed_accounts`` (list[str]). Adapter mit echter Netzwerk-
-        Verbindung überschreiben; der Default gilt für PaperAdapter o. Ä.,
-        die immer als gesund angenommen werden.
+        ``managed_accounts`` (list[str]).
+
+        Jeder Adapter MUSS diese Methode implementieren oder den Default
+        aus der Basisklasse erben. IBKRAdapter, AlpacaAdapter und
+        PaperAdapter überschreiben sie explizit.
         """
         return {
             "connected": True,
@@ -247,7 +249,7 @@ class BrokerPort(ABC):
             return None, None
 
         long_r = {"id": long_id, "symbol": signal.long_symbol,
-                  "side": "long", "qty": qty}
+                  "side": "long", "qty": qty, "fill_price": 0.0, "status": "submitted"}
         short_r = {"id": short_id, "symbol": signal.short_symbol,
-                   "side": "short", "qty": qty}
+                   "side": "short", "qty": qty, "fill_price": 0.0, "status": "submitted"}
         return long_r, short_r

@@ -14,7 +14,6 @@ Order-Lifecycle-Invariante (siehe CLAUDE.md → "Order-Lifecycle"):
 from __future__ import annotations
 
 import asyncio
-import os
 import time as _time
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -79,12 +78,12 @@ class IBKRAdapter(BrokerPort):
         if not IBKR_AVAILABLE:
             raise RuntimeError("ib_insync fehlt – pip install ib_insync")
 
-        self.paper = paper if paper is not None else (
-            os.getenv("IBKR_PAPER", "true").lower() != "false"
-        )
-        self._host = host or os.getenv("IBKR_HOST", "127.0.0.1")
-        self._port = port or int(os.getenv("IBKR_PORT", "4002"))
-        self._client_id = client_id or int(os.getenv("IBKR_CLIENT_ID", "1"))
+        # Verbindungsparameter kommen ausschließlich aus AppConfig (_apply_env_overrides).
+        # Kein eigener os.getenv-Fallback hier – das überschattet bewusst gesetzte Config-Werte.
+        self.paper = paper if paper is not None else True
+        self._host = host or "127.0.0.1"
+        self._port = port or 4002
+        self._client_id = client_id if client_id is not None else 1
         self._bot_id = bot_id.upper()[:8]
         self._order_prefix = order_prefix
         self._order_confirm_timeout_s = float(order_confirm_timeout_s)

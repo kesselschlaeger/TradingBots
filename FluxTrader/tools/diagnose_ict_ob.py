@@ -313,37 +313,42 @@ async def main() -> None:
                         help="Statt IBKR eine lokale CSV-Datei (5M OHLCV) verwenden")
     args = parser.parse_args()
 
-    # Config laden – identisch zu main.py _build_data_provider
+    # Config laden über zentralen Loader (YAML+base.yaml+.env-Override) –
+    # identisch zu main.py _build_data_provider, kein Hardcoding.
     params: dict = {}
     cfg_symbol = "NQ"
     cfg_atr = 14
     cfg_swing = 3
     cfg_disp = 1.25
-    ibkr_host = "192.168.188.93"
-    ibkr_port = 4004
-    ibkr_client_id = 19          # aus broker.ibkr_client_id; +100 für Data-Provider
-    ibkr_timeframe = "5Min"      # aus data.timeframe
+    ibkr_host = "127.0.0.1"
+    ibkr_port = 4002
+    ibkr_client_id = 1
+    ibkr_timeframe = "5Min"
 
-    try:
-        import yaml
-        cfg_path = Path(args.config)
-        if cfg_path.exists():
-            raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
-            strat_params = raw.get("strategy", {}).get("params", {})
-            broker_raw = raw.get("broker", {})
-            data_raw = raw.get("data", {})
-            params = strat_params
-            cfg_symbol = raw.get("strategy", {}).get("symbols", [cfg_symbol])[0]
+    cfg_path = Path(args.config)
+    if cfg_path.exists():
+        try:
+            import sys as _sys
+            _repo_root = str(Path(__file__).parent.parent)
+            if _repo_root not in _sys.path:
+                _sys.path.insert(0, _repo_root)
+            from core.config import load_config
+            app_cfg = load_config(cfg_path)
+            strat_params = app_cfg.strategy.params or {}
+            params = dict(strat_params)
+            cfg_symbol = (app_cfg.strategy.symbols or [cfg_symbol])[0]
             cfg_atr = int(strat_params.get("atr_period", cfg_atr))
             cfg_swing = int(strat_params.get("swing_lookback_4h", cfg_swing))
             cfg_disp = float(strat_params.get("displacement_mult", cfg_disp))
-            ibkr_host = str(broker_raw.get("ibkr_host", ibkr_host))
-            ibkr_port = int(broker_raw.get("ibkr_port", ibkr_port))
-            ibkr_client_id = int(broker_raw.get("ibkr_client_id", ibkr_client_id))
-            ibkr_timeframe = str(data_raw.get("timeframe", ibkr_timeframe))
-            print(f"[Config geladen] {cfg_path}")
-    except Exception as e:
-        print(f"[Warnung] Config nicht geladen: {e}")
+            ibkr_host = str(app_cfg.broker.ibkr_host or "127.0.0.1")
+            ibkr_port = int(app_cfg.broker.ibkr_port)
+            ibkr_client_id = int(app_cfg.broker.ibkr_client_id)
+            ibkr_timeframe = str(app_cfg.data.timeframe)
+            print(f"[Config geladen] {cfg_path}  (host={ibkr_host}:{ibkr_port})")
+        except Exception as e:
+            print(f"[Warnung] Config nicht geladen: {e}")
+    else:
+        print(f"[Warnung] Config-Datei nicht gefunden: {cfg_path} – verwende Defaults")
 
     symbol = (args.symbol or cfg_symbol).upper()
     atr_period = args.atr_period or cfg_atr

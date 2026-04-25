@@ -267,47 +267,83 @@ class PersistentState:
                     await conn.execute(stmt)
 
                 # ── Schritt 2: Spalten-Migrationen (vor Indexes!) ─────────────────────
-                # bot_name-Migration: In bestehenden DBs ohne bot_name würden die Indexes
-                # auf ON trades(bot_name, ...) mit "no such column" fehlschlagen.
-                # ALTER TABLE ADD COLUMN bot_name TEXT NOT NULL DEFAULT '' ist sicher:
-                # bestehende Zeilen erhalten bot_name='', neue schreiben den echten Wert.
-                _bot_name_tables = (
-                    "trades", "equity_snapshots", "positions",
-                    "signals", "anomaly_events",
-                    "account", "cooldowns", "reserved_groups", "bot_heartbeat",
+                # Jede Zeile: (tabelle, spalte, ALTER-TABLE-SQL).
+                # ADD COLUMN mit explizitem DEFAULT ist in SQLite immer sicher;
+                # bestehende Zeilen erhalten den Default-Wert, neue schreiben
+                # den echten Wert. Reihenfolge innerhalb einer Tabelle ist
+                # irrelevant, zwischen Tabellen aber: bot_name muss vor den
+                # Umbenennungen stehen (trades.reason → exit_reason).
+                _col_migrations: tuple[tuple[str, str, str], ...] = (
+                    # bot_name (alle Tabellen) ─────────────────────────────
+                    ("account",         "bot_name", "ALTER TABLE account ADD COLUMN bot_name TEXT NOT NULL DEFAULT ''"),
+                    ("cooldowns",       "bot_name", "ALTER TABLE cooldowns ADD COLUMN bot_name TEXT NOT NULL DEFAULT ''"),
+                    ("reserved_groups", "bot_name", "ALTER TABLE reserved_groups ADD COLUMN bot_name TEXT NOT NULL DEFAULT ''"),
+                    ("trades",          "bot_name", "ALTER TABLE trades ADD COLUMN bot_name TEXT NOT NULL DEFAULT ''"),
+                    ("equity_snapshots","bot_name", "ALTER TABLE equity_snapshots ADD COLUMN bot_name TEXT NOT NULL DEFAULT ''"),
+                    ("positions",       "bot_name", "ALTER TABLE positions ADD COLUMN bot_name TEXT NOT NULL DEFAULT ''"),
+                    ("signals",         "bot_name", "ALTER TABLE signals ADD COLUMN bot_name TEXT NOT NULL DEFAULT ''"),
+                    ("anomaly_events",  "bot_name", "ALTER TABLE anomaly_events ADD COLUMN bot_name TEXT NOT NULL DEFAULT ''"),
+                    ("bot_heartbeat",   "bot_name", "ALTER TABLE bot_heartbeat ADD COLUMN bot_name TEXT NOT NULL DEFAULT ''"),
+                    # created_at ───────────────────────────────────────────
+                    ("trades",          "created_at",          "ALTER TABLE trades ADD COLUMN created_at TEXT NOT NULL DEFAULT ''"),
+                    ("equity_snapshots","created_at",          "ALTER TABLE equity_snapshots ADD COLUMN created_at TEXT NOT NULL DEFAULT ''"),
+                    ("positions",       "created_at",          "ALTER TABLE positions ADD COLUMN created_at TEXT NOT NULL DEFAULT ''"),
+                    ("signals",         "created_at",          "ALTER TABLE signals ADD COLUMN created_at TEXT NOT NULL DEFAULT ''"),
+                    ("anomaly_events",  "created_at",          "ALTER TABLE anomaly_events ADD COLUMN created_at TEXT NOT NULL DEFAULT ''"),
+                    # trades: neue Felder ───────────────────────────────────
+                    ("trades",          "exit_signal",         "ALTER TABLE trades ADD COLUMN exit_signal TEXT"),
+                    ("trades",          "exit_strength",       "ALTER TABLE trades ADD COLUMN exit_strength REAL"),
+                    ("trades",          "exit_features_json",  "ALTER TABLE trades ADD COLUMN exit_features_json TEXT"),
+                    ("trades",          "pnl_pct",             "ALTER TABLE trades ADD COLUMN pnl_pct REAL"),
+                    ("trades",          "signal_strength",     "ALTER TABLE trades ADD COLUMN signal_strength REAL"),
+                    ("trades",          "mit_qty_factor",      "ALTER TABLE trades ADD COLUMN mit_qty_factor REAL"),
+                    ("trades",          "ev_estimate",         "ALTER TABLE trades ADD COLUMN ev_estimate REAL"),
+                    ("trades",          "group_name",          "ALTER TABLE trades ADD COLUMN group_name TEXT"),
+                    ("trades",          "features_json",       "ALTER TABLE trades ADD COLUMN features_json TEXT"),
+                    # positions: neue Felder ────────────────────────────────
+                    ("positions",       "trade_id",            "ALTER TABLE positions ADD COLUMN trade_id INTEGER"),
+                    ("positions",       "unrealized_pnl",      "ALTER TABLE positions ADD COLUMN unrealized_pnl REAL"),
+                    ("positions",       "unrealized_pnl_pct",  "ALTER TABLE positions ADD COLUMN unrealized_pnl_pct REAL"),
+                    ("positions",       "held_minutes",        "ALTER TABLE positions ADD COLUMN held_minutes INTEGER"),
+                    ("positions",       "entry_signal",        "ALTER TABLE positions ADD COLUMN entry_signal TEXT"),
+                    ("positions",       "entry_reason",        "ALTER TABLE positions ADD COLUMN entry_reason TEXT"),
+                    ("positions",       "broker_order_id",     "ALTER TABLE positions ADD COLUMN broker_order_id TEXT"),
+                    ("positions",       "order_reference",     "ALTER TABLE positions ADD COLUMN order_reference TEXT"),
+                    # signals: neue Felder ─────────────────────────────────
+                    ("signals",         "mit_passed",          "ALTER TABLE signals ADD COLUMN mit_passed INTEGER"),
+                    ("signals",         "ev_value",            "ALTER TABLE signals ADD COLUMN ev_value REAL"),
+                    ("signals",         "features_json",       "ALTER TABLE signals ADD COLUMN features_json TEXT"),
+                    # anomaly_events: neue Felder ──────────────────────────
+                    ("anomaly_events",  "context_json",        "ALTER TABLE anomaly_events ADD COLUMN context_json TEXT"),
+                    # bot_heartbeat: neue Felder ───────────────────────────
+                    ("bot_heartbeat",   "last_watchdog_ts",    "ALTER TABLE bot_heartbeat ADD COLUMN last_watchdog_ts TEXT"),
+                    ("bot_heartbeat",   "broker_adapter",      "ALTER TABLE bot_heartbeat ADD COLUMN broker_adapter TEXT NOT NULL DEFAULT ''"),
+                    ("bot_heartbeat",   "circuit_breaker",     "ALTER TABLE bot_heartbeat ADD COLUMN circuit_breaker INTEGER NOT NULL DEFAULT 0"),
+                    ("bot_heartbeat",   "symbol_status_json",  "ALTER TABLE bot_heartbeat ADD COLUMN symbol_status_json TEXT NOT NULL DEFAULT '{}'"),
+                    ("bot_heartbeat",   "last_bar_lag_ms",     "ALTER TABLE bot_heartbeat ADD COLUMN last_bar_lag_ms REAL"),
+                    ("bot_heartbeat",   "broker_connected",    "ALTER TABLE bot_heartbeat ADD COLUMN broker_connected INTEGER NOT NULL DEFAULT 0"),
+                    # equity_snapshots: neue Felder ───────────────────────
+                    ("equity_snapshots","cash",                "ALTER TABLE equity_snapshots ADD COLUMN cash REAL NOT NULL DEFAULT 0.0"),
+                    ("equity_snapshots","drawdown_pct",        "ALTER TABLE equity_snapshots ADD COLUMN drawdown_pct REAL NOT NULL DEFAULT 0.0"),
+                    ("equity_snapshots","peak_equity",         "ALTER TABLE equity_snapshots ADD COLUMN peak_equity REAL NOT NULL DEFAULT 0.0"),
+                    ("equity_snapshots","unrealized_pnl_total","ALTER TABLE equity_snapshots ADD COLUMN unrealized_pnl_total REAL NOT NULL DEFAULT 0.0"),
                 )
-                for tbl in _bot_name_tables:
-                    tbl_cur = await conn.execute(f"PRAGMA table_info({tbl})")
-                    tbl_cols = {row[1] for row in await tbl_cur.fetchall()}
-                    if "bot_name" not in tbl_cols:
-                        await conn.execute(
-                            f"ALTER TABLE {tbl} ADD COLUMN bot_name TEXT NOT NULL DEFAULT ''"
-                        )
-                        log.info("state.migrate_bot_name", table=tbl)
 
-                # trades: Spalten-Umbenennungen / Ergänzungen
-                cur = await conn.execute("PRAGMA table_info(trades)")
-                cols = {row[1] for row in await cur.fetchall()}
-                if "reason" in cols and "exit_reason" not in cols:
-                    await conn.execute(
-                        "ALTER TABLE trades RENAME COLUMN reason TO exit_reason"
-                    )
-                if "exit_signal" not in cols:
-                    await conn.execute("ALTER TABLE trades ADD COLUMN exit_signal TEXT")
-                if "exit_strength" not in cols:
-                    await conn.execute("ALTER TABLE trades ADD COLUMN exit_strength REAL")
-                if "exit_features_json" not in cols:
-                    await conn.execute(
-                        "ALTER TABLE trades ADD COLUMN exit_features_json TEXT"
-                    )
+                # Alle existierenden Spalten pro Tabelle einmal lesen
+                _tbl_cols: dict[str, set[str]] = {}
+                for tbl, col, sql in _col_migrations:
+                    if tbl not in _tbl_cols:
+                        cur = await conn.execute(f"PRAGMA table_info({tbl})")
+                        _tbl_cols[tbl] = {row[1] for row in await cur.fetchall()}
+                    if col not in _tbl_cols[tbl]:
+                        await conn.execute(sql)
+                        _tbl_cols[tbl].add(col)
+                        log.info("state.migrate_column", table=tbl, column=col)
 
-                # bot_heartbeat: last_watchdog_ts
-                hb_cur = await conn.execute("PRAGMA table_info(bot_heartbeat)")
-                hb_cols = {row[1] for row in await hb_cur.fetchall()}
-                if "last_watchdog_ts" not in hb_cols:
-                    await conn.execute(
-                        "ALTER TABLE bot_heartbeat ADD COLUMN last_watchdog_ts TEXT"
-                    )
+                # trades: reason → exit_reason Umbenennung (nur wenn nötig)
+                if "reason" in _tbl_cols.get("trades", set()) and "exit_reason" not in _tbl_cols.get("trades", set()):
+                    await conn.execute("ALTER TABLE trades RENAME COLUMN reason TO exit_reason")
+                    log.info("state.migrate_column", table="trades", column="exit_reason(rename)")
 
                 # ── Schritt 3: Indexes (jetzt existieren alle referenzierten Spalten) ──
                 for stmt in _INDEX_STATEMENTS:

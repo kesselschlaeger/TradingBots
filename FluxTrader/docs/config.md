@@ -111,6 +111,22 @@ Der Config-Loader konvertiert diese automatisch in `datetime.time`-Objekte.
 
 ---
 
+## IBKR-Connection-Auflösungsreihenfolge
+
+Für IBKR-Verbindungsdaten gilt **genau eine** Auflösungsschicht: `core/config._apply_env_overrides`.
+Adapter und Provider haben **keinen** eigenen `os.getenv`-Fallback.
+
+```
+YAML-spezifisch (z.B. botti.yaml)
+  > YAML-base (configs/base.yaml)
+  > .env (IBKR_HOST, IBKR_PORT, IBKR_CLIENT_ID, IBKR_PAPER, IBKR_DATA_CLIENT_ID)
+  > Pydantic-Default (127.0.0.1 : 4002)
+```
+
+Leerer String `ibkr_host: ""` in YAML wird wie `None` behandelt → ENV-Fallback greift.
+
+---
+
 ## Umgebungsvariablen
 
 Alle Credentials kommen idealerweise aus `.env` (nie in YAML committen):
@@ -119,11 +135,15 @@ Alle Credentials kommen idealerweise aus `.env` (nie in YAML committen):
 |---|---|
 | `APCA_API_KEY_ID` | Alpaca API Key |
 | `APCA_API_SECRET_KEY` | Alpaca Secret |
-| `IBKR_HOST` | TWS/Gateway Host (überschreibt YAML) |
-| `IBKR_PORT` | TWS/Gateway Port |
-| `IBKR_CLIENT_ID` | Client-ID |
+| `IBKR_HOST` | TWS/Gateway Host (überschreibt YAML; Bsp: `192.168.1.100`) |
+| `IBKR_PORT` | TWS/Gateway Port (`4001` Live, `4002` Paper) |
+| `IBKR_CLIENT_ID` | Client-ID für den Broker-Adapter |
+| `IBKR_PAPER` | Paper-Mode: `true`/`false`/`1`/`0`/`yes`/`no` |
+| `IBKR_DATA_CLIENT_ID` | Client-ID für den Data-Provider (default: `IBKR_CLIENT_ID + 100`) |
 | `TELEGRAM_BOT_TOKEN` | Telegram Bot-Token |
 | `TELEGRAM_CHAT_ID` | Telegram Chat-ID |
+
+Bot-ID/Client-ID-Zuordnung → siehe [docs/bot_registry.md](bot_registry.md).
 
 ---
 

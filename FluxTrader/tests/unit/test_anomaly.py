@@ -58,6 +58,7 @@ def _mk_signal(symbol: str = "AAPL", direction: int = 1) -> Signal:
 @pytest.mark.asyncio
 async def test_duplicate_trade_guard_warns(tmp_path):
     cfg = _mk_cfg()
+    cfg.anomaly.duplicate_hard_block = False  # test the warn-only path explicitly
     det = AnomalyDetector(_mk_notifier(), _mk_state(tmp_path), cfg)
     sig = _mk_signal()
     events1 = await det.check_signal(sig)
