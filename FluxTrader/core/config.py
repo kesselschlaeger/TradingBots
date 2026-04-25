@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import logging as _logging
+import os
+import re
 from datetime import time
 from pathlib import Path
 from typing import Any, Literal, Optional
@@ -18,7 +20,7 @@ _cfg_log = _logging.getLogger(__name__)
 class BrokerConfig(BaseModel):
     model_config = ConfigDict(extra="allow")
 
-    type: Literal["paper", "alpaca", "ibkr"] = "paper"
+    type: Literal["paper", "alpaca", "ibkr", "bybit"] = "paper"
     paper: bool = True
     # Alpaca
     alpaca_data_feed: Literal["iex", "sip"] = "iex"                     # iex = 15-Min-delayed; sip = Real-Time (bezahlpflichtig)
@@ -41,7 +43,7 @@ class BrokerConfig(BaseModel):
 class DataConfig(BaseModel):
     model_config = ConfigDict(extra="allow")
 
-    provider: Literal["alpaca", "yfinance", "ibkr"] = "alpaca"
+    provider: Literal["alpaca", "yfinance", "ibkr", "bybit"] = "alpaca"
     timeframe: str = "5Min"
     lookback_days: int = 5
     ibkr_data_client_id: Optional[int] = None  # Override für IBKR-Data-Provider-Client-ID; None = broker.ibkr_client_id+100
@@ -191,6 +193,7 @@ class AppConfig(BaseModel):
         default_factory=BacktestExportConfig,
     )
     execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
+    broker_params: dict[str, Any] = Field(default_factory=dict)  # Broker-spezifische Verbindungsparameter (z.B. Bybit api_key/api_secret/category)
     bot_name: str = ""              # YAML-Instanzname, z.B. "botti_nq_live"; leer → aus strategy+broker abgeleitet
     initial_capital: float = 10_000.0
     currency: str = "USD"
@@ -215,6 +218,9 @@ class EnvSettings(BaseSettings):
     IBKR_CLIENT_ID: Optional[int] = None
     IBKR_PAPER: Optional[str] = None            # "true"/"false"/"1"/"0"/"yes"/"no"
     IBKR_DATA_CLIENT_ID: Optional[int] = None   # Override für Data-Provider-Client-ID; None = broker_client_id+100
+
+    BYBIT_API_KEY: Optional[str] = None          # Bybit API-Schlüssel (überschreibt broker_params.api_key aus YAML)
+    BYBIT_API_SECRET: Optional[str] = None       # Bybit API-Secret (überschreibt broker_params.api_secret aus YAML)
 
     TELEGRAM_TOKEN: Optional[str] = Field(
         default=None,
@@ -310,6 +316,37 @@ def _apply_env_overrides(raw: dict, env: EnvSettings) -> dict:
         data["ibkr_data_client_id"] = env.IBKR_DATA_CLIENT_ID
         out["data"] = data
 
+    # Bybit: ENV überschreibt broker_params nur wenn YAML-Wert fehlt oder ein ${...}-Platzhalter ist
+    bp = dict(out.get("broker_params", {}))
+    if env.BYBIT_API_KEY and not _is_real_value(bp.get("api_key")):
+        bp["api_key"] = env.BYBIT_API_KEY
+    if env.BYBIT_API_SECRET and not _is_real_value(bp.get("api_secret")):
+        bp["api_secret"] = env.BYBIT_API_SECRET
+    if bp:
+        out["broker_params"] = bp
+
+    return out
+
+
+def _is_real_value(v: Any) -> bool:
+    """True wenn v ein echter (nicht-leerer, nicht-Platzhalter) String ist."""
+    if not v or not isinstance(v, str):
+        return False
+    return not re.match(r"^\$\{[^}]+\}$", v.strip())
+
+
+def _resolve_env_refs(d: dict) -> dict:
+    """Ersetzt ${VAR_NAME}-Platzhalter in String-Werten rekursiv durch Umgebungsvariablen."""
+    out: dict = {}
+    for k, v in d.items():
+        if isinstance(v, str):
+            out[k] = re.sub(r"\$\{([^}]+)\}", lambda m: os.environ.get(m.group(1), m.group(0)), v)
+        elif isinstance(v, dict):
+            out[k] = _resolve_env_refs(v)
+        elif isinstance(v, list):
+            out[k] = [_resolve_env_refs(i) if isinstance(i, dict) else i for i in v]
+        else:
+            out[k] = v
     return out
 
 
@@ -332,6 +369,7 @@ def load_config(config_path: str | Path) -> AppConfig:
         raw = _deep_merge(base, raw)
 
     raw = _apply_env_overrides(raw, load_env())
+    raw = _resolve_env_refs(raw)      # ${VAR}-Platzhalter in YAML durch echte Env-Werte ersetzen
     raw = _coerce_time_fields(raw)
     return AppConfig.model_validate(raw)
 
