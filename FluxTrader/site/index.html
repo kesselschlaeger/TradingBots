@@ -504,6 +504,45 @@
     </span>
   </a>
   
+    <nav class="md-nav" aria-label="Schnellstart">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#live-bot-paper-dashboard" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Live-Bot (Paper) + Dashboard
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#backtest" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Backtest
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#walk-forward-optimization" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Walk-Forward-Optimization
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
 </li>
       
     </ul>
@@ -1007,6 +1046,45 @@
     </span>
   </a>
   
+    <nav class="md-nav" aria-label="Schnellstart">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#live-bot-paper-dashboard" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Live-Bot (Paper) + Dashboard
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#backtest" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Backtest
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#walk-forward-optimization" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Walk-Forward-Optimization
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
 </li>
       
     </ul>
@@ -1061,11 +1139,15 @@
 </tr>
 <tr>
 <td><strong>Persistenz</strong></td>
-<td>SQLite via aiosqlite (Tages-PnL, Cooldowns, Gruppen-Reservierungen)</td>
+<td>Zentrale SQLite-DB (eine Datei für alle Bots): Trade-Historie + MIT-Qty-Factor + EV-Estimates, Equity-Snapshots, Positionen, Signale, Anomalies, Daily-Aggregates</td>
+</tr>
+<tr>
+<td><strong>Dashboard</strong></td>
+<td>FastAPI + Read-Only DB-Reader: <code>/api/trades</code>, <code>/api/positions</code>, <code>/api/equity</code>, <code>/api/strategies/status</code></td>
 </tr>
 <tr>
 <td><strong>Alerts</strong></td>
-<td>Telegram Push-Notifications</td>
+<td>Telegram Push-Notifications + Anomaly-Detection (Duplicate, Oversized, PnL-Spike, Connectivity, Signal-Flood)</td>
 </tr>
 <tr>
 <td><strong>Config</strong></td>
@@ -1147,33 +1229,59 @@
 </span><span id="__span-0-30"><a id="__codelineno-0-30" name="__codelineno-0-30" href="#__codelineno-0-30"></a>├── live/
 </span><span id="__span-0-31"><a id="__codelineno-0-31" name="__codelineno-0-31" href="#__codelineno-0-31"></a>│   ├── runner.py          # LiveRunner (asyncio)
 </span><span id="__span-0-32"><a id="__codelineno-0-32" name="__codelineno-0-32" href="#__codelineno-0-32"></a>│   ├── scheduler.py       # APScheduler CronTrigger
-</span><span id="__span-0-33"><a id="__codelineno-0-33" name="__codelineno-0-33" href="#__codelineno-0-33"></a>│   ├── state.py           # PersistentState (aiosqlite)
-</span><span id="__span-0-34"><a id="__codelineno-0-34" name="__codelineno-0-34" href="#__codelineno-0-34"></a>│   ├── notifier.py        # TelegramNotifier
-</span><span id="__span-0-35"><a id="__codelineno-0-35" name="__codelineno-0-35" href="#__codelineno-0-35"></a>│   └── scanner.py         # Premarket Gap-Scanner
-</span><span id="__span-0-36"><a id="__codelineno-0-36" name="__codelineno-0-36" href="#__codelineno-0-36"></a>├── configs/
-</span><span id="__span-0-37"><a id="__codelineno-0-37" name="__codelineno-0-37" href="#__codelineno-0-37"></a>│   ├── base.yaml
-</span><span id="__span-0-38"><a id="__codelineno-0-38" name="__codelineno-0-38" href="#__codelineno-0-38"></a>│   ├── orb_live.yaml
-</span><span id="__span-0-39"><a id="__codelineno-0-39" name="__codelineno-0-39" href="#__codelineno-0-39"></a>│   ├── orb_paper.yaml
-</span><span id="__span-0-40"><a id="__codelineno-0-40" name="__codelineno-0-40" href="#__codelineno-0-40"></a>│   ├── orb_backtest.yaml
-</span><span id="__span-0-41"><a id="__codelineno-0-41" name="__codelineno-0-41" href="#__codelineno-0-41"></a>│   ├── obb_live.yaml
-</span><span id="__span-0-42"><a id="__codelineno-0-42" name="__codelineno-0-42" href="#__codelineno-0-42"></a>│   └── obb_backtest.yaml
-</span><span id="__span-0-43"><a id="__codelineno-0-43" name="__codelineno-0-43" href="#__codelineno-0-43"></a>├── tests/
-</span><span id="__span-0-44"><a id="__codelineno-0-44" name="__codelineno-0-44" href="#__codelineno-0-44"></a>│   ├── conftest.py
-</span><span id="__span-0-45"><a id="__codelineno-0-45" name="__codelineno-0-45" href="#__codelineno-0-45"></a>│   ├── unit/
-</span><span id="__span-0-46"><a id="__codelineno-0-46" name="__codelineno-0-46" href="#__codelineno-0-46"></a>│   └── integration/
-</span><span id="__span-0-47"><a id="__codelineno-0-47" name="__codelineno-0-47" href="#__codelineno-0-47"></a>├── main.py                # CLI-Entrypoint
-</span><span id="__span-0-48"><a id="__codelineno-0-48" name="__codelineno-0-48" href="#__codelineno-0-48"></a>└── pyproject.toml
+</span><span id="__span-0-33"><a id="__codelineno-0-33" name="__codelineno-0-33" href="#__codelineno-0-33"></a>│   ├── state.py           # PersistentState (zentrale SQLite: Single-Source-of-Truth)
+</span><span id="__span-0-34"><a id="__codelineno-0-34" name="__codelineno-0-34" href="#__codelineno-0-34"></a>│   ├── health.py          # HealthState + HTTP Health-Server
+</span><span id="__span-0-35"><a id="__codelineno-0-35" name="__codelineno-0-35" href="#__codelineno-0-35"></a>│   ├── metrics.py         # Prometheus-Metriken
+</span><span id="__span-0-36"><a id="__codelineno-0-36" name="__codelineno-0-36" href="#__codelineno-0-36"></a>│   ├── anomaly.py         # AnomalyDetector (5 Checks + DB-Persistenz)
+</span><span id="__span-0-37"><a id="__codelineno-0-37" name="__codelineno-0-37" href="#__codelineno-0-37"></a>│   ├── notifier.py        # TelegramNotifier
+</span><span id="__span-0-38"><a id="__codelineno-0-38" name="__codelineno-0-38" href="#__codelineno-0-38"></a>│   └── scanner.py         # Premarket Gap-Scanner
+</span><span id="__span-0-39"><a id="__codelineno-0-39" name="__codelineno-0-39" href="#__codelineno-0-39"></a>├── dashboard/
+</span><span id="__span-0-40"><a id="__codelineno-0-40" name="__codelineno-0-40" href="#__codelineno-0-40"></a>│   ├── app.py             # FastAPI-App
+</span><span id="__span-0-41"><a id="__codelineno-0-41" name="__codelineno-0-41" href="#__codelineno-0-41"></a>│   ├── routers/
+</span><span id="__span-0-42"><a id="__codelineno-0-42" name="__codelineno-0-42" href="#__codelineno-0-42"></a>│   │   ├── trades.py      # GET /api/trades (mit mit_qty_factor, ev_estimate)
+</span><span id="__span-0-43"><a id="__codelineno-0-43" name="__codelineno-0-43" href="#__codelineno-0-43"></a>│   │   ├── portfolio.py   # GET /api/positions, /api/equity, /api/portfolio
+</span><span id="__span-0-44"><a id="__codelineno-0-44" name="__codelineno-0-44" href="#__codelineno-0-44"></a>│   │   ├── strategies.py  # GET /api/strategies/status
+</span><span id="__span-0-45"><a id="__codelineno-0-45" name="__codelineno-0-45" href="#__codelineno-0-45"></a>│   │   └── wfo.py         # GET /api/wfo/* (Walk-Forward-Optimizer)
+</span><span id="__span-0-46"><a id="__codelineno-0-46" name="__codelineno-0-46" href="#__codelineno-0-46"></a>│   └── static/
+</span><span id="__span-0-47"><a id="__codelineno-0-47" name="__codelineno-0-47" href="#__codelineno-0-47"></a>│       ├── index.html
+</span><span id="__span-0-48"><a id="__codelineno-0-48" name="__codelineno-0-48" href="#__codelineno-0-48"></a>│       ├── style.css
+</span><span id="__span-0-49"><a id="__codelineno-0-49" name="__codelineno-0-49" href="#__codelineno-0-49"></a>│       └── dashboard.js
+</span><span id="__span-0-50"><a id="__codelineno-0-50" name="__codelineno-0-50" href="#__codelineno-0-50"></a>├── configs/
+</span><span id="__span-0-51"><a id="__codelineno-0-51" name="__codelineno-0-51" href="#__codelineno-0-51"></a>│   ├── base.yaml
+</span><span id="__span-0-52"><a id="__codelineno-0-52" name="__codelineno-0-52" href="#__codelineno-0-52"></a>│   ├── orb_live.yaml
+</span><span id="__span-0-53"><a id="__codelineno-0-53" name="__codelineno-0-53" href="#__codelineno-0-53"></a>│   ├── orb_paper.yaml
+</span><span id="__span-0-54"><a id="__codelineno-0-54" name="__codelineno-0-54" href="#__codelineno-0-54"></a>│   ├── orb_backtest.yaml
+</span><span id="__span-0-55"><a id="__codelineno-0-55" name="__codelineno-0-55" href="#__codelineno-0-55"></a>│   ├── obb_live.yaml
+</span><span id="__span-0-56"><a id="__codelineno-0-56" name="__codelineno-0-56" href="#__codelineno-0-56"></a>│   └── obb_backtest.yaml
+</span><span id="__span-0-57"><a id="__codelineno-0-57" name="__codelineno-0-57" href="#__codelineno-0-57"></a>├── tests/
+</span><span id="__span-0-58"><a id="__codelineno-0-58" name="__codelineno-0-58" href="#__codelineno-0-58"></a>│   ├── conftest.py
+</span><span id="__span-0-59"><a id="__codelineno-0-59" name="__codelineno-0-59" href="#__codelineno-0-59"></a>│   ├── unit/
+</span><span id="__span-0-60"><a id="__codelineno-0-60" name="__codelineno-0-60" href="#__codelineno-0-60"></a>│   └── integration/
+</span><span id="__span-0-61"><a id="__codelineno-0-61" name="__codelineno-0-61" href="#__codelineno-0-61"></a>├── main.py                # CLI-Entrypoint
+</span><span id="__span-0-62"><a id="__codelineno-0-62" name="__codelineno-0-62" href="#__codelineno-0-62"></a>└── pyproject.toml
 </span></code></pre></div>
 <hr />
 <h2 id="schnellstart">Schnellstart<a class="headerlink" href="#schnellstart" title="Permanent link">&para;</a></h2>
-<div class="language-bash highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>pip<span class="w"> </span>install<span class="w"> </span>-e<span class="w"> </span><span class="s2">&quot;.[alpaca,live,backtest]&quot;</span>
-</span><span id="__span-1-2"><a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a>cp<span class="w"> </span>.env.example<span class="w"> </span>.env<span class="w">   </span><span class="c1"># API-Keys eintragen</span>
+<h3 id="live-bot-paper-dashboard">Live-Bot (Paper) + Dashboard<a class="headerlink" href="#live-bot-paper-dashboard" title="Permanent link">&para;</a></h3>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="c1"># Terminal 1: Paper-Trading</span>
+</span><span id="__span-1-2"><a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a>python<span class="w"> </span>main.py<span class="w"> </span>paper<span class="w"> </span>--config<span class="w"> </span>configs/orb_paper.yaml
 </span><span id="__span-1-3"><a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a>
-</span><span id="__span-1-4"><a id="__codelineno-1-4" name="__codelineno-1-4" href="#__codelineno-1-4"></a><span class="c1"># Paper-Trading</span>
-</span><span id="__span-1-5"><a id="__codelineno-1-5" name="__codelineno-1-5" href="#__codelineno-1-5"></a>python<span class="w"> </span>main.py<span class="w"> </span>paper<span class="w"> </span>--config<span class="w"> </span>configs/orb_paper.yaml
+</span><span id="__span-1-4"><a id="__codelineno-1-4" name="__codelineno-1-4" href="#__codelineno-1-4"></a><span class="c1"># Terminal 2: Dashboard</span>
+</span><span id="__span-1-5"><a id="__codelineno-1-5" name="__codelineno-1-5" href="#__codelineno-1-5"></a>python<span class="w"> </span>main.py<span class="w"> </span>dashboard<span class="w"> </span>--config<span class="w"> </span>configs/orb_paper.yaml<span class="w"> </span>--port<span class="w"> </span><span class="m">8080</span>
 </span><span id="__span-1-6"><a id="__codelineno-1-6" name="__codelineno-1-6" href="#__codelineno-1-6"></a>
-</span><span id="__span-1-7"><a id="__codelineno-1-7" name="__codelineno-1-7" href="#__codelineno-1-7"></a><span class="c1"># Backtest</span>
-</span><span id="__span-1-8"><a id="__codelineno-1-8" name="__codelineno-1-8" href="#__codelineno-1-8"></a>python<span class="w"> </span>main.py<span class="w"> </span>backtest<span class="w"> </span>--config<span class="w"> </span>configs/orb_backtest.yaml
+</span><span id="__span-1-7"><a id="__codelineno-1-7" name="__codelineno-1-7" href="#__codelineno-1-7"></a><span class="c1"># Browser: http://localhost:8080</span>
+</span></code></pre></div>
+<p>Der Bot schreibt automatisch in die zentrale SQLite-DB:
+- <code>trades</code> mit MIT-Qty-Factor + EV-Estimates
+- <code>equity_snapshots</code> (Hochfrequenz-Equity-Kurve)
+- <code>positions</code> (Live-Positionen mit Unrealized-PnL)
+- <code>anomaly_events</code> (Erkannte Anomalien)
+- <code>daily</code> (Tägliche Aggregates)</p>
+<h3 id="backtest">Backtest<a class="headerlink" href="#backtest" title="Permanent link">&para;</a></h3>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a>python<span class="w"> </span>main.py<span class="w"> </span>backtest<span class="w"> </span>--config<span class="w"> </span>configs/orb_backtest.yaml
+</span></code></pre></div>
+<h3 id="walk-forward-optimization">Walk-Forward-Optimization<a class="headerlink" href="#walk-forward-optimization" title="Permanent link">&para;</a></h3>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-3-1"><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a>python<span class="w"> </span>main.py<span class="w"> </span>wfo<span class="w"> </span>--config<span class="w"> </span>configs/orb_backtest.yaml
 </span></code></pre></div>
 <p>Detaillierte Anleitung: <a href="quickstart/">Quickstart</a></p>
 

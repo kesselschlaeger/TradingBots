@@ -1,0 +1,87 @@
+# ICT Order Block MTF Confluence – Crypto Live / Paper (Bybit Spot)
+# Bybit-Version von ict_ob_crypto_live.yaml; IBKR ersetzt durch Bybit-Adapter.
+# Für Paper-Trading: testnet: true; für Live: testnet: false + echte API-Keys in .env
+mode: live
+
+strategy:
+  name: ict_ob_mtf
+  symbols: ["BTCUSDT", "ETHUSDT"]    # Bybit Spot-Symbole (Quote: USDT)
+  risk_pct: 0.005                    # 0.5 % Equity-Risiko je Trade
+  params:
+    asset_class: crypto              # Routing-Schalter (equity | futures | crypto)
+
+    min_bars: 800                    # Mindest-5m-Bars für MTF-Aggregation
+    max_bars_buffer: 2000            # Rolling-Buffer in BaseStrategy
+
+    # OB-Detection
+    atr_period: 14                   # ATR-Fenster (Perioden)
+    displacement_mult: 1.8           # Displacement-Schwelle als ATR-Vielfaches
+    swing_lookback_4h: 3             # Swing-Fenster für 4H-Order-Block-Erkennung
+    swing_lookback_1h: 5             # Swing-Fenster für 1H-Struktur
+
+    # Entry
+    ob_entry_mode: standard          # aggressive | standard | conservative
+    min_confluence_score: 0.75       # Mindest-Confluence-Score (0..1) für Eintritt
+    min_signal_strength: 0.75        # Signal-Strength-Schwelle (0..1)
+
+    # Risk
+    stop_ob_mult: 0.75               # SL = 0.75 × OB-Range außerhalb der Zone
+    profit_target_r: 2.0             # Ziel: 1:2 Risk-Reward-Ratio
+    risk_per_trade: 0.005            # 0.5 % Equity-Risiko je Trade (redundant zu risk_pct)
+
+    # Crypto-spezifisch
+    crypto_quote_currency: USDT      # Notierungs-Währung für Bybit Spot
+    crypto_session_open: null        # null = 24/7-Markt, kein Session-Gate
+    crypto_entry_cutoff: null        # null = kein Zeitfenster-Cutoff
+
+    # Filter – crypto: kein externer Benchmark, kein Gap, kein VIX
+    use_trend_filter: false          # kein Referenz-Asset für Trendbestätigung
+    trend_reference_asset: null      # null = kein Trend-Block
+    use_gap_filter: false            # 24/7-Markt: Gap-Konzept nicht anwendbar
+    vix_threshold: null              # VIX-Overlay deaktiviert
+
+    allow_shorts: false              # Spot: kein Leerverkauf möglich
+    market_open: null                # keine Equity-Session-Grenzen
+    market_close: null
+
+    # MIT Independence Guard (optional)
+    use_mit_independence_guard: false
+    mit_correlation_groups: {}
+
+broker:
+  type: bybit                        # Bybit-Adapter statt IBKR/Alpaca
+
+broker_params:
+  api_key: "${BYBIT_API_KEY}"        # Env-Variable BYBIT_API_KEY; nie Plaintext einchecken
+  api_secret: "${BYBIT_API_SECRET}"  # Env-Variable BYBIT_API_SECRET
+  testnet: true                      # true = Bybit Testnet (Paper); false = Mainnet (Live)
+  category: spot                     # spot = Crypto-Spot; linear = USDT-Perpetuals
+  default_leverage: 1                # Hebel; 1 = kein Margin (nur bei category=linear relevant)
+
+data:
+  provider: bybit                    # Bybit-Datenprovider (Kline-API)
+  timeframe: "5Min"
+  lookback_days: 30                  # 24/7 Crypto: mehr Bars je Zeitfenster nötig
+
+notifications:
+  enabled: true
+  bot_name: FLUX_ICT_OB_BYBIT
+
+monitoring:
+  watchdog_interval_s: 15            # Heartbeat-Takt des LiveRunners in die DB (Sekunden)
+  bar_timeframe_seconds: 300         # Erwartetes Bar-Intervall in Sekunden (5Min=300)
+  provider_poll_interval_s: 30       # Polling-Intervall des Datenproviders (Sekunden)
+  stale_tolerance_s: 60              # Zusätzliche Toleranz oberhalb der Bar-Intervallzeit
+  grace_period_s: 90                 # Anlaufpuffer nach Session-Start, bevor Alerts feuern
+  reminder_interval_min: 30          # Erinnerungs-Intervall für aktive Health-Alerts
+  trade_window_phases:
+    premarket_alert: false           # Kein Alert vor Marktöffnung (24/7-Markt)
+    after_cutoff_alert: false        # Kein Alert nach Entry-Cutoff
+    after_eod_alert: false           # Kein Alert nach EOD-Close
+
+alerts:
+  routing:
+    channel_default: ["trade_opened", "trade_closed", "daily_summary"]   # Standardkanal für Trade-Events
+    channel_health: ["process_dead", "data_stale", "circuit_break"]       # Health-Kanal für kritische Events
+    channel_readiness: []                                                  # Leer = Readiness-Kanal deaktiviert
+  dedup_window_s: 300                # Unterdrückt identische Alert-Texte in diesem Zeitfenster (s)

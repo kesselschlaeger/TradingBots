@@ -149,29 +149,39 @@ def rolling_high_low(
     return hi, lo
 
 
-def opening_range_levels(day_df: pd.DataFrame,
-                         orb_minutes: int = 30) -> tuple[float, float, float]:
-    """Berechne (orb_high, orb_low, orb_range) aus Intraday-Bars eines Tages.
+def opening_range_levels(
+    day_df: pd.DataFrame,
+    orb_minutes: int = 15,
+) -> tuple[float, float, float]:
+    """Berechnet High, Low und Range der Opening-Range-Box.
 
-    Erwartet 5m-Bars mit DatetimeIndex. Gibt (0,0,0) zurück, wenn zu wenig
-    Bars im ORB-Fenster.
+    Erwartet einen DataFrame mit ET-Index, der nur Bars eines einzigen
+    Handelstages enthält. Filtert auf Bars zwischen 09:30 und
+    (09:30 + orb_minutes) ET.
+
+    Returns:
+        (or_high, or_low, or_range) – alle 0.0 wenn keine OR-Bars gefunden.
     """
-    if day_df.empty or len(day_df) < 2:
+    if day_df is None or day_df.empty:
         return 0.0, 0.0, 0.0
 
     idx_et = _ensure_et_index(day_df)
+    orb_start_min = 9 * 60 + 30
+    orb_end_min = orb_start_min + orb_minutes
     hhmm = idx_et.hour * 60 + idx_et.minute
-    orb_start = 9 * 60 + 30
-    orb_end = orb_start + orb_minutes
+    mask = np.asarray((hhmm >= orb_start_min) & (hhmm < orb_end_min), dtype=bool)
+    or_bars = day_df[mask]
 
-    mask = np.asarray((hhmm >= orb_start) & (hhmm < orb_end), dtype=bool)
-    orb_bars = day_df[mask]
-    if len(orb_bars) < 2:
+    if or_bars.empty:
         return 0.0, 0.0, 0.0
 
-    hi = float(orb_bars["High"].max())
-    lo = float(orb_bars["Low"].min())
-    return hi, lo, hi - lo
+    or_high = float(or_bars["High"].max())
+    or_low = float(or_bars["Low"].min())
+    or_range = or_high - or_low
+    if or_range <= 0:
+        return 0.0, 0.0, 0.0
+
+    return or_high, or_low, or_range
 
 
 def orb_volume_ratio(
@@ -597,17 +607,17 @@ def detect_reversal_pattern(
     lo = float(last["Low"])
     c = float(last["Close"])
     body = abs(c - o)
+    candle_range = h - lo
     upper_shadow = h - max(o, c)
     lower_shadow = min(o, c) - lo
 
     if direction == "long":
-        # Hammer: langer unterer Schatten, kleiner oberer Schatten
-        hammer_ok = (
-            lower_shadow >= hammer_shadow_ratio * body
-            and upper_shadow <= hammer_upper_shadow_ratio * body
-            and lower_shadow > 0
-        )
-        if hammer_ok:
+        # Hammer: langer unterer Schatten, kurzer oberer Schatten relativ zur candle_range
+        if (
+            candle_range > 0
+            and lower_shadow >= hammer_shadow_ratio * body
+            and upper_shadow <= hammer_upper_shadow_ratio * candle_range
+        ):
             return "hammer"
         # Bullish Engulfing: braucht 2 Bars
         if len(df) < 2:
@@ -616,26 +626,23 @@ def detect_reversal_pattern(
         po = float(prev["Open"])
         pc = float(prev["Close"])
         prev_body = abs(pc - po)
-        cur_bullish = c > o
-        prev_bearish = pc < po
         if (
-            cur_bullish
-            and prev_bearish
+            c > o
+            and pc < po
             and body >= engulfing_min_body_ratio * prev_body
-            and c > po
-            and o < pc
+            and o <= pc
+            and c >= po
         ):
             return "bullish_engulfing"
         return None
 
     if direction == "short":
-        # Inverted Hammer: langer oberer Schatten, kleiner unterer Schatten
-        inv_hammer_ok = (
-            upper_shadow >= hammer_shadow_ratio * body
-            and lower_shadow <= hammer_upper_shadow_ratio * body
-            and upper_shadow > 0
-        )
-        if inv_hammer_ok:
+        # Inverted Hammer: langer oberer Schatten, kurzer unterer Schatten relativ zur candle_range
+        if (
+            candle_range > 0
+            and upper_shadow >= hammer_shadow_ratio * body
+            and lower_shadow <= hammer_upper_shadow_ratio * candle_range
+        ):
             return "inverted_hammer"
         # Bearish Engulfing
         if len(df) < 2:
@@ -644,14 +651,12 @@ def detect_reversal_pattern(
         po = float(prev["Open"])
         pc = float(prev["Close"])
         prev_body = abs(pc - po)
-        cur_bearish = c < o
-        prev_bullish = pc > po
         if (
-            cur_bearish
-            and prev_bullish
+            c < o
+            and pc > po
             and body >= engulfing_min_body_ratio * prev_body
-            and c < po
-            and o > pc
+            and o >= pc
+            and c <= po
         ):
             return "bearish_engulfing"
         return None

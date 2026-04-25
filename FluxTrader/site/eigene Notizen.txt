@@ -1,0 +1,127 @@
+Powershell, Umgebung setzen:
+.\tools\Enter-FluxEnv.ps1
+
+Installation von Paketen in der Umgebung
+c:/!/privat/TradingBots/FluxTrader/.venv/Scripts/python.exe -m pip install <paket>
+
+
+##ORB Bot
+CronTrigger bedeutet nicht "einmalig starten"
+Der Scheduler läuft kontinuierlich im Hintergrund. Die Zeiten bedeuten:
+
+09:00 ET: Der Job triggert jeden Tag um 09:00 Uhr (Mo-Fr)
+09:30 ET: Der Job triggert jeden Tag um 09:30 Uhr (Mo-Fr)
+etc.
+Es ist kein "einmal starten um 09:00, dann läuft alles". Der Bot muss laufen, damit der Scheduler die Zeiten überwachen kann.
+
+Lass mich die Config ansehen, um konkrete Beispiele zu zeigen:
+
+Read c:\!\privat\TradingBots\FluxTrader\configs\orb_paper.yaml
+Gut, die Config hat eod_close_time: "15:27" gespeichert. Lassen Sie mich dir den kompletten Tagesablauf zeigen:
+
+Tagesablauf eines Live-Bots (Montag-Freitag):
+
+Bot startet (irgendwann)
+  ↓
+Scheduler läuft im Hintergrund und wartet
+  ↓
+09:00 Uhr ET → PREMARKET_SCAN triggert
+  ├─ PremarketScanner sucht Gap-Kandidaten
+  ├─ Filtert nach min_gap=2%, max_gap=10%, min_vol=50k
+  ├─ Sendet Telegram-Nachricht mit Gaps
+  ├─ Optional: Dynamisch neue Symbole zur Watchlist hinzufügen
+  └─ Loop läuft weiter, verarbeitet normale 5-Min-Bars
+  ↓
+09:30 Uhr ET → MARKET_OPEN triggert
+  ├─ strategy.reset()  ← Indikatoren zurücksetzen (EMA, ATR, etc.)
+  ├─ TradeManager.reset()  ← Trailing-Stops zurücksetzen
+  ├─ ctx.clear_reserved_groups()  ← Reservierungen für neue Trades löschen
+  ├─ State.reset_day()  ← Tagesumsatz zurücksetzen
+  └─ JETZT können Trades geöffnet werden
+  ↓
+09:30 - 15:27 Uhr → Hauptschleife (_bar_loop)
+  ├─ DataProvider schickt kontinuierlich 5-Min-Bars
+  ├─ Strategie.on_bar(bar) verarbeitet jeden Bar
+  ├─ Signale erzeugen → Broker führt aus
+  ├─ TradeManager tracked Trailing Stops + Target
+  └─ Repeat alle 5 Minuten
+  ↓
+15:27 Uhr ET → EOD_CLOSE triggert
+  ├─ Broker.close_all_positions()  ← ALLE Trades flattenen
+  ├─ Falls Fehler: Error-Nachricht an Telegram
+  └─ Keine neuen Trades mehr möglich
+  ↓
+16:05 Uhr ET → POST_MARKET triggert
+  ├─ Holt finales Account-Update
+  ├─ Berechnet Daily PnL
+  ├─ Sendet Summary an Telegram:
+  │  "📊 Daily Summary
+  │   PnL: +$250 | Trades: 12 | Equity: $10,250"
+  └─ Bereit für nächsten Tag
+  ↓
+16:05 - 09:00 nächsten Tag → Nichts passiert
+  ├─ Bot läuft noch, aber keine neuen Bars/Signale
+  ├─ Scheduler wartet auf 09:00 Uhr
+  └─ (Bei Closing-Glocke ist US-Börse zu)
+  ↓
+[Nächster Morgen, 09:00 ET → Wiederholen]
+Wie lange muss der Bot laufen?
+Für Paper Trading:
+
+Mindestens von 09:00 ET bis 16:05 ET (etwa 7 Stunden)
+Praktisch besser: Starten um 8:30 ET, läuft bis 16:10 ET
+Oder: Dauerlauf über Nacht (z.B. als systemd-Service/Docker-Container)
+Für Live Trading:
+
+24/7 am besten – damit der Scheduler keine Pause hat
+Bei Neustart: Dauert ~5 Min für state.init() + Account-Check
+Wichtig: Der Bot prüft NICHT nur um 09:00/09:30
+Der Scheduler triggert die Callbacks, aber die Hauptschleife _bar_loop() läuft kontinuierlich:
+
+
+async def _bar_loop(self):
+    async for bar in self.data.stream_bars(self.symbols, "5Min"):
+        await self._process_bar(bar)  # ← Alle 5 Min!
+        # (oder Polling fallback alle 30 Sekunden)
+Also:
+
+09:00 ET: Premarket Scan (1x)
+09:30 ET: reset() + ready for trades (1x)
+09:35, 09:40, 09:45, ...: Bars kommen alle 5 Min → Strategie evaluiert (viele Male!)
+15:27 ET: close_all_positions() (1x)
+16:05 ET: Daily Summary (1x)
+Macht Sinn so?
+
+
+alle Dateien
+
+Alle Dateien erstellt. Hier die Übersicht der letzten Runde (diese Session):
+
+Datei	Zusammenfassung
+data/providers/yfinance_provider.py	yfinance-Wrapper für Backtest-Daten, Intervall-Mapping, UTC-Index
+data/providers/__init__.py	Lazy-Loader für Provider-Adapter
+data/__init__.py	Re-Export DataProvider
+backtest/slippage.py	SlippageModel (fixed+bps) + CommissionModel
+backtest/engine.py	BarByBarEngine mit TradeManager-Exits, EOD, exit_next_open
+backtest/report.py	Tearsheet: Sharpe, Sortino, MaxDD, CAGR, Win-Rate, Expectancy
+backtest/__init__.py	Re-Exports
+live/state.py	aiosqlite PersistentState (daily/cooldowns/groups)
+live/notifier.py	Telegram-Alerts via httpx mit graceful Degradation
+live/scanner.py	Premarket Gap-Scanner via Alpaca Snapshot-API
+live/scheduler.py	APScheduler CronTrigger (premarket/open/eod/postmarket)
+live/runner.py	Async LiveRunner: Scheduler → Stream → Strategy → Broker
+live/__init__.py	Re-Exports
+tests/conftest.py	Fixtures: Context, PaperAdapter, OHLCV-Generatoren
+tests/unit/test_indicators.py	ATR, EMA, VWAP, Rolling H/L, ORB Levels
+tests/unit/test_risk.py	Position Sizing, Kelly, DD-Scaling, MIT-WinProb
+tests/unit/test_orb_strategy.py	ORB-Init, Signal-Gates, Reset
+tests/integration/test_backtest_engine.py	Engine-Lauf, Tearsheet, PaperAdapter-Isolation
+configs/base.yaml	Shared Defaults
+configs/orb_live.yaml	ORB Live mit MIT-Overlay + VIX
+configs/orb_paper.yaml	ORB Paper-Trading
+configs/orb_backtest.yaml	ORB Backtest (yfinance)
+configs/obb_live.yaml	OBB Live (Daily Bars)
+configs/obb_backtest.yaml	OBB Backtest (yfinance)
+main.py	CLI: live, paper, backtest mit Factory-Pattern
+pyproject.toml	Dependencies, optional extras, pytest/ruff config
+.env.example	Alpaca/IBKR/Telegram Platzhalter

@@ -985,6 +985,100 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#walk-forward-optimierung-wfo" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Walk-Forward-Optimierung (WFO)
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Walk-Forward-Optimierung (WFO)">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#konzept" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Konzept
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#1-yaml-config-vorbereiten" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        1 · YAML-Config vorbereiten
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#2-cli-aufruf" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2 · CLI-Aufruf
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#3-programmatischer-aufruf" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        3 · Programmatischer Aufruf
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#4-eigene-backtest_func-custom-engine" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4 · Eigene backtest_func (Custom-Engine)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#5-ergebnis-objekte" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5 · Ergebnis-Objekte
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#6-unit-test-pattern" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6 · Unit-Test-Pattern
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#spy-vix-fur-den-backtest" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -1179,6 +1273,100 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#walk-forward-optimierung-wfo" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Walk-Forward-Optimierung (WFO)
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Walk-Forward-Optimierung (WFO)">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#konzept" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Konzept
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#1-yaml-config-vorbereiten" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        1 · YAML-Config vorbereiten
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#2-cli-aufruf" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2 · CLI-Aufruf
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#3-programmatischer-aufruf" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        3 · Programmatischer Aufruf
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#4-eigene-backtest_func-custom-engine" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4 · Eigene backtest_func (Custom-Engine)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#5-ergebnis-objekte" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5 · Ergebnis-Objekte
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#6-unit-test-pattern" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6 · Unit-Test-Pattern
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#spy-vix-fur-den-backtest" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -1213,7 +1401,7 @@ kein separater Backtest-Code, kein Drift.</p>
 <pre class="mermaid"><code>graph LR
     YF[YFinanceDataProvider] --&gt;|dict[sym, DataFrame]| E
     CTX[MarketContextService] --&gt; E
-    E[BarByBarEngine] --&gt;|on_bar| STR[ORBStrategy / OBBStrategy]
+    E[BarByBarEngine] --&gt;|on_bar| STR[ORBStrategy / OBBStrategy / BottiStrategy]
     STR --&gt;|Signal| E
     E --&gt;|execute_signal| PA[PaperAdapter]
     PA --&gt;|fills| TL[Trade-Log]
@@ -1230,7 +1418,14 @@ kein separater Backtest-Code, kein Drift.</p>
 <div class="admonition warning">
 <p class="admonition-title">yfinance Intraday-Limit</p>
 <p>yfinance liefert Intraday-Bars nur für die letzten ~60 Tage.
-Für längere Backtests Daily-Bars nutzen (<code>timeframe: "1Day"</code>).</p>
+Für längere Backtests Daily-Bars nutzen (<code>timeframe: "1D"</code>).</p>
+</div>
+<div class="admonition tip">
+<p class="admonition-title">Botti (Daily-Strategie)</p>
+<p>Botti läuft auf <code>timeframe: "1D"</code>. yfinance liefert Daily-Bars ohne
+Zeitlimit — <code>lookback_days: 365</code> oder mehr problemlos möglich.
+Der MTF-Proxy arbeitet ausschließlich auf diesen Daily-Bars, kein
+separater Intraday-Download nötig.</p>
 </div>
 <h3 id="alpaca-historical-data">Alpaca Historical Data<a class="headerlink" href="#alpaca-historical-data" title="Permanent link">&para;</a></h3>
 <div class="language-yaml highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="nt">data</span><span class="p">:</span>
@@ -1240,8 +1435,20 @@ Für längere Backtests Daily-Bars nutzen (<code>timeframe: "1Day"</code>).</p>
 </span></code></pre></div>
 <p>Alpaca liefert bis zu 2 Jahre historische 1-Min-Bars (kostenpflichtig ab SIP).</p>
 <h2 id="backtest-starten">Backtest starten<a class="headerlink" href="#backtest-starten" title="Permanent link">&para;</a></h2>
-<div class="language-bash highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a>python<span class="w"> </span>main.py<span class="w"> </span>backtest<span class="w"> </span>--config<span class="w"> </span>configs/orb_backtest.yaml
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="c1"># ORB (5-Min Intraday)</span>
+</span><span id="__span-2-2"><a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a>python<span class="w"> </span>main.py<span class="w"> </span>backtest<span class="w"> </span>--config<span class="w"> </span>configs/orb_backtest.yaml
+</span><span id="__span-2-3"><a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a>
+</span><span id="__span-2-4"><a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a><span class="c1"># Botti Daily – mit MTF-Filter (empfohlen)</span>
+</span><span id="__span-2-5"><a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a><span class="nv">PYTHONIOENCODING</span><span class="o">=</span>utf-8<span class="w"> </span>python<span class="w"> </span>main.py<span class="w"> </span>backtest<span class="w"> </span>--config<span class="w"> </span>configs/botti_backtest_mtf.yaml
+</span><span id="__span-2-6"><a id="__codelineno-2-6" name="__codelineno-2-6" href="#__codelineno-2-6"></a>
+</span><span id="__span-2-7"><a id="__codelineno-2-7" name="__codelineno-2-7" href="#__codelineno-2-7"></a><span class="c1"># Botti Daily – Baseline ohne MTF (Vergleich)</span>
+</span><span id="__span-2-8"><a id="__codelineno-2-8" name="__codelineno-2-8" href="#__codelineno-2-8"></a><span class="nv">PYTHONIOENCODING</span><span class="o">=</span>utf-8<span class="w"> </span>python<span class="w"> </span>main.py<span class="w"> </span>backtest<span class="w"> </span>--config<span class="w"> </span>configs/botti_backtest_nomtf.yaml
 </span></code></pre></div>
+<div class="admonition note">
+<p class="admonition-title">Windows-Konsole</p>
+<p><code>PYTHONIOENCODING=utf-8</code> ist auf Windows nötig, wenn das Tearsheet
+Unicode-Zeichen (Pfeile, Sonderzeichen) enthält.</p>
+</div>
 <h2 id="slippage-commission">Slippage &amp; Commission<a class="headerlink" href="#slippage-commission" title="Permanent link">&para;</a></h2>
 <p>Configurable im Code (nicht in YAML):</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-3-1"><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">backtest.engine</span><span class="w"> </span><span class="kn">import</span> <span class="n">BacktestConfig</span>
@@ -1362,17 +1569,172 @@ Timeframe-Auflösung unrealistisch ist), gewinnt der SL (worst-case).</p>
 </span><span id="__span-6-32"><a id="__codelineno-6-32" name="__codelineno-6-32" href="#__codelineno-6-32"></a>
 </span><span id="__span-6-33"><a id="__codelineno-6-33" name="__codelineno-6-33" href="#__codelineno-6-33"></a><span class="n">asyncio</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">main</span><span class="p">())</span>
 </span></code></pre></div>
+<hr />
+<h2 id="walk-forward-optimierung-wfo">Walk-Forward-Optimierung (WFO)<a class="headerlink" href="#walk-forward-optimierung-wfo" title="Permanent link">&para;</a></h2>
+<p>WFO verhindert Overfitting: Parameter werden auf In-Sample-Daten (IS) optimiert
+und sofort auf Out-of-Sample-Daten (OOS) validiert. Nur der kombinierte
+OOS-Track zählt.</p>
+<h3 id="konzept">Konzept<a class="headerlink" href="#konzept" title="Permanent link">&para;</a></h3>
+<div class="language-text highlight"><pre><span></span><code><span id="__span-7-1"><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a>|── IS (120 Tage) ──|─ OOS (30 Tage) ─|
+</span><span id="__span-7-2"><a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a>                    |── IS ──|─ OOS ─|           ← nächstes Fenster (Step: 20 Tage)
+</span><span id="__span-7-3"><a id="__codelineno-7-3" name="__codelineno-7-3" href="#__codelineno-7-3"></a>                             |── IS ──|─ OOS ─|  ← ...
+</span></code></pre></div>
+<h3 id="1-yaml-config-vorbereiten">1 · YAML-Config vorbereiten<a class="headerlink" href="#1-yaml-config-vorbereiten" title="Permanent link">&para;</a></h3>
+<p>Ins Config-YAML einen <code>wfo:</code>-Block einfügen:</p>
+<div class="language-yaml highlight"><pre><span></span><code><span id="__span-8-1"><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a><span class="c1"># configs/orb_backtest.yaml</span>
+</span><span id="__span-8-2"><a id="__codelineno-8-2" name="__codelineno-8-2" href="#__codelineno-8-2"></a><span class="nt">data</span><span class="p">:</span>
+</span><span id="__span-8-3"><a id="__codelineno-8-3" name="__codelineno-8-3" href="#__codelineno-8-3"></a><span class="w">  </span><span class="nt">provider</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">alpaca</span>
+</span><span id="__span-8-4"><a id="__codelineno-8-4" name="__codelineno-8-4" href="#__codelineno-8-4"></a><span class="w">  </span><span class="nt">timeframe</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;5Min&quot;</span>
+</span><span id="__span-8-5"><a id="__codelineno-8-5" name="__codelineno-8-5" href="#__codelineno-8-5"></a><span class="w">  </span><span class="nt">lookback_days</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">470</span><span class="w">   </span><span class="c1"># genug Daten für mehrere Fenster</span>
+</span><span id="__span-8-6"><a id="__codelineno-8-6" name="__codelineno-8-6" href="#__codelineno-8-6"></a>
+</span><span id="__span-8-7"><a id="__codelineno-8-7" name="__codelineno-8-7" href="#__codelineno-8-7"></a><span class="nt">wfo</span><span class="p">:</span>
+</span><span id="__span-8-8"><a id="__codelineno-8-8" name="__codelineno-8-8" href="#__codelineno-8-8"></a><span class="w">  </span><span class="nt">is_days</span><span class="p">:</span><span class="w">       </span><span class="l l-Scalar l-Scalar-Plain">120</span>
+</span><span id="__span-8-9"><a id="__codelineno-8-9" name="__codelineno-8-9" href="#__codelineno-8-9"></a><span class="w">  </span><span class="nt">oos_days</span><span class="p">:</span><span class="w">       </span><span class="l l-Scalar l-Scalar-Plain">30</span>
+</span><span id="__span-8-10"><a id="__codelineno-8-10" name="__codelineno-8-10" href="#__codelineno-8-10"></a><span class="w">  </span><span class="nt">step_days</span><span class="p">:</span><span class="w">      </span><span class="l l-Scalar l-Scalar-Plain">20</span>
+</span><span id="__span-8-11"><a id="__codelineno-8-11" name="__codelineno-8-11" href="#__codelineno-8-11"></a><span class="w">  </span><span class="nt">metric</span><span class="p">:</span><span class="w">         </span><span class="l l-Scalar l-Scalar-Plain">sharpe</span><span class="w">   </span><span class="c1"># oder: cagr_pct, profit_factor</span>
+</span><span id="__span-8-12"><a id="__codelineno-8-12" name="__codelineno-8-12" href="#__codelineno-8-12"></a><span class="w">  </span><span class="nt">min_trades_is</span><span class="p">:</span><span class="w">  </span><span class="l l-Scalar l-Scalar-Plain">20</span><span class="w">       </span><span class="c1"># IS-Combos mit weniger Trades werden ignoriert</span>
+</span><span id="__span-8-13"><a id="__codelineno-8-13" name="__codelineno-8-13" href="#__codelineno-8-13"></a><span class="w">  </span><span class="nt">n_workers</span><span class="p">:</span><span class="w">       </span><span class="l l-Scalar l-Scalar-Plain">0</span><span class="w">       </span><span class="c1"># 0 = auto (CPU-1), 1 = sequentiell</span>
+</span><span id="__span-8-14"><a id="__codelineno-8-14" name="__codelineno-8-14" href="#__codelineno-8-14"></a><span class="w">  </span><span class="nt">param_grid</span><span class="p">:</span>
+</span><span id="__span-8-15"><a id="__codelineno-8-15" name="__codelineno-8-15" href="#__codelineno-8-15"></a><span class="w">    </span><span class="nt">profit_target_r</span><span class="p">:</span><span class="w">     </span><span class="p p-Indicator">[</span><span class="nv">1.5</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">2.0</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">3.0</span><span class="p p-Indicator">]</span>
+</span><span id="__span-8-16"><a id="__codelineno-8-16" name="__codelineno-8-16" href="#__codelineno-8-16"></a><span class="w">    </span><span class="nt">stop_loss_r</span><span class="p">:</span><span class="w">         </span><span class="p p-Indicator">[</span><span class="nv">0.75</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">1.0</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">1.25</span><span class="p p-Indicator">]</span>
+</span><span id="__span-8-17"><a id="__codelineno-8-17" name="__codelineno-8-17" href="#__codelineno-8-17"></a><span class="w">    </span><span class="nt">volume_multiplier</span><span class="p">:</span><span class="w">   </span><span class="p p-Indicator">[</span><span class="nv">1.0</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">1.3</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">1.5</span><span class="p p-Indicator">]</span>
+</span><span id="__span-8-18"><a id="__codelineno-8-18" name="__codelineno-8-18" href="#__codelineno-8-18"></a><span class="w">    </span><span class="nt">min_signal_strength</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">0.15</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">0.20</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">0.30</span><span class="p p-Indicator">]</span>
+</span></code></pre></div>
+<p><code>param_grid</code>-Keys überschreiben <code>strategy.params</code> je Kombination.
+Alle anderen Werte aus dem Config-Block bleiben erhalten.</p>
+<h3 id="2-cli-aufruf">2 · CLI-Aufruf<a class="headerlink" href="#2-cli-aufruf" title="Permanent link">&para;</a></h3>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-9-1"><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a>python<span class="w"> </span>main.py<span class="w"> </span>wfo<span class="w"> </span>--config<span class="w"> </span>configs/orb_backtest.yaml
+</span></code></pre></div>
+<p>Keine weiteren Flags nötig – alle WFO-Parameter kommen aus dem YAML.
+<code>--help</code> funktioniert ohne laufenden Event-Loop.</p>
+<h3 id="3-programmatischer-aufruf">3 · Programmatischer Aufruf<a class="headerlink" href="#3-programmatischer-aufruf" title="Permanent link">&para;</a></h3>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-10-1"><a id="__codelineno-10-1" name="__codelineno-10-1" href="#__codelineno-10-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">backtest.wfo</span><span class="w"> </span><span class="kn">import</span> <span class="n">WalkForwardOptimizer</span><span class="p">,</span> <span class="n">run_flux_backtest</span>
+</span><span id="__span-10-2"><a id="__codelineno-10-2" name="__codelineno-10-2" href="#__codelineno-10-2"></a><span class="kn">from</span><span class="w"> </span><span class="nn">core.config</span><span class="w"> </span><span class="kn">import</span> <span class="n">load_config</span>
+</span><span id="__span-10-3"><a id="__codelineno-10-3" name="__codelineno-10-3" href="#__codelineno-10-3"></a>
+</span><span id="__span-10-4"><a id="__codelineno-10-4" name="__codelineno-10-4" href="#__codelineno-10-4"></a><span class="n">cfg</span> <span class="o">=</span> <span class="n">load_config</span><span class="p">(</span><span class="s2">&quot;configs/orb_backtest.yaml&quot;</span><span class="p">)</span>
+</span><span id="__span-10-5"><a id="__codelineno-10-5" name="__codelineno-10-5" href="#__codelineno-10-5"></a><span class="n">wfo_raw</span> <span class="o">=</span> <span class="n">cfg</span><span class="o">.</span><span class="n">model_extra</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;wfo&quot;</span><span class="p">,</span> <span class="p">{})</span>
+</span><span id="__span-10-6"><a id="__codelineno-10-6" name="__codelineno-10-6" href="#__codelineno-10-6"></a>
+</span><span id="__span-10-7"><a id="__codelineno-10-7" name="__codelineno-10-7" href="#__codelineno-10-7"></a><span class="n">wfo</span> <span class="o">=</span> <span class="n">WalkForwardOptimizer</span><span class="p">(</span>
+</span><span id="__span-10-8"><a id="__codelineno-10-8" name="__codelineno-10-8" href="#__codelineno-10-8"></a>    <span class="n">data_dict</span><span class="o">=</span><span class="n">data</span><span class="p">,</span>          <span class="c1"># dict[str, pd.DataFrame] – OHLCV je Symbol</span>
+</span><span id="__span-10-9"><a id="__codelineno-10-9" name="__codelineno-10-9" href="#__codelineno-10-9"></a>    <span class="n">vix_series</span><span class="o">=</span><span class="n">vix</span><span class="p">,</span>          <span class="c1"># Optional[pd.Series] Tages-VIX</span>
+</span><span id="__span-10-10"><a id="__codelineno-10-10" name="__codelineno-10-10" href="#__codelineno-10-10"></a>    <span class="n">base_cfg</span><span class="o">=</span><span class="n">cfg</span><span class="p">,</span>
+</span><span id="__span-10-11"><a id="__codelineno-10-11" name="__codelineno-10-11" href="#__codelineno-10-11"></a>    <span class="n">param_grid</span><span class="o">=</span><span class="n">wfo_raw</span><span class="p">[</span><span class="s2">&quot;param_grid&quot;</span><span class="p">],</span>
+</span><span id="__span-10-12"><a id="__codelineno-10-12" name="__codelineno-10-12" href="#__codelineno-10-12"></a>    <span class="n">backtest_func</span><span class="o">=</span><span class="n">run_flux_backtest</span><span class="p">,</span>   <span class="c1"># Standard-Adapter auf BarByBarEngine</span>
+</span><span id="__span-10-13"><a id="__codelineno-10-13" name="__codelineno-10-13" href="#__codelineno-10-13"></a>    <span class="n">is_days</span><span class="o">=</span><span class="n">wfo_raw</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;is_days&quot;</span><span class="p">,</span> <span class="mi">120</span><span class="p">),</span>
+</span><span id="__span-10-14"><a id="__codelineno-10-14" name="__codelineno-10-14" href="#__codelineno-10-14"></a>    <span class="n">oos_days</span><span class="o">=</span><span class="n">wfo_raw</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;oos_days&quot;</span><span class="p">,</span> <span class="mi">30</span><span class="p">),</span>
+</span><span id="__span-10-15"><a id="__codelineno-10-15" name="__codelineno-10-15" href="#__codelineno-10-15"></a>    <span class="n">step_days</span><span class="o">=</span><span class="n">wfo_raw</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;step_days&quot;</span><span class="p">,</span> <span class="mi">20</span><span class="p">),</span>
+</span><span id="__span-10-16"><a id="__codelineno-10-16" name="__codelineno-10-16" href="#__codelineno-10-16"></a>    <span class="n">metric</span><span class="o">=</span><span class="n">wfo_raw</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;metric&quot;</span><span class="p">,</span> <span class="s2">&quot;sharpe&quot;</span><span class="p">),</span>
+</span><span id="__span-10-17"><a id="__codelineno-10-17" name="__codelineno-10-17" href="#__codelineno-10-17"></a>    <span class="n">min_trades_is</span><span class="o">=</span><span class="n">wfo_raw</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;min_trades_is&quot;</span><span class="p">,</span> <span class="mi">20</span><span class="p">),</span>
+</span><span id="__span-10-18"><a id="__codelineno-10-18" name="__codelineno-10-18" href="#__codelineno-10-18"></a>    <span class="n">spy_df</span><span class="o">=</span><span class="n">spy_df</span><span class="p">,</span>
+</span><span id="__span-10-19"><a id="__codelineno-10-19" name="__codelineno-10-19" href="#__codelineno-10-19"></a><span class="p">)</span>
+</span><span id="__span-10-20"><a id="__codelineno-10-20" name="__codelineno-10-20" href="#__codelineno-10-20"></a><span class="n">windows</span> <span class="o">=</span> <span class="n">wfo</span><span class="o">.</span><span class="n">run</span><span class="p">()</span>
+</span><span id="__span-10-21"><a id="__codelineno-10-21" name="__codelineno-10-21" href="#__codelineno-10-21"></a>
+</span><span id="__span-10-22"><a id="__codelineno-10-22" name="__codelineno-10-22" href="#__codelineno-10-22"></a><span class="c1"># Ergebnisse auswerten</span>
+</span><span id="__span-10-23"><a id="__codelineno-10-23" name="__codelineno-10-23" href="#__codelineno-10-23"></a><span class="nb">print</span><span class="p">(</span><span class="n">wfo</span><span class="o">.</span><span class="n">summary_frame</span><span class="p">()</span><span class="o">.</span><span class="n">to_string</span><span class="p">(</span><span class="n">index</span><span class="o">=</span><span class="kc">False</span><span class="p">))</span>
+</span><span id="__span-10-24"><a id="__codelineno-10-24" name="__codelineno-10-24" href="#__codelineno-10-24"></a><span class="nb">print</span><span class="p">(</span><span class="n">wfo</span><span class="o">.</span><span class="n">stability_report</span><span class="p">())</span>
+</span><span id="__span-10-25"><a id="__codelineno-10-25" name="__codelineno-10-25" href="#__codelineno-10-25"></a>
+</span><span id="__span-10-26"><a id="__codelineno-10-26" name="__codelineno-10-26" href="#__codelineno-10-26"></a><span class="n">combined</span> <span class="o">=</span> <span class="n">wfo</span><span class="o">.</span><span class="n">combined_oos_equity</span><span class="p">()</span>
+</span><span id="__span-10-27"><a id="__codelineno-10-27" name="__codelineno-10-27" href="#__codelineno-10-27"></a><span class="n">total_return</span> <span class="o">=</span> <span class="p">(</span><span class="n">combined</span><span class="o">.</span><span class="n">iloc</span><span class="p">[</span><span class="o">-</span><span class="mi">1</span><span class="p">]</span> <span class="o">/</span> <span class="n">combined</span><span class="o">.</span><span class="n">iloc</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">-</span> <span class="mi">1</span><span class="p">)</span> <span class="o">*</span> <span class="mi">100</span>
+</span><span id="__span-10-28"><a id="__codelineno-10-28" name="__codelineno-10-28" href="#__codelineno-10-28"></a><span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Kombinierte OOS-Rendite: </span><span class="si">{</span><span class="n">total_return</span><span class="si">:</span><span class="s2">+.2f</span><span class="si">}</span><span class="s2">%&quot;</span><span class="p">)</span>
+</span></code></pre></div>
+<h3 id="4-eigene-backtest_func-custom-engine">4 · Eigene backtest_func (Custom-Engine)<a class="headerlink" href="#4-eigene-backtest_func-custom-engine" title="Permanent link">&para;</a></h3>
+<p><code>backtest_func</code> muss diese Signatur haben:</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-11-1"><a id="__codelineno-11-1" name="__codelineno-11-1" href="#__codelineno-11-1"></a><span class="k">def</span><span class="w"> </span><span class="nf">my_func</span><span class="p">(</span>
+</span><span id="__span-11-2"><a id="__codelineno-11-2" name="__codelineno-11-2" href="#__codelineno-11-2"></a>    <span class="n">data</span><span class="p">:</span>        <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">pd</span><span class="o">.</span><span class="n">DataFrame</span><span class="p">],</span>
+</span><span id="__span-11-3"><a id="__codelineno-11-3" name="__codelineno-11-3" href="#__codelineno-11-3"></a>    <span class="n">vix</span><span class="p">:</span>         <span class="n">pd</span><span class="o">.</span><span class="n">Series</span> <span class="o">|</span> <span class="kc">None</span><span class="p">,</span>
+</span><span id="__span-11-4"><a id="__codelineno-11-4" name="__codelineno-11-4" href="#__codelineno-11-4"></a>    <span class="n">cfg</span><span class="p">:</span>         <span class="n">AppConfig</span><span class="p">,</span>
+</span><span id="__span-11-5"><a id="__codelineno-11-5" name="__codelineno-11-5" href="#__codelineno-11-5"></a>    <span class="o">*</span><span class="p">,</span>
+</span><span id="__span-11-6"><a id="__codelineno-11-6" name="__codelineno-11-6" href="#__codelineno-11-6"></a>    <span class="n">vix3m_series</span><span class="p">:</span> <span class="n">pd</span><span class="o">.</span><span class="n">Series</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+</span><span id="__span-11-7"><a id="__codelineno-11-7" name="__codelineno-11-7" href="#__codelineno-11-7"></a>    <span class="n">spy_df</span><span class="p">:</span>       <span class="n">pd</span><span class="o">.</span><span class="n">DataFrame</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+</span><span id="__span-11-8"><a id="__codelineno-11-8" name="__codelineno-11-8" href="#__codelineno-11-8"></a>    <span class="n">silent</span><span class="p">:</span>       <span class="nb">bool</span> <span class="o">=</span> <span class="kc">True</span><span class="p">,</span>
+</span><span id="__span-11-9"><a id="__codelineno-11-9" name="__codelineno-11-9" href="#__codelineno-11-9"></a><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">:</span>
+</span><span id="__span-11-10"><a id="__codelineno-11-10" name="__codelineno-11-10" href="#__codelineno-11-10"></a>    <span class="o">...</span>
+</span><span id="__span-11-11"><a id="__codelineno-11-11" name="__codelineno-11-11" href="#__codelineno-11-11"></a>    <span class="k">return</span> <span class="p">{</span>
+</span><span id="__span-11-12"><a id="__codelineno-11-12" name="__codelineno-11-12" href="#__codelineno-11-12"></a>        <span class="s2">&quot;sharpe&quot;</span><span class="p">:</span>           <span class="nb">float</span><span class="p">,</span>
+</span><span id="__span-11-13"><a id="__codelineno-11-13" name="__codelineno-11-13" href="#__codelineno-11-13"></a>        <span class="s2">&quot;cagr_pct&quot;</span><span class="p">:</span>         <span class="nb">float</span><span class="p">,</span>
+</span><span id="__span-11-14"><a id="__codelineno-11-14" name="__codelineno-11-14" href="#__codelineno-11-14"></a>        <span class="s2">&quot;max_drawdown_pct&quot;</span><span class="p">:</span> <span class="nb">float</span><span class="p">,</span>
+</span><span id="__span-11-15"><a id="__codelineno-11-15" name="__codelineno-11-15" href="#__codelineno-11-15"></a>        <span class="s2">&quot;num_trades&quot;</span><span class="p">:</span>       <span class="nb">int</span><span class="p">,</span>       <span class="c1"># oder total_trades</span>
+</span><span id="__span-11-16"><a id="__codelineno-11-16" name="__codelineno-11-16" href="#__codelineno-11-16"></a>        <span class="s2">&quot;equity_curve&quot;</span><span class="p">:</span>     <span class="n">pd</span><span class="o">.</span><span class="n">Series</span><span class="p">,</span> <span class="c1"># optional – für combined_oos_equity</span>
+</span><span id="__span-11-17"><a id="__codelineno-11-17" name="__codelineno-11-17" href="#__codelineno-11-17"></a>        <span class="s2">&quot;trades&quot;</span><span class="p">:</span>           <span class="nb">list</span><span class="p">,</span>      <span class="c1"># optional</span>
+</span><span id="__span-11-18"><a id="__codelineno-11-18" name="__codelineno-11-18" href="#__codelineno-11-18"></a>    <span class="p">}</span>
+</span></code></pre></div>
+<div class="admonition warning">
+<p class="admonition-title">Pickelbarkeit bei n_workers &gt; 1</p>
+<p>Wenn <code>n_workers &gt; 1</code> (Parallelisierung via <code>ProcessPoolExecutor</code>), muss
+<code>backtest_func</code> als Top-Level-Funktion importierbar sein – keine Lambdas
+oder Closures. <code>run_flux_backtest</code> aus <code>backtest.wfo</code> erfüllt das.
+Für Tests lokale Mock-Funktionen mit <code>n_workers=1</code> nutzen.</p>
+</div>
+<h3 id="5-ergebnis-objekte">5 · Ergebnis-Objekte<a class="headerlink" href="#5-ergebnis-objekte" title="Permanent link">&para;</a></h3>
+<table>
+<thead>
+<tr>
+<th>Attribut/Methode</th>
+<th>Beschreibung</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>wfo.windows</code></td>
+<td><code>list[WFOWindow]</code> – alle Fenster</td>
+</tr>
+<tr>
+<td><code>wfo.summary_frame()</code></td>
+<td>DataFrame: IS/OOS-Zeiträume, Metriken je Fenster</td>
+</tr>
+<tr>
+<td><code>wfo.stability_report()</code></td>
+<td>DataFrame: Parameter-Häufigkeit, OOS-Sharpe/CAGR</td>
+</tr>
+<tr>
+<td><code>wfo.combined_oos_equity()</code></td>
+<td>Verkettete, normalisierte OOS-Equity-Kurve</td>
+</tr>
+<tr>
+<td><code>win.best_params</code></td>
+<td>Dict mit den besten IS-Parametern</td>
+</tr>
+<tr>
+<td><code>win.oos_metrics</code></td>
+<td>Dict mit OOS-Metriken (sharpe, cagr_pct, …)</td>
+</tr>
+</tbody>
+</table>
+<h3 id="6-unit-test-pattern">6 · Unit-Test-Pattern<a class="headerlink" href="#6-unit-test-pattern" title="Permanent link">&para;</a></h3>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-12-1"><a id="__codelineno-12-1" name="__codelineno-12-1" href="#__codelineno-12-1"></a><span class="c1"># Kein Netzwerk, keine echte Strategie – rein deterministisch</span>
+</span><span id="__span-12-2"><a id="__codelineno-12-2" name="__codelineno-12-2" href="#__codelineno-12-2"></a><span class="k">def</span><span class="w"> </span><span class="nf">_mock_backtest</span><span class="p">(</span><span class="n">data</span><span class="p">,</span> <span class="n">vix</span><span class="p">,</span> <span class="n">cfg</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">vix3m_series</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">spy_df</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">silent</span><span class="o">=</span><span class="kc">True</span><span class="p">):</span>
+</span><span id="__span-12-3"><a id="__codelineno-12-3" name="__codelineno-12-3" href="#__codelineno-12-3"></a>    <span class="n">foo</span> <span class="o">=</span> <span class="nb">float</span><span class="p">(</span><span class="n">cfg</span><span class="o">.</span><span class="n">strategy</span><span class="o">.</span><span class="n">params</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;foo&quot;</span><span class="p">,</span> <span class="mf">1.0</span><span class="p">))</span>
+</span><span id="__span-12-4"><a id="__codelineno-12-4" name="__codelineno-12-4" href="#__codelineno-12-4"></a>    <span class="k">return</span> <span class="p">{</span><span class="s2">&quot;sharpe&quot;</span><span class="p">:</span> <span class="n">foo</span><span class="p">,</span> <span class="s2">&quot;num_trades&quot;</span><span class="p">:</span> <span class="mi">30</span><span class="p">,</span> <span class="s2">&quot;cagr_pct&quot;</span><span class="p">:</span> <span class="n">foo</span> <span class="o">*</span> <span class="mf">5.0</span><span class="p">,</span>
+</span><span id="__span-12-5"><a id="__codelineno-12-5" name="__codelineno-12-5" href="#__codelineno-12-5"></a>            <span class="s2">&quot;max_drawdown_pct&quot;</span><span class="p">:</span> <span class="mf">1.0</span><span class="p">}</span>
+</span><span id="__span-12-6"><a id="__codelineno-12-6" name="__codelineno-12-6" href="#__codelineno-12-6"></a>
+</span><span id="__span-12-7"><a id="__codelineno-12-7" name="__codelineno-12-7" href="#__codelineno-12-7"></a><span class="n">wfo</span> <span class="o">=</span> <span class="n">WalkForwardOptimizer</span><span class="p">(</span>
+</span><span id="__span-12-8"><a id="__codelineno-12-8" name="__codelineno-12-8" href="#__codelineno-12-8"></a>    <span class="n">data_dict</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;SPY&quot;</span><span class="p">:</span> <span class="n">daily_df_30_rows</span><span class="p">},</span>
+</span><span id="__span-12-9"><a id="__codelineno-12-9" name="__codelineno-12-9" href="#__codelineno-12-9"></a>    <span class="n">vix_series</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span>
+</span><span id="__span-12-10"><a id="__codelineno-12-10" name="__codelineno-12-10" href="#__codelineno-12-10"></a>    <span class="n">base_cfg</span><span class="o">=</span><span class="n">cfg</span><span class="p">,</span>
+</span><span id="__span-12-11"><a id="__codelineno-12-11" name="__codelineno-12-11" href="#__codelineno-12-11"></a>    <span class="n">param_grid</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;foo&quot;</span><span class="p">:</span> <span class="p">[</span><span class="mf">1.0</span><span class="p">,</span> <span class="mf">2.0</span><span class="p">,</span> <span class="mf">3.0</span><span class="p">]},</span>
+</span><span id="__span-12-12"><a id="__codelineno-12-12" name="__codelineno-12-12" href="#__codelineno-12-12"></a>    <span class="n">backtest_func</span><span class="o">=</span><span class="n">_mock_backtest</span><span class="p">,</span>
+</span><span id="__span-12-13"><a id="__codelineno-12-13" name="__codelineno-12-13" href="#__codelineno-12-13"></a>    <span class="n">is_days</span><span class="o">=</span><span class="mi">10</span><span class="p">,</span> <span class="n">oos_days</span><span class="o">=</span><span class="mi">5</span><span class="p">,</span> <span class="n">step_days</span><span class="o">=</span><span class="mi">10</span><span class="p">,</span>
+</span><span id="__span-12-14"><a id="__codelineno-12-14" name="__codelineno-12-14" href="#__codelineno-12-14"></a>    <span class="n">min_trades_is</span><span class="o">=</span><span class="mi">1</span><span class="p">,</span>
+</span><span id="__span-12-15"><a id="__codelineno-12-15" name="__codelineno-12-15" href="#__codelineno-12-15"></a>    <span class="n">n_workers</span><span class="o">=</span><span class="mi">1</span><span class="p">,</span>   <span class="c1"># sequential – Mock ist nicht picklebar</span>
+</span><span id="__span-12-16"><a id="__codelineno-12-16" name="__codelineno-12-16" href="#__codelineno-12-16"></a><span class="p">)</span>
+</span><span id="__span-12-17"><a id="__codelineno-12-17" name="__codelineno-12-17" href="#__codelineno-12-17"></a><span class="k">assert</span> <span class="n">wfo</span><span class="o">.</span><span class="n">estimated_window_count</span><span class="p">()</span> <span class="o">==</span> <span class="mi">2</span>
+</span><span id="__span-12-18"><a id="__codelineno-12-18" name="__codelineno-12-18" href="#__codelineno-12-18"></a><span class="n">windows</span> <span class="o">=</span> <span class="n">wfo</span><span class="o">.</span><span class="n">run</span><span class="p">()</span>
+</span><span id="__span-12-19"><a id="__codelineno-12-19" name="__codelineno-12-19" href="#__codelineno-12-19"></a><span class="k">assert</span> <span class="nb">len</span><span class="p">(</span><span class="n">windows</span><span class="p">)</span> <span class="o">==</span> <span class="mi">2</span>
+</span><span id="__span-12-20"><a id="__codelineno-12-20" name="__codelineno-12-20" href="#__codelineno-12-20"></a><span class="k">assert</span> <span class="n">windows</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="o">.</span><span class="n">best_params</span> <span class="o">==</span> <span class="p">{</span><span class="s2">&quot;foo&quot;</span><span class="p">:</span> <span class="mf">3.0</span><span class="p">}</span>
+</span></code></pre></div>
+<p>Fertige Tests: <code>tests/unit/test_wfo.py</code> (7 Tests, kein Netzwerk).</p>
+<hr />
 <h2 id="spy-vix-fur-den-backtest">SPY &amp; VIX für den Backtest<a class="headerlink" href="#spy-vix-fur-den-backtest" title="Permanent link">&para;</a></h2>
-<div class="language-python highlight"><pre><span></span><code><span id="__span-7-1"><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a><span class="c1"># SPY für Trend-Filter</span>
-</span><span id="__span-7-2"><a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a><span class="n">spy_df</span> <span class="o">=</span> <span class="k">await</span> <span class="n">prov</span><span class="o">.</span><span class="n">get_bars</span><span class="p">(</span><span class="s2">&quot;SPY&quot;</span><span class="p">,</span> <span class="n">start</span><span class="p">,</span> <span class="n">end</span><span class="p">,</span> <span class="s2">&quot;5Min&quot;</span><span class="p">)</span>
-</span><span id="__span-7-3"><a id="__codelineno-7-3" name="__codelineno-7-3" href="#__codelineno-7-3"></a>
-</span><span id="__span-7-4"><a id="__codelineno-7-4" name="__codelineno-7-4" href="#__codelineno-7-4"></a><span class="c1"># VIX für Regime-Filter (Daily, aus yfinance)</span>
-</span><span id="__span-7-5"><a id="__codelineno-7-5" name="__codelineno-7-5" href="#__codelineno-7-5"></a><span class="kn">import</span><span class="w"> </span><span class="nn">yfinance</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">yf</span>
-</span><span id="__span-7-6"><a id="__codelineno-7-6" name="__codelineno-7-6" href="#__codelineno-7-6"></a><span class="n">vix</span> <span class="o">=</span> <span class="n">yf</span><span class="o">.</span><span class="n">download</span><span class="p">(</span><span class="s2">&quot;^VIX&quot;</span><span class="p">,</span> <span class="n">start</span><span class="o">=</span><span class="n">start</span><span class="p">,</span> <span class="n">end</span><span class="o">=</span><span class="n">end</span><span class="p">,</span> <span class="n">interval</span><span class="o">=</span><span class="s2">&quot;1d&quot;</span><span class="p">)[</span><span class="s2">&quot;Close&quot;</span><span class="p">]</span>
-</span><span id="__span-7-7"><a id="__codelineno-7-7" name="__codelineno-7-7" href="#__codelineno-7-7"></a><span class="n">vix3m</span> <span class="o">=</span> <span class="n">yf</span><span class="o">.</span><span class="n">download</span><span class="p">(</span><span class="s2">&quot;^VIX3M&quot;</span><span class="p">,</span> <span class="n">start</span><span class="o">=</span><span class="n">start</span><span class="p">,</span> <span class="n">end</span><span class="o">=</span><span class="n">end</span><span class="p">,</span> <span class="n">interval</span><span class="o">=</span><span class="s2">&quot;1d&quot;</span><span class="p">)[</span><span class="s2">&quot;Close&quot;</span><span class="p">]</span>
-</span><span id="__span-7-8"><a id="__codelineno-7-8" name="__codelineno-7-8" href="#__codelineno-7-8"></a>
-</span><span id="__span-7-9"><a id="__codelineno-7-9" name="__codelineno-7-9" href="#__codelineno-7-9"></a><span class="n">result</span> <span class="o">=</span> <span class="k">await</span> <span class="n">engine</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">data</span><span class="o">=</span><span class="n">data</span><span class="p">,</span> <span class="n">spy_df</span><span class="o">=</span><span class="n">spy_df</span><span class="p">,</span>
-</span><span id="__span-7-10"><a id="__codelineno-7-10" name="__codelineno-7-10" href="#__codelineno-7-10"></a>                           <span class="n">vix_series</span><span class="o">=</span><span class="n">vix</span><span class="p">,</span> <span class="n">vix3m_series</span><span class="o">=</span><span class="n">vix3m</span><span class="p">)</span>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-13-1"><a id="__codelineno-13-1" name="__codelineno-13-1" href="#__codelineno-13-1"></a><span class="c1"># SPY für Trend-Filter</span>
+</span><span id="__span-13-2"><a id="__codelineno-13-2" name="__codelineno-13-2" href="#__codelineno-13-2"></a><span class="n">spy_df</span> <span class="o">=</span> <span class="k">await</span> <span class="n">prov</span><span class="o">.</span><span class="n">get_bars</span><span class="p">(</span><span class="s2">&quot;SPY&quot;</span><span class="p">,</span> <span class="n">start</span><span class="p">,</span> <span class="n">end</span><span class="p">,</span> <span class="s2">&quot;5Min&quot;</span><span class="p">)</span>
+</span><span id="__span-13-3"><a id="__codelineno-13-3" name="__codelineno-13-3" href="#__codelineno-13-3"></a>
+</span><span id="__span-13-4"><a id="__codelineno-13-4" name="__codelineno-13-4" href="#__codelineno-13-4"></a><span class="c1"># VIX für Regime-Filter (Daily, aus yfinance)</span>
+</span><span id="__span-13-5"><a id="__codelineno-13-5" name="__codelineno-13-5" href="#__codelineno-13-5"></a><span class="kn">import</span><span class="w"> </span><span class="nn">yfinance</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">yf</span>
+</span><span id="__span-13-6"><a id="__codelineno-13-6" name="__codelineno-13-6" href="#__codelineno-13-6"></a><span class="n">vix</span> <span class="o">=</span> <span class="n">yf</span><span class="o">.</span><span class="n">download</span><span class="p">(</span><span class="s2">&quot;^VIX&quot;</span><span class="p">,</span> <span class="n">start</span><span class="o">=</span><span class="n">start</span><span class="p">,</span> <span class="n">end</span><span class="o">=</span><span class="n">end</span><span class="p">,</span> <span class="n">interval</span><span class="o">=</span><span class="s2">&quot;1d&quot;</span><span class="p">)[</span><span class="s2">&quot;Close&quot;</span><span class="p">]</span>
+</span><span id="__span-13-7"><a id="__codelineno-13-7" name="__codelineno-13-7" href="#__codelineno-13-7"></a><span class="n">vix3m</span> <span class="o">=</span> <span class="n">yf</span><span class="o">.</span><span class="n">download</span><span class="p">(</span><span class="s2">&quot;^VIX3M&quot;</span><span class="p">,</span> <span class="n">start</span><span class="o">=</span><span class="n">start</span><span class="p">,</span> <span class="n">end</span><span class="o">=</span><span class="n">end</span><span class="p">,</span> <span class="n">interval</span><span class="o">=</span><span class="s2">&quot;1d&quot;</span><span class="p">)[</span><span class="s2">&quot;Close&quot;</span><span class="p">]</span>
+</span><span id="__span-13-8"><a id="__codelineno-13-8" name="__codelineno-13-8" href="#__codelineno-13-8"></a>
+</span><span id="__span-13-9"><a id="__codelineno-13-9" name="__codelineno-13-9" href="#__codelineno-13-9"></a><span class="n">result</span> <span class="o">=</span> <span class="k">await</span> <span class="n">engine</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">data</span><span class="o">=</span><span class="n">data</span><span class="p">,</span> <span class="n">spy_df</span><span class="o">=</span><span class="n">spy_df</span><span class="p">,</span>
+</span><span id="__span-13-10"><a id="__codelineno-13-10" name="__codelineno-13-10" href="#__codelineno-13-10"></a>                           <span class="n">vix_series</span><span class="o">=</span><span class="n">vix</span><span class="p">,</span> <span class="n">vix3m_series</span><span class="o">=</span><span class="n">vix3m</span><span class="p">)</span>
 </span></code></pre></div>
 
 

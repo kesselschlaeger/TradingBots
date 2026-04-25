@@ -3,16 +3,29 @@ mode: backtest
 
 strategy:
   name: quick_flip
-  symbols: [SPY, QQQ, NVDA]     # Baseline-Liste; für Sweeps erweiterbar
+  symbols: ["SOXL", #winrate 100
+        "SMCI", #winrate 83
+        "RKLB", #winrate 100
+        "TQQQ", ##winrate 96
+        "PLTR",
+        "INTC",
+        "HOOD", #--winrate100
+        "MSTR",
+        "SNDK", #--winrate100
+        "MU",
+        "WBD", #--winrate100
+        "AVGO", #--winrate100
+        "NFLX",# vorübergehend
+        # zweite Reihe
+        "AMD", "MU","WBD","COIN","MRNA","UPST","MRVL","CCL","F","VRT","APP","NCLH","VST",]
   risk_pct: 0.005               # 0.5 % Equity-Risiko je Trade
   params:
     # --- Opening Range & Trade-Fenster ---
     opening_range_minutes: 15       # Länge der Opening-Range-Box in Minuten
-    max_trade_window_minutes: 90    # Maximales Handelsfenster nach Open in Minuten
-    entry_cutoff_time: "10:45"      # Kein neuer Trade-Entry nach dieser Uhrzeit ET
+    max_trade_window_minutes: 90    # Handelsfenster nach Open in Minuten (Spec: exakt 90)
 
-    # --- Liquidity Candle ---
-    liquidity_atr_threshold: 0.25   # Min. Candle-Range als Anteil der 14-Tage-ATR für Liquidity-Signal
+    # --- Manipulations-Check (OR-Eröffnungskerze = Liquidity-Kerze) ---
+    liquidity_atr_threshold: 0.25   # Min. OR-Range als Anteil der 14-Tage-ATR
 
     # --- Risk / Reward ---
     min_rr_ratio: 1.5               # Mindest-Risk-Reward-Ratio; Trade wird übersprungen wenn darunter
@@ -22,6 +35,8 @@ strategy:
 
     # --- Richtungs-Steuerung ---
     allow_shorts: true              # Short-Trades erlauben (false = nur Long)
+    use_extended_target: false      # Erweitertes Ziel (gegenüberl. OR-Seite); nur wenn rr >= 2.5
+    extended_target_min_rr: 2.5     # Mindest-R:R für Aktivierung des erweiterten Ziels
 
     # --- Trend / Gap ---
     use_trend_filter: true          # SPY-Trendfilter aktivieren (empfohlen)
@@ -56,7 +71,7 @@ broker:
 data:
   provider: yfinance          # Backtest-Datenquelle
   timeframe: "5Min"
-  lookback_days: 60           # ausreichend Tage für Daily-ATR(14) + Warmup
+  lookback_days: 59           # ausreichend Tage für Daily-ATR(14) + Warmup
 
 notifications:
   enabled: false              # Backtest: keine Telegram-Nachrichten

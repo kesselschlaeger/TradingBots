@@ -658,6 +658,28 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
+  <a href="#benotigte-daten" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Benötigte Daten
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#handelszeiten-tagesablauf" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Handelszeiten / Tagesablauf
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#funktionsprinzip" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -1098,6 +1120,28 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
+  <a href="#benotigte-daten" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Benötigte Daten
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#handelszeiten-tagesablauf" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Handelszeiten / Tagesablauf
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#funktionsprinzip" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -1288,6 +1332,85 @@
 <h1 id="orb-opening-range-breakout">ORB – Opening Range Breakout<a class="headerlink" href="#orb-opening-range-breakout" title="Permanent link">&para;</a></h1>
 <p>Die ORB-Strategie handelt Ausbrüche aus der Opening Range (9:30–10:00 ET) mit
 einem mehrstufigen Filter-Stack und optionalem MIT Probabilistic Overlay.</p>
+<p>Die Kernidee: Die ersten Handelsminuten nach Open etablieren eine Preisspanne (High/Low),
+die Institutionen als Referenz nutzen. Ein starker Ausbruch mit hohem Volumen nach dieser Phase
+signalisiert impulsive Folge-Bewegung — ORB tradet die Continuation mit definiertem R:R aus der Range.</p>
+<hr />
+<h2 id="benotigte-daten">Benötigte Daten<a class="headerlink" href="#benotigte-daten" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Quelle</th>
+<th>Timeframe</th>
+<th>Wozu</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Handelssymbol</strong> (z.B. SPY, NVDA)</td>
+<td>5-Min</td>
+<td>Primäre Bar-Quelle für OR-Box, Breakout, Volume</td>
+</tr>
+<tr>
+<td><strong>SPY</strong> (via <code>MarketContextService.spy_df</code>)</td>
+<td>5-Min</td>
+<td>Trend-Filter: SPY &gt; EMA20 → bullish</td>
+</tr>
+<tr>
+<td><strong>VIX</strong> (via <code>MarketContextService.vix</code>)</td>
+<td>Snapshot</td>
+<td>VIX Term-Structure-Regime-Filter</td>
+</tr>
+</tbody>
+</table>
+<p>Für Live: <code>provider: ibkr</code> oder <code>alpaca</code>, <code>timeframe: "5Min"</code>, <code>lookback_days: 5–10</code> (intraday reicht).
+Für Backtest: <code>provider: yfinance</code>, <code>timeframe: "5Min"</code>.</p>
+<p><strong>Mindest-Warmup:</strong> <code>min_bars: 20</code> (Default); OR-Phase benötigt mindestens die ersten 3 Bars (15 Min / 5-Min-Bar).</p>
+<hr />
+<h2 id="handelszeiten-tagesablauf">Handelszeiten / Tagesablauf<a class="headerlink" href="#handelszeiten-tagesablauf" title="Permanent link">&para;</a></h2>
+<p>ORB ist eine <strong>reine Intraday-Strategie</strong> — alle Positionen werden spätestens um 15:27 ET geschlossen.</p>
+<table>
+<thead>
+<tr>
+<th>Uhrzeit ET</th>
+<th>Event</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>09:30</td>
+<td>Market-Open — OR-Phase beginnt, kein Trade-Entry</td>
+</tr>
+<tr>
+<td>09:30–10:00</td>
+<td>Opening Range wird aufgebaut (15 Min, konfigurierbar)</td>
+</tr>
+<tr>
+<td>ab 10:00</td>
+<td>Breakout-Scan läuft auf jedem 5-Min-Bar</td>
+</tr>
+<tr>
+<td>bis 10:45</td>
+<td>Entry-Cutoff (konfigurierbar via <code>entry_cutoff_time</code>)</td>
+</tr>
+<tr>
+<td>ab 10:45</td>
+<td>Kein neuer Entry, offene Positionen laufen weiter</td>
+</tr>
+<tr>
+<td>15:27</td>
+<td>EOD-Flatten — alle Positionen werden geschlossen (<code>eod_close_time</code>)</td>
+</tr>
+<tr>
+<td>16:00</td>
+<td>Market-Close — Session-Ende</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Wichtig:</strong>
+- <code>avoid_fridays</code> / <code>avoid_mondays</code> deaktivieren optionale Wochentags-Exclusions.
+- Time-Decay reduziert die Signal-Stärke mit jedem Bracket nach der OR (konfigurierbar).
+- Bei aktiviertem Trailing-Stop wird ab <code>trail_after_r × R</code> Gewinn getrailed.</p>
 <h2 id="funktionsprinzip">Funktionsprinzip<a class="headerlink" href="#funktionsprinzip" title="Permanent link">&para;</a></h2>
 <pre class="mermaid"><code>flowchart TD
     A[Neuer 5-Min Bar] --&gt; B{Market-Hours?}

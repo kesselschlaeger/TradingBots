@@ -1,0 +1,1483 @@
+
+<!doctype html>
+<html lang="de" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Modulares Trading-Bot-Framework – ORB & OBB Strategien">
+      
+      
+        <meta name="author" content="André Kesselschläger">
+      
+      
+      
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.6">
+    
+    
+      
+        <title>Quick Flip – Reversal nach Liquidity-Sweep - FluxTrader</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.484c7ddc.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#quick-flip-reversal-nach-liquidity-sweep" class="md-skip">
+          Zum Inhalt
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow md-header--lifted" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Kopfzeile">
+    <a href="../.." title="FluxTrader" class="md-header__button md-logo" aria-label="FluxTrader" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            FluxTrader
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Quick Flip – Reversal nach Liquidity-Sweep
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Suche" placeholder="Suche" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Suche">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Zurücksetzen" aria-label="Zurücksetzen" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Suche wird initialisiert
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+  </nav>
+  
+    
+      
+<nav class="md-tabs" aria-label="Hauptnavigation" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../.." class="md-tabs__link">
+        
+  
+  
+    
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../../quickstart/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Quickstart
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../../architecture/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Architektur
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../../config/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Konfiguration
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../" class="md-tabs__link">
+          
+  
+  
+  Strategien
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../brokers/paper/" class="md-tabs__link">
+          
+  
+  
+  Broker
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../../backtest/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Backtest
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../../live/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Live-Betrieb
+
+      </a>
+    </li>
+  
+
+      
+    </ul>
+  </div>
+</nav>
+    
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="FluxTrader" class="md-nav__button md-logo" aria-label="FluxTrader" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    FluxTrader
+  </label>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../quickstart/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Quickstart
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Architektur
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../config/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Konfiguration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Strategien
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Strategien
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Übersicht
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../orb/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    ORB – Opening Range Breakout
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../obb/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    OBB – One Bar Breakout
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_6" >
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Broker
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Broker
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../brokers/paper/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Paper (kein Netzwerk)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../brokers/alpaca/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Alpaca Markets
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../brokers/ibkr/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    IBKR (Interactive Brokers)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../backtest/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Backtest
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../live/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Live-Betrieb
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Inhaltsverzeichnis">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Inhaltsverzeichnis
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#funktionsprinzip" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Funktionsprinzip
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#benotigte-daten" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Benötigte Daten
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#handelszeiten-tagesablauf" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Handelszeiten / Tagesablauf
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#state-machine" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        State Machine
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#filter-stack" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Filter-Stack
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#entry-stop-target" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Entry / Stop / Target
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#signal-starke" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Signal-Stärke
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#sizing" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Sizing
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#candlestick-parameter" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Candlestick-Parameter
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#mit-korrelationsgruppen" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        MIT Korrelationsgruppen
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#konfiguration" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Konfiguration
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Konfiguration">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#vollstandige-parameter-referenz" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Vollständige Parameter-Referenz
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#quick-start" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Quick-Start
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#implementierung" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Implementierung
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+
+<h1 id="quick-flip-reversal-nach-liquidity-sweep">Quick Flip – Reversal nach Liquidity-Sweep<a class="headerlink" href="#quick-flip-reversal-nach-liquidity-sweep" title="Permanent link">&para;</a></h1>
+<p>Quick Flip ist ein regelbasierter Intraday-Scalper. Die Strategie sucht nach einem
+institutionellen Stop-Hunt über oder unter der Opening-Range-Box und tradet die
+anschließende Gegenbewegung, sobald ein Reversal-Candlestick-Pattern erscheint.</p>
+<p>Die Kernidee: Institutionelle Akteure treiben den Preis vor der Opening Range kurz über
+ein offensichtliches Level (Stop-Hunt / Liquidity-Sweep), um dann in die Gegenrichtung zu
+beschleunigen. Quick Flip wartet auf diese Sequenz und steigt nach dem Sweep ein.</p>
+<p>Registriert als <code>"quick_flip"</code>.</p>
+<hr />
+<h2 id="funktionsprinzip">Funktionsprinzip<a class="headerlink" href="#funktionsprinzip" title="Permanent link">&para;</a></h2>
+<pre class="mermaid"><code>flowchart TD
+    A[Neuer 5-Min Bar] --&gt; B{Market-Hours?}
+    B -- Nein --&gt; Z[Kein Signal]
+    B -- Ja --&gt; C{State == done?}
+    C -- Ja --&gt; Z
+    C -- Nein --&gt; D{Entry-Cutoff / Trade-Window OK?}
+    D -- Nein --&gt; Z[State → done]
+    D -- Ja --&gt; E{OR-Box vollständig?}
+    E -- Nein --&gt; WAIT[WAIT_OR]
+    E -- Ja --&gt; F{Gap-Filter OK?}
+    F -- Nein --&gt; Z[State → done]
+    F -- Ja --&gt; G{Liquidity-Candle erkannt?&lt;br/&gt;15m resampled, &gt;= 25% Daily ATR}
+    G -- Nein --&gt; WAIT2[WAIT_LIQUIDITY]
+    G -- Ja --&gt; H[State → liquidity_seen&lt;br/&gt;Direction: long / short]
+    H --&gt; I{Reversal-Candle auf 5m?&lt;br/&gt;Hammer / Engulfing&lt;br/&gt;jenseits der OR-Box}
+    I -- Nein --&gt; WAIT3[WAIT_REVERSAL]
+    I -- Ja --&gt; J{Trend-Filter OK?&lt;br/&gt;SPY EMA20}
+    J -- Nein --&gt; Z
+    J -- Ja --&gt; K{MIT Independence Guard}
+    K -- Geblockt --&gt; Z
+    K -- Frei --&gt; L[R:R-Check &gt;= 1.5&lt;br/&gt;Stärke-Berechnung]
+    L -- Zu niedrig --&gt; Z
+    L -- OK --&gt; M[VIX-Sizing-Faktor]
+    M --&gt; N[Signal: Long/Short&lt;br/&gt;Stop unter/über Reversal-Low/High&lt;br/&gt;Target: OR-High / OR-Low]
+    N --&gt; O[State → done]</code></pre>
+<hr />
+<h2 id="benotigte-daten">Benötigte Daten<a class="headerlink" href="#benotigte-daten" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Quelle</th>
+<th>Timeframe</th>
+<th>Wozu</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Handelssymbol</strong> (z.B. SPY, NVDA)</td>
+<td>5-Min</td>
+<td>OR-Box, Liquidity-Candle (auf 15m resampled), Reversal-Pattern</td>
+</tr>
+<tr>
+<td><strong>SPY</strong> (via <code>MarketContextService.spy_df</code>)</td>
+<td>5-Min</td>
+<td>Trend-Filter: SPY &gt; EMA20 → bullish</td>
+</tr>
+<tr>
+<td><strong>VIX</strong> (via <code>MarketContextService.vix</code>)</td>
+<td>Snapshot</td>
+<td>Positions-Sizing-Reduktion bei VIX &gt; 30</td>
+</tr>
+<tr>
+<td><strong>Daily ATR</strong></td>
+<td>täglich (aus 5m resampelt)</td>
+<td>Liquidity-Candle-Schwelle: Range &gt;= 25% Daily ATR</td>
+</tr>
+</tbody>
+</table>
+<p>Für Live: <code>provider: ibkr</code>, <code>timeframe: "5Min"</code>, <code>lookback_days: 30</code> (Daily ATR(14) braucht ≥14 abgeschlossene Tage).
+Für Backtest: <code>provider: yfinance</code>, <code>timeframe: "5Min"</code>, <code>lookback_days: 60</code>.</p>
+<p><strong>Mindest-Warmup:</strong> <code>min_bars: 120</code> (Default Live) — stellt sicher, dass Daily ATR(14) aus resampelten 5m-Bars korrekt berechnet wird.</p>
+<hr />
+<h2 id="handelszeiten-tagesablauf">Handelszeiten / Tagesablauf<a class="headerlink" href="#handelszeiten-tagesablauf" title="Permanent link">&para;</a></h2>
+<p>Quick Flip ist eine <strong>reine Intraday-Strategie</strong> — alle Positionen werden innerhalb der Session geschlossen.</p>
+<table>
+<thead>
+<tr>
+<th>Uhrzeit ET</th>
+<th>Event</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>09:30</td>
+<td>Market-Open — OR-Phase beginnt, kein Trade-Entry</td>
+</tr>
+<tr>
+<td>09:30–09:45</td>
+<td>Opening Range wird aufgebaut (15 Min, konfigurierbar)</td>
+</tr>
+<tr>
+<td>ab 09:45</td>
+<td>OR-Box steht — State wechselt zu <code>or_locked</code>, Gap-Check läuft</td>
+</tr>
+<tr>
+<td>ab 09:45</td>
+<td>Liquidity-Candle-Scan auf 15m-Chart (resampled aus 5m)</td>
+</tr>
+<tr>
+<td>nach Liquidity</td>
+<td>Reversal-Candle-Scan auf 5m-Chart jenseits der OR-Box</td>
+</tr>
+<tr>
+<td>bis 10:45</td>
+<td>Entry-Cutoff — kein neuer Trade-Entry danach (<code>entry_cutoff_time</code>)</td>
+</tr>
+<tr>
+<td>bis 11:00</td>
+<td>Trade-Window-Ende — 90 Min nach Open (<code>max_trade_window_minutes</code>)</td>
+</tr>
+<tr>
+<td>Intraday</td>
+<td>Position läuft bis SL, TP oder manuellem Exit</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Wichtig:</strong>
+- Pro Tag und Symbol <strong>maximal ein Trade</strong> — nach dem ersten Signal wechselt der State zu <code>done</code>.
+- <code>max_trade_window_minutes: 90</code> begrenzt das Zeitfenster auf 09:30–11:00 ET.
+- Kein automatisches EOD-Flatten konfiguriert — der TradeManager übernimmt via SL/TP.</p>
+<hr />
+<h2 id="state-machine">State Machine<a class="headerlink" href="#state-machine" title="Permanent link">&para;</a></h2>
+<p>Quick Flip nutzt eine explizite State Machine pro Tag (Vorlage für sequenzielle Strategien im Framework):</p>
+<table>
+<thead>
+<tr>
+<th>State</th>
+<th>Bedeutung</th>
+<th>Übergang zu</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>idle</code></td>
+<td>OR-Phase läuft noch</td>
+<td><code>or_locked</code> sobald OR-Box vollständig</td>
+</tr>
+<tr>
+<td><code>or_locked</code></td>
+<td>OR-Box steht, warte auf Liquidity-Candle</td>
+<td><code>liquidity_seen</code> bei Fund</td>
+</tr>
+<tr>
+<td><code>liquidity_seen</code></td>
+<td>Liquidity erkannt, warte auf Reversal-Candle</td>
+<td><code>done</code> bei Signal oder Timeout</td>
+</tr>
+<tr>
+<td><code>done</code></td>
+<td>Terminal für den Tag — kein weiterer Trade</td>
+<td>—</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="filter-stack">Filter-Stack<a class="headerlink" href="#filter-stack" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Filter</th>
+<th>Parameter</th>
+<th>Wirkung</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Gap-Filter</strong></td>
+<td><code>max_gap_pct: 0.03</code></td>
+<td>Kein Trade wenn Open &gt; 3% von Vortags-Close entfernt</td>
+</tr>
+<tr>
+<td><strong>Trend-Filter</strong></td>
+<td><code>trend_ema_period: 20</code></td>
+<td>SPY &gt; EMA20 → bullish erlaubt; SPY &lt; EMA20 → nur shorts</td>
+</tr>
+<tr>
+<td><strong>Liquidity-Candle</strong></td>
+<td><code>liquidity_atr_threshold: 0.25</code></td>
+<td>15m-Bar-Range ≥ 25% Daily ATR14 → Sweep-Signal</td>
+</tr>
+<tr>
+<td><strong>Reversal-Pattern</strong></td>
+<td>Hammer / Engulfing</td>
+<td>Bestätigung der Richtungsumkehr auf 5m</td>
+</tr>
+<tr>
+<td><strong>R:R-Filter</strong></td>
+<td><code>min_rr_ratio: 1.5</code></td>
+<td>Trade wird verworfen wenn Reward/Risk &lt; 1.5</td>
+</tr>
+<tr>
+<td><strong>VIX-Regime</strong></td>
+<td><code>vix_high_threshold: 30</code></td>
+<td>Positionsgröße halbiert bei VIX &gt; 30</td>
+</tr>
+<tr>
+<td><strong>MIT Independence Guard</strong></td>
+<td><code>mit_correlation_groups</code></td>
+<td>Max. 1 offene Position pro Korrelationsgruppe</td>
+</tr>
+<tr>
+<td><strong>Entry-Cutoff</strong></td>
+<td><code>entry_cutoff_time: "10:45"</code></td>
+<td>Kein neuer Entry nach 10:45 ET</td>
+</tr>
+<tr>
+<td><strong>Trade-Window</strong></td>
+<td><code>max_trade_window_minutes: 90</code></td>
+<td>Kein neuer Entry &gt; 90 Min nach Open</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="entry-stop-target">Entry / Stop / Target<a class="headerlink" href="#entry-stop-target" title="Permanent link">&para;</a></h2>
+<div class="language-text highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>Long-Setup (nach bearischem Sweep unter OR-Low):
+</span><span id="__span-0-2"><a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a>  entry  = Close des Reversal-Bars
+</span><span id="__span-0-3"><a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a>  stop   = Bar-Low − buffer_ticks (Default: $0.05)
+</span><span id="__span-0-4"><a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a>  target = OR-High
+</span><span id="__span-0-5"><a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a>
+</span><span id="__span-0-6"><a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a>Short-Setup (nach bullischem Sweep über OR-High):
+</span><span id="__span-0-7"><a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a>  entry  = Close des Reversal-Bars
+</span><span id="__span-0-8"><a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a>  stop   = Bar-High + buffer_ticks
+</span><span id="__span-0-9"><a id="__codelineno-0-9" name="__codelineno-0-9" href="#__codelineno-0-9"></a>  target = OR-Low
+</span></code></pre></div>
+<p>Der R:R-Check wird nach Berechnung von Entry/Stop/Target ausgeführt. Bei <code>rr_ratio &lt; min_rr_ratio</code>
+wird kein Signal erzeugt.</p>
+<hr />
+<h2 id="signal-starke">Signal-Stärke<a class="headerlink" href="#signal-starke" title="Permanent link">&para;</a></h2>
+<div class="language-text highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>strength = clip(0.35 + 0.10 × (rr_ratio − min_rr) + engulfing_bonus, 0.0, 1.0)
+</span><span id="__span-1-2"><a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a>engulfing_bonus = +0.10 bei bullish_engulfing / bearish_engulfing (vs. Hammer)
+</span></code></pre></div>
+<p>Mindest-Stärke für Signalausgabe: <code>min_signal_strength: 0.35</code>.</p>
+<hr />
+<h2 id="sizing">Sizing<a class="headerlink" href="#sizing" title="Permanent link">&para;</a></h2>
+<p>R-basiert via <code>position_size(equity, risk_pct, entry, stop)</code>:</p>
+<div class="language-text highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a>base_qty = equity × risk_pct / |entry − stop|
+</span><span id="__span-2-2"><a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a>final_qty = base_qty × vix_factor × qty_factor
+</span></code></pre></div>
+<ul>
+<li><code>risk_per_trade: 0.005</code> — 0.5% Equity-Risiko je Trade</li>
+<li><code>vix_factor: 0.5</code> bei VIX &gt; 30, sonst 1.0</li>
+<li><code>qty_factor: 1.0</code> (MIT-Overlay-Platzhalter, derzeit neutral)</li>
+</ul>
+<hr />
+<h2 id="candlestick-parameter">Candlestick-Parameter<a class="headerlink" href="#candlestick-parameter" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Default</th>
+<th>Beschreibung</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>hammer_shadow_ratio</code></td>
+<td><code>2.0</code></td>
+<td>Min. unterer Schatten als Vielfaches des Body</td>
+</tr>
+<tr>
+<td><code>hammer_upper_shadow_ratio</code></td>
+<td><code>0.3</code></td>
+<td>Max. oberer Schatten als Anteil des Body</td>
+</tr>
+<tr>
+<td><code>engulfing_min_body_ratio</code></td>
+<td><code>0.6</code></td>
+<td>Min. Body-Größe der Engulfing-Candle relativ zum Vorgänger</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="mit-korrelationsgruppen">MIT Korrelationsgruppen<a class="headerlink" href="#mit-korrelationsgruppen" title="Permanent link">&para;</a></h2>
+<div class="language-yaml highlight"><pre><span></span><code><span id="__span-3-1"><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="nt">mit_correlation_groups</span><span class="p">:</span>
+</span><span id="__span-3-2"><a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a><span class="w">  </span><span class="nt">index_etfs</span><span class="p">:</span><span class="w">      </span><span class="p p-Indicator">[</span><span class="nv">SPY</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">QQQ</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">IWM</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">DIA</span><span class="p p-Indicator">]</span>
+</span><span id="__span-3-3"><a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a><span class="w">  </span><span class="nt">semi_ai</span><span class="p">:</span><span class="w">         </span><span class="p p-Indicator">[</span><span class="nv">NVDA</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">AMD</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">AVGO</span><span class="p p-Indicator">]</span>
+</span><span id="__span-3-4"><a id="__codelineno-3-4" name="__codelineno-3-4" href="#__codelineno-3-4"></a><span class="w">  </span><span class="nt">mega_cap_tech</span><span class="p">:</span><span class="w">   </span><span class="p p-Indicator">[</span><span class="nv">AAPL</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">MSFT</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">META</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">AMZN</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">GOOGL</span><span class="p p-Indicator">]</span>
+</span></code></pre></div>
+<p>Pro Gruppe darf nur ein Symbol gleichzeitig eine offene Position haben.</p>
+<hr />
+<h2 id="konfiguration">Konfiguration<a class="headerlink" href="#konfiguration" title="Permanent link">&para;</a></h2>
+<h3 id="vollstandige-parameter-referenz">Vollständige Parameter-Referenz<a class="headerlink" href="#vollstandige-parameter-referenz" title="Permanent link">&para;</a></h3>
+<div class="language-yaml highlight"><pre><span></span><code><span id="__span-4-1"><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="nt">strategy</span><span class="p">:</span>
+</span><span id="__span-4-2"><a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a><span class="w">  </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">quick_flip</span>
+</span><span id="__span-4-3"><a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a><span class="w">  </span><span class="nt">params</span><span class="p">:</span>
+</span><span id="__span-4-4"><a id="__codelineno-4-4" name="__codelineno-4-4" href="#__codelineno-4-4"></a><span class="w">    </span><span class="c1"># Opening Range &amp; Trade-Fenster</span>
+</span><span id="__span-4-5"><a id="__codelineno-4-5" name="__codelineno-4-5" href="#__codelineno-4-5"></a><span class="w">    </span><span class="nt">opening_range_minutes</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">15</span><span class="w">        </span><span class="c1"># Länge der Opening-Range-Box in Minuten</span>
+</span><span id="__span-4-6"><a id="__codelineno-4-6" name="__codelineno-4-6" href="#__codelineno-4-6"></a><span class="w">    </span><span class="nt">max_trade_window_minutes</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">90</span><span class="w">     </span><span class="c1"># Maximales Handelsfenster nach Open in Minuten</span>
+</span><span id="__span-4-7"><a id="__codelineno-4-7" name="__codelineno-4-7" href="#__codelineno-4-7"></a><span class="w">    </span><span class="nt">entry_cutoff_time</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;10:45&quot;</span><span class="w">       </span><span class="c1"># Kein neuer Trade-Entry nach dieser Uhrzeit ET</span>
+</span><span id="__span-4-8"><a id="__codelineno-4-8" name="__codelineno-4-8" href="#__codelineno-4-8"></a>
+</span><span id="__span-4-9"><a id="__codelineno-4-9" name="__codelineno-4-9" href="#__codelineno-4-9"></a><span class="w">    </span><span class="c1"># Liquidity Candle (Kern-Filter)</span>
+</span><span id="__span-4-10"><a id="__codelineno-4-10" name="__codelineno-4-10" href="#__codelineno-4-10"></a><span class="w">    </span><span class="nt">liquidity_atr_threshold</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">0.25</span><span class="w">    </span><span class="c1"># Min. Candle-Range als Anteil der 14-Tage-ATR</span>
+</span><span id="__span-4-11"><a id="__codelineno-4-11" name="__codelineno-4-11" href="#__codelineno-4-11"></a>
+</span><span id="__span-4-12"><a id="__codelineno-4-12" name="__codelineno-4-12" href="#__codelineno-4-12"></a><span class="w">    </span><span class="c1"># Risk / Reward</span>
+</span><span id="__span-4-13"><a id="__codelineno-4-13" name="__codelineno-4-13" href="#__codelineno-4-13"></a><span class="w">    </span><span class="nt">min_rr_ratio</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">1.5</span><span class="w">                </span><span class="c1"># Mindest-Risk-Reward-Ratio</span>
+</span><span id="__span-4-14"><a id="__codelineno-4-14" name="__codelineno-4-14" href="#__codelineno-4-14"></a><span class="w">    </span><span class="nt">buffer_ticks</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">0.05</span><span class="w">               </span><span class="c1"># Stop-Puffer in $ jenseits Reversal-Candle-Extremum</span>
+</span><span id="__span-4-15"><a id="__codelineno-4-15" name="__codelineno-4-15" href="#__codelineno-4-15"></a><span class="w">    </span><span class="nt">risk_per_trade</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">0.005</span><span class="w">            </span><span class="c1"># Risiko je Trade als Anteil der Equity (0.5 %)</span>
+</span><span id="__span-4-16"><a id="__codelineno-4-16" name="__codelineno-4-16" href="#__codelineno-4-16"></a><span class="w">    </span><span class="nt">min_signal_strength</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">0.35</span><span class="w">        </span><span class="c1"># Mindeststärke des Signals (0–1) für Ausgabe</span>
+</span><span id="__span-4-17"><a id="__codelineno-4-17" name="__codelineno-4-17" href="#__codelineno-4-17"></a>
+</span><span id="__span-4-18"><a id="__codelineno-4-18" name="__codelineno-4-18" href="#__codelineno-4-18"></a><span class="w">    </span><span class="c1"># Richtungs-Steuerung</span>
+</span><span id="__span-4-19"><a id="__codelineno-4-19" name="__codelineno-4-19" href="#__codelineno-4-19"></a><span class="w">    </span><span class="nt">allow_shorts</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span><span class="w">               </span><span class="c1"># Short-Trades erlauben</span>
+</span><span id="__span-4-20"><a id="__codelineno-4-20" name="__codelineno-4-20" href="#__codelineno-4-20"></a>
+</span><span id="__span-4-21"><a id="__codelineno-4-21" name="__codelineno-4-21" href="#__codelineno-4-21"></a><span class="w">    </span><span class="c1"># Trend / Gap</span>
+</span><span id="__span-4-22"><a id="__codelineno-4-22" name="__codelineno-4-22" href="#__codelineno-4-22"></a><span class="w">    </span><span class="nt">use_trend_filter</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span><span class="w">           </span><span class="c1"># SPY-Trendfilter aktivieren (empfohlen)</span>
+</span><span id="__span-4-23"><a id="__codelineno-4-23" name="__codelineno-4-23" href="#__codelineno-4-23"></a><span class="w">    </span><span class="nt">trend_ema_period</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">20</span><span class="w">             </span><span class="c1"># EMA-Periode für SPY-Trendfilter</span>
+</span><span id="__span-4-24"><a id="__codelineno-4-24" name="__codelineno-4-24" href="#__codelineno-4-24"></a><span class="w">    </span><span class="nt">use_gap_filter</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span><span class="w">             </span><span class="c1"># Gap-Filter bei Marktöffnung aktivieren</span>
+</span><span id="__span-4-25"><a id="__codelineno-4-25" name="__codelineno-4-25" href="#__codelineno-4-25"></a><span class="w">    </span><span class="nt">max_gap_pct</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">0.03</span><span class="w">                </span><span class="c1"># Maximaler Gap zur Vortagsclose in %</span>
+</span><span id="__span-4-26"><a id="__codelineno-4-26" name="__codelineno-4-26" href="#__codelineno-4-26"></a>
+</span><span id="__span-4-27"><a id="__codelineno-4-27" name="__codelineno-4-27" href="#__codelineno-4-27"></a><span class="w">    </span><span class="c1"># VIX-Regime</span>
+</span><span id="__span-4-28"><a id="__codelineno-4-28" name="__codelineno-4-28" href="#__codelineno-4-28"></a><span class="w">    </span><span class="nt">use_vix_filter</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span><span class="w">             </span><span class="c1"># VIX-Regime-Filter aktivieren</span>
+</span><span id="__span-4-29"><a id="__codelineno-4-29" name="__codelineno-4-29" href="#__codelineno-4-29"></a><span class="w">    </span><span class="nt">vix_high_threshold</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">30.0</span><span class="w">         </span><span class="c1"># Ab diesem VIX-Wert Position Size reduzieren</span>
+</span><span id="__span-4-30"><a id="__codelineno-4-30" name="__codelineno-4-30" href="#__codelineno-4-30"></a><span class="w">    </span><span class="nt">vix_size_factor</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">0.5</span><span class="w">             </span><span class="c1"># Größen-Multiplikator bei hohem VIX</span>
+</span><span id="__span-4-31"><a id="__codelineno-4-31" name="__codelineno-4-31" href="#__codelineno-4-31"></a>
+</span><span id="__span-4-32"><a id="__codelineno-4-32" name="__codelineno-4-32" href="#__codelineno-4-32"></a><span class="w">    </span><span class="c1"># MIT Independence Overlay</span>
+</span><span id="__span-4-33"><a id="__codelineno-4-33" name="__codelineno-4-33" href="#__codelineno-4-33"></a><span class="w">    </span><span class="nt">use_mit_overlay</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span><span class="w">            </span><span class="c1"># MIT-Independence-Overlay aktivieren</span>
+</span><span id="__span-4-34"><a id="__codelineno-4-34" name="__codelineno-4-34" href="#__codelineno-4-34"></a><span class="w">    </span><span class="nt">mit_correlation_groups</span><span class="p">:</span>
+</span><span id="__span-4-35"><a id="__codelineno-4-35" name="__codelineno-4-35" href="#__codelineno-4-35"></a><span class="w">      </span><span class="nt">index_etfs</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">SPY</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">QQQ</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">IWM</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">DIA</span><span class="p p-Indicator">]</span>
+</span><span id="__span-4-36"><a id="__codelineno-4-36" name="__codelineno-4-36" href="#__codelineno-4-36"></a><span class="w">      </span><span class="nt">semi_ai</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">NVDA</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">AMD</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">AVGO</span><span class="p p-Indicator">]</span>
+</span><span id="__span-4-37"><a id="__codelineno-4-37" name="__codelineno-4-37" href="#__codelineno-4-37"></a><span class="w">      </span><span class="nt">mega_cap_tech</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">AAPL</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">MSFT</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">META</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">AMZN</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">GOOGL</span><span class="p p-Indicator">]</span>
+</span><span id="__span-4-38"><a id="__codelineno-4-38" name="__codelineno-4-38" href="#__codelineno-4-38"></a>
+</span><span id="__span-4-39"><a id="__codelineno-4-39" name="__codelineno-4-39" href="#__codelineno-4-39"></a><span class="w">    </span><span class="c1"># Candlestick-Parameter</span>
+</span><span id="__span-4-40"><a id="__codelineno-4-40" name="__codelineno-4-40" href="#__codelineno-4-40"></a><span class="w">    </span><span class="nt">hammer_shadow_ratio</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">2.0</span>
+</span><span id="__span-4-41"><a id="__codelineno-4-41" name="__codelineno-4-41" href="#__codelineno-4-41"></a><span class="w">    </span><span class="nt">hammer_upper_shadow_ratio</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">0.3</span>
+</span><span id="__span-4-42"><a id="__codelineno-4-42" name="__codelineno-4-42" href="#__codelineno-4-42"></a><span class="w">    </span><span class="nt">engulfing_min_body_ratio</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">0.6</span>
+</span><span id="__span-4-43"><a id="__codelineno-4-43" name="__codelineno-4-43" href="#__codelineno-4-43"></a>
+</span><span id="__span-4-44"><a id="__codelineno-4-44" name="__codelineno-4-44" href="#__codelineno-4-44"></a><span class="w">    </span><span class="c1"># Warmup / Buffer</span>
+</span><span id="__span-4-45"><a id="__codelineno-4-45" name="__codelineno-4-45" href="#__codelineno-4-45"></a><span class="w">    </span><span class="nt">min_bars</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">120</span><span class="w">                    </span><span class="c1"># Minimale Bar-Anzahl im Buffer vor erstem Signal</span>
+</span><span id="__span-4-46"><a id="__codelineno-4-46" name="__codelineno-4-46" href="#__codelineno-4-46"></a><span class="w">    </span><span class="nt">max_bars_buffer</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">2000</span><span class="w">            </span><span class="c1"># Max. Bar-Anzahl im Strategy-Buffer</span>
+</span></code></pre></div>
+<h3 id="quick-start">Quick-Start<a class="headerlink" href="#quick-start" title="Permanent link">&para;</a></h3>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-5-1"><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a><span class="c1"># Live / Paper</span>
+</span><span id="__span-5-2"><a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a>python<span class="w"> </span>main.py<span class="w"> </span>paper<span class="w"> </span>--config<span class="w"> </span>configs/quick_flip.yaml
+</span><span id="__span-5-3"><a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a>python<span class="w"> </span>main.py<span class="w"> </span>live<span class="w">  </span>--config<span class="w"> </span>configs/quick_flip.yaml
+</span><span id="__span-5-4"><a id="__codelineno-5-4" name="__codelineno-5-4" href="#__codelineno-5-4"></a>
+</span><span id="__span-5-5"><a id="__codelineno-5-5" name="__codelineno-5-5" href="#__codelineno-5-5"></a><span class="c1"># Backtest</span>
+</span><span id="__span-5-6"><a id="__codelineno-5-6" name="__codelineno-5-6" href="#__codelineno-5-6"></a><span class="nv">PYTHONIOENCODING</span><span class="o">=</span>utf-8<span class="w"> </span>python<span class="w"> </span>main.py<span class="w"> </span>backtest<span class="w"> </span>--config<span class="w"> </span>configs/quick_flip_backtest.yaml
+</span></code></pre></div>
+<hr />
+<h2 id="implementierung">Implementierung<a class="headerlink" href="#implementierung" title="Permanent link">&para;</a></h2>
+<div class="language-text highlight"><pre><span></span><code><span id="__span-6-1"><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a>strategy/quick_flip.py
+</span><span id="__span-6-2"><a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a>  QuickFlipStrategy._generate_signals(bar)
+</span><span id="__span-6-3"><a id="__codelineno-6-3" name="__codelineno-6-3" href="#__codelineno-6-3"></a>    ├─ State-Machine: idle → or_locked → liquidity_seen → done
+</span><span id="__span-6-4"><a id="__codelineno-6-4" name="__codelineno-6-4" href="#__codelineno-6-4"></a>    ├─ _lock_opening_range(df_5m)        → or_high, or_low
+</span><span id="__span-6-5"><a id="__codelineno-6-5" name="__codelineno-6-5" href="#__codelineno-6-5"></a>    ├─ _compute_daily_atr(df_5m)         → daily_atr (14-Tage aus resampelten 5m)
+</span><span id="__span-6-6"><a id="__codelineno-6-6" name="__codelineno-6-6" href="#__codelineno-6-6"></a>    ├─ _detect_liquidity_candle(df_5m)   → 15m-Resample, is_liquidity_candle()
+</span><span id="__span-6-7"><a id="__codelineno-6-7" name="__codelineno-6-7" href="#__codelineno-6-7"></a>    └─ _detect_reversal_candle(df_5m)    → detect_reversal_pattern() + alle Filter + Signal
+</span><span id="__span-6-8"><a id="__codelineno-6-8" name="__codelineno-6-8" href="#__codelineno-6-8"></a>
+</span><span id="__span-6-9"><a id="__codelineno-6-9" name="__codelineno-6-9" href="#__codelineno-6-9"></a>  _fresh_day_cache() → State-Reset täglich (date, state, or_high, or_low, ...)
+</span></code></pre></div>
+<div class="admonition note">
+<p class="admonition-title">State-Machine-Vorlage</p>
+<p>Quick Flip führt das explizite <code>_day_cache["state"]</code>-Pattern in FluxTrader ein.
+Bei 4+ sequenziellen Schritten ist implizites Cache-Key-Checking (wie in <code>orb.py</code>)
+fehleranfällig. Dieses Pattern dient als Vorlage für zukünftige sequenzielle Strategien.</p>
+</div>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Zurück zum Seitenanfang
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+        
+<div class="md-social">
+  
+    
+    
+    
+    
+      
+      
+    
+    <a href="https://pypi.org/project/fluxtrader" target="_blank" rel="noopener" title="pypi.org" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.8 200.5c-7.7-30.9-22.3-54.2-53.4-54.2h-40.1v47.4c0 36.8-31.2 67.8-66.8 67.8H172.7c-29.2 0-53.4 25-53.4 54.3v101.8c0 29 25.2 46 53.4 54.3 33.8 9.9 66.3 11.7 106.8 0 26.9-7.8 53.4-23.5 53.4-54.3v-40.7H226.2v-13.6h160.2c31.1 0 42.6-21.7 53.4-54.2 11.2-33.5 10.7-65.7 0-108.6M286.2 444.7a20.4 20.4 0 1 1 0-40.7 20.4 20.4 0 1 1 0 40.7M167.8 248.1h106.8c29.7 0 53.4-24.5 53.4-54.3V91.9c0-29-24.4-50.7-53.4-55.6-35.8-5.9-74.7-5.6-106.8.1-45.2 8-53.4 24.7-53.4 55.6v40.7h106.9v13.6h-147c-31.1 0-58.3 18.7-66.8 54.2-9.8 40.7-10.2 66.1 0 108.6 7.6 31.6 25.7 54.2 56.8 54.2H101v-48.8c0-35.3 30.5-66.4 66.8-66.4m-6.6-183.4a20.4 20.4 0 1 1 0 40.8 20.4 20.4 0 1 1 0-40.8"/></svg>
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.tabs.sticky", "navigation.sections", "navigation.expand", "navigation.top", "content.code.copy", "content.code.annotate", "search.suggest", "search.highlight"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "In Zwischenablage kopiert", "clipboard.copy": "In Zwischenablage kopieren", "search.result.more.one": "1 weiteres Suchergebnis auf dieser Seite", "search.result.more.other": "# weitere Suchergebnisse auf dieser Seite", "search.result.none": "Keine Suchergebnisse", "search.result.one": "1 Suchergebnis", "search.result.other": "# Suchergebnisse", "search.result.placeholder": "Suchbegriff eingeben", "search.result.term.missing": "Es fehlt", "select.version": "Version ausw\u00e4hlen"}, "version": null}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.79ae519e.min.js"></script>
+      
+    
+  </body>
+</html>

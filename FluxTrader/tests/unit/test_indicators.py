@@ -198,9 +198,9 @@ class TestDetectReversalPattern:
         assert detect_reversal_pattern(df, direction="long") is None
 
     def test_insufficient_bars_for_engulfing_returns_none(self):
-        # Nur 1 Bar → kein Engulfing möglich; Hammer-Check schlägt auch fehl
-        df = _make_ohlcv_row(o=100.5, h=100.8, l=98.0, c=100.4)
-        # body=0.1, lower=2.4, upper=0.4 → 0.4>0.03 → kein Hammer; kein Engulfing (1 Bar)
+        # Nur 1 Bar → kein Engulfing möglich; Bar hat großen Body → kein Hammer
+        # body=0.8, lower=0.5 → lower < 2.0*body (0.5 < 1.6) → kein Hammer; kein Engulfing (1 Bar)
+        df = _make_ohlcv_row(o=100.0, h=101.0, l=99.5, c=100.8)
         assert detect_reversal_pattern(df, direction="long") is None
 
     def test_empty_df_returns_none(self):

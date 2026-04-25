@@ -932,13 +932,41 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#state-persistenz" class="md-nav__link">
+  <a href="#state-persistenz-zentrale-multi-bot-db" class="md-nav__link">
     <span class="md-ellipsis">
       
-        State-Persistenz
+        State-Persistenz (zentrale Multi-Bot-DB)
       
     </span>
   </a>
+  
+    <nav class="md-nav" aria-label="State-Persistenz (zentrale Multi-Bot-DB)">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#datenfluss-zur-db" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Datenfluss zur DB
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#beispiel-trade-in-db-mit-mit-ev" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Beispiel: Trade in DB mit MIT + EV
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
   
 </li>
       
@@ -980,6 +1008,17 @@
     <span class="md-ellipsis">
       
         Log-Monitoring
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#monitoring-dashboard" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Monitoring &amp; Dashboard
       
     </span>
   </a>
@@ -1076,13 +1115,41 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#state-persistenz" class="md-nav__link">
+  <a href="#state-persistenz-zentrale-multi-bot-db" class="md-nav__link">
     <span class="md-ellipsis">
       
-        State-Persistenz
+        State-Persistenz (zentrale Multi-Bot-DB)
       
     </span>
   </a>
+  
+    <nav class="md-nav" aria-label="State-Persistenz (zentrale Multi-Bot-DB)">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#datenfluss-zur-db" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Datenfluss zur DB
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#beispiel-trade-in-db-mit-mit-ev" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Beispiel: Trade in DB mit MIT + EV
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
   
 </li>
       
@@ -1124,6 +1191,17 @@
     <span class="md-ellipsis">
       
         Log-Monitoring
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#monitoring-dashboard" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Monitoring &amp; Dashboard
       
     </span>
   </a>
@@ -1245,22 +1323,106 @@
 </span></code></pre></div>
 <p>Der Scanner nutzt die Alpaca Snapshot-API und sendet ein Telegram-Alert
 mit den Top-Gap-Kandidaten.</p>
-<h2 id="state-persistenz">State-Persistenz<a class="headerlink" href="#state-persistenz" title="Permanent link">&para;</a></h2>
-<p><code>PersistentState</code> speichert in <code>fluxtrader_data/state.db</code> (SQLite):</p>
-<div class="language-text highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a>daily          │ day TEXT PK │ pnl REAL │ trades_count INT │ by_symbol JSON
-</span><span id="__span-2-2"><a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a>account        │ key TEXT PK │ value REAL
-</span><span id="__span-2-3"><a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a>cooldowns      │ symbol TEXT PK │ until_ts TEXT
-</span><span id="__span-2-4"><a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a>reserved_groups│ group_name TEXT │ day TEXT │ PRIMARY KEY(group_name, day)
-</span></code></pre></div>
+<h2 id="state-persistenz-zentrale-multi-bot-db">State-Persistenz (zentrale Multi-Bot-DB)<a class="headerlink" href="#state-persistenz-zentrale-multi-bot-db" title="Permanent link">&para;</a></h2>
+<p><code>PersistentState</code> speichert in <code>fluxtrader_data/state.db</code> (SQLite) – <strong>eine DB für alle Bots</strong>:</p>
+<table>
+<thead>
+<tr>
+<th>Tabelle</th>
+<th>Diskriminator</th>
+<th>Zweck</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>trades</strong></td>
+<td>strategy</td>
+<td>Komplette Trade-Historie (entry_ts, exit_ts, pnl, mit_qty_factor, ev_estimate, features_json)</td>
+</tr>
+<tr>
+<td><strong>equity_snapshots</strong></td>
+<td>(ts, strategy)</td>
+<td>Hochfrequente Equity-Kurve (pro Bar-Tick)</td>
+</tr>
+<tr>
+<td><strong>positions</strong></td>
+<td>(strategy, symbol)</td>
+<td>Offene Positionen (Live-Spiegel mit unrealized_pnl)</td>
+</tr>
+<tr>
+<td><strong>signals</strong></td>
+<td>strategy</td>
+<td>Eingegangene Signale (optional, für ML-Retraining)</td>
+</tr>
+<tr>
+<td><strong>anomaly_events</strong></td>
+<td>strategy</td>
+<td>Erkannte Anomalien (Duplicate, Oversized, Spike, Connectivity, Flood)</td>
+</tr>
+<tr>
+<td><strong>daily</strong></td>
+<td>(day, strategy)</td>
+<td>Tägliche Aggregates (pnl, trades_count, by_symbol)</td>
+</tr>
+<tr>
+<td><strong>account</strong></td>
+<td>key</td>
+<td>Peak-Equity, globale Meter</td>
+</tr>
+<tr>
+<td><strong>cooldowns</strong></td>
+<td>symbol</td>
+<td>Symbol-Cooldowns (Restart-persistent)</td>
+</tr>
+<tr>
+<td><strong>reserved_groups</strong></td>
+<td>(group_name, day, strategy)</td>
+<td>MIT-Independence-Gruppen (pro Strategie/Tag)</td>
+</tr>
+</tbody>
+</table>
 <p><strong>Überleben eines Restarts:</strong>
-- Daily-PnL und Trade-Counter bleiben erhalten
+- Daily-PnL und Trade-Counter pro Strategie bleiben erhalten
+- Offene Positionen + ihr Unrealized-PnL werden nach Restart neu aus Broker gelesen + DB aktualisiert
 - Reservierte MIT-Korrelationsgruppen bleiben erhalten (kein Doppel-Entry nach Restart)
-- Cooldowns bleiben erhalten</p>
+- Cooldowns bleiben erhalten
+- <strong>Neu:</strong> Komplette Trade-Historie mit MIT-Qty-Factor + EV-Estimates bleibt für Probabilistische Auswertungen erhalten</p>
+<h3 id="datenfluss-zur-db">Datenfluss zur DB<a class="headerlink" href="#datenfluss-zur-db" title="Permanent link">&para;</a></h3>
+<div class="language-text highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a>LiveRunner.on_bar(bar)
+</span><span id="__span-2-2"><a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a>├─ strategy.on_bar(bar) → Signal(features, strength, metadata)
+</span><span id="__span-2-3"><a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a>├─ broker.execute_signal(sig) → ExecutionResult
+</span><span id="__span-2-4"><a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a>├─ TradeManager.register_and_persist(trade, sig)
+</span><span id="__span-2-5"><a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a>│  ├─ state.save_trade(...)  ← trades table (open, mit_qty_factor, ev_estimate)
+</span><span id="__span-2-6"><a id="__codelineno-2-6" name="__codelineno-2-6" href="#__codelineno-2-6"></a>│  └─ state.update_or_create_position(...)  ← positions table
+</span><span id="__span-2-7"><a id="__codelineno-2-7" name="__codelineno-2-7" href="#__codelineno-2-7"></a>├─ state.save_signal(sig)  ← signals table (für ML-Retraining)
+</span><span id="__span-2-8"><a id="__codelineno-2-8" name="__codelineno-2-8" href="#__codelineno-2-8"></a>├─ state.save_equity_snapshot(...)  ← equity_snapshots (alle 1–5 Min je nach Datendichte)
+</span><span id="__span-2-9"><a id="__codelineno-2-9" name="__codelineno-2-9" href="#__codelineno-2-9"></a>└─ (bei Close oder EOD)
+</span><span id="__span-2-10"><a id="__codelineno-2-10" name="__codelineno-2-10" href="#__codelineno-2-10"></a>   ├─ state.close_trade(...)  ← trades table (set exit_ts, pnl, realized-flag)
+</span><span id="__span-2-11"><a id="__codelineno-2-11" name="__codelineno-2-11" href="#__codelineno-2-11"></a>   ├─ state.remove_position(...)  ← positions table (delete)
+</span><span id="__span-2-12"><a id="__codelineno-2-12" name="__codelineno-2-12" href="#__codelineno-2-12"></a>   ├─ state.update_daily_record(...)  ← daily table (inkrementiert pnl + trades_count)
+</span><span id="__span-2-13"><a id="__codelineno-2-13" name="__codelineno-2-13" href="#__codelineno-2-13"></a>   └─ AnomalyDetector._emit(event)
+</span><span id="__span-2-14"><a id="__codelineno-2-14" name="__codelineno-2-14" href="#__codelineno-2-14"></a>      └─ state.log_anomaly(event)  ← anomaly_events table
+</span></code></pre></div>
+<h3 id="beispiel-trade-in-db-mit-mit-ev">Beispiel: Trade in DB mit MIT + EV<a class="headerlink" href="#beispiel-trade-in-db-mit-mit-ev" title="Permanent link">&para;</a></h3>
+<div class="language-sql highlight"><pre><span></span><code><span id="__span-3-1"><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="k">SELECT</span><span class="w"> </span><span class="n">id</span><span class="p">,</span><span class="w"> </span><span class="n">symbol</span><span class="p">,</span><span class="w"> </span><span class="n">entry_price</span><span class="p">,</span><span class="w"> </span><span class="n">exit_price</span><span class="p">,</span><span class="w"> </span><span class="n">pnl</span><span class="p">,</span><span class="w"> </span><span class="n">mit_qty_factor</span><span class="p">,</span><span class="w"> </span><span class="n">ev_estimate</span><span class="p">,</span><span class="w"> </span><span class="n">group_name</span>
+</span><span id="__span-3-2"><a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a><span class="k">FROM</span><span class="w"> </span><span class="n">trades</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">strategy</span><span class="o">=</span><span class="s1">&#39;orb&#39;</span><span class="w"> </span><span class="k">AND</span><span class="w"> </span><span class="n">symbol</span><span class="o">=</span><span class="s1">&#39;AAPL&#39;</span><span class="w"> </span><span class="k">ORDER</span><span class="w"> </span><span class="k">BY</span><span class="w"> </span><span class="n">entry_ts</span><span class="w"> </span><span class="k">DESC</span><span class="w"> </span><span class="k">LIMIT</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span>
+</span></code></pre></div>
+<p>Zeigt z.B.:
+<div class="language-text highlight"><pre><span></span><code><span id="__span-4-1"><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a>id | symbol | entry_price | exit_price | pnl    | mit_qty_factor | ev_estimate | group_name
+</span><span id="__span-4-2"><a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a>---|--------|-------------|------------|--------|----------------|-------------|----------
+</span><span id="__span-4-3"><a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a>42 | AAPL   | 150.25      | 152.10     | 18.50  | 0.75           | 0.42        | TECH_1
+</span></code></pre></div></p>
+<p><strong>Probabilistische Nutzung:</strong>
+- <code>mit_qty_factor</code>: Adjusted Trade-Größe aus MIT-Overlay (0.25–1.0) – für Law-of-Large-Numbers
+- <code>ev_estimate</code>: Expected-Value des Signals – für Kelly-Criterion / Optimal-F-Calculation
+- <code>group_name</code>: MIT-Independence-Gruppe – für Trade-Correlation-Analysen
+- <code>features_json</code>: kompletter FeatureVector – für ML-Model-Retraining (offline)</p>
 <h2 id="telegram-alerts">Telegram-Alerts<a class="headerlink" href="#telegram-alerts" title="Permanent link">&para;</a></h2>
-<div class="language-yaml highlight"><pre><span></span><code><span id="__span-3-1"><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="nt">notifications</span><span class="p">:</span>
-</span><span id="__span-3-2"><a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a><span class="w">  </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
-</span><span id="__span-3-3"><a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a><span class="w">  </span><span class="nt">telegram_token</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;&quot;</span><span class="w">    </span><span class="c1"># Besser via .env</span>
-</span><span id="__span-3-4"><a id="__codelineno-3-4" name="__codelineno-3-4" href="#__codelineno-3-4"></a><span class="w">  </span><span class="nt">telegram_chat_id</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;&quot;</span><span class="w">  </span><span class="c1"># Besser via .env</span>
+<div class="language-yaml highlight"><pre><span></span><code><span id="__span-5-1"><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a><span class="nt">notifications</span><span class="p">:</span>
+</span><span id="__span-5-2"><a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a><span class="w">  </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+</span><span id="__span-5-3"><a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a><span class="w">  </span><span class="nt">bot_name</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;Flux_OBB&quot;</span><span class="w">  </span><span class="c1"># Wichtig wenn mehrere Bots in denselben Chat senden</span>
+</span><span id="__span-5-4"><a id="__codelineno-5-4" name="__codelineno-5-4" href="#__codelineno-5-4"></a><span class="w">  </span><span class="nt">telegram_token</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;&quot;</span><span class="w">    </span><span class="c1"># Besser via .env</span>
+</span><span id="__span-5-5"><a id="__codelineno-5-5" name="__codelineno-5-5" href="#__codelineno-5-5"></a><span class="w">  </span><span class="nt">telegram_chat_id</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;&quot;</span><span class="w">  </span><span class="c1"># Besser via .env</span>
 </span></code></pre></div>
 <p>Alert-Typen:</p>
 <table>
@@ -1273,7 +1435,7 @@ mit den Top-Gap-Kandidaten.</p>
 <tbody>
 <tr>
 <td>Trade geöffnet</td>
-<td>Symbol, Side, Qty, Entry, Stop, Target</td>
+<td>Bot-Name, Symbol, Side, Qty, Entry, Stop, Target, Reason, Order-Kontext</td>
 </tr>
 <tr>
 <td>Trade geschlossen</td>
@@ -1309,34 +1471,42 @@ mit den Top-Gap-Kandidaten.</p>
 </div>
 <h2 id="graceful-shutdown">Graceful Shutdown<a class="headerlink" href="#graceful-shutdown" title="Permanent link">&para;</a></h2>
 <p>Der Runner registriert <code>SIGINT</code> / <code>SIGTERM</code>-Handler:</p>
-<div class="language-bash highlight"><pre><span></span><code><span id="__span-4-1"><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="c1"># Ctrl+C → ordentliches Stoppen</span>
-</span><span id="__span-4-2"><a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a>^C
-</span><span id="__span-4-3"><a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a><span class="m">2025</span>-03-12<span class="w"> </span><span class="m">15</span>:30:00<span class="w"> </span><span class="o">[</span>info<span class="o">]</span><span class="w"> </span>runner.stopping
-</span><span id="__span-4-4"><a id="__codelineno-4-4" name="__codelineno-4-4" href="#__codelineno-4-4"></a><span class="m">2025</span>-03-12<span class="w"> </span><span class="m">15</span>:30:02<span class="w"> </span><span class="o">[</span>info<span class="o">]</span><span class="w"> </span>eod_close<span class="w"> </span><span class="nv">attempted</span><span class="o">=[</span><span class="s1">&#39;NVDA&#39;</span><span class="o">]</span><span class="w"> </span><span class="nv">remaining</span><span class="o">=[]</span>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-6-1"><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a><span class="c1"># Ctrl+C → ordentliches Stoppen</span>
+</span><span id="__span-6-2"><a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a>^C
+</span><span id="__span-6-3"><a id="__codelineno-6-3" name="__codelineno-6-3" href="#__codelineno-6-3"></a><span class="m">2025</span>-03-12<span class="w"> </span><span class="m">15</span>:30:00<span class="w"> </span><span class="o">[</span>info<span class="o">]</span><span class="w"> </span>runner.stopping
+</span><span id="__span-6-4"><a id="__codelineno-6-4" name="__codelineno-6-4" href="#__codelineno-6-4"></a><span class="m">2025</span>-03-12<span class="w"> </span><span class="m">15</span>:30:02<span class="w"> </span><span class="o">[</span>info<span class="o">]</span><span class="w"> </span>eod_close<span class="w"> </span><span class="nv">attempted</span><span class="o">=[</span><span class="s1">&#39;NVDA&#39;</span><span class="o">]</span><span class="w"> </span><span class="nv">remaining</span><span class="o">=[]</span>
 </span></code></pre></div>
 <p>Offene Positionen werden <strong>nicht</strong> automatisch geschlossen bei einem Shutdown
 außerhalb des EOD-Fensters – das ist eine bewusste Design-Entscheidung
 (manuelles Schließen gewünscht oder Bot-Restart).</p>
 <h2 id="log-monitoring">Log-Monitoring<a class="headerlink" href="#log-monitoring" title="Permanent link">&para;</a></h2>
-<div class="language-bash highlight"><pre><span></span><code><span id="__span-5-1"><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a><span class="c1"># Strukturierte Logs in Datei + JSON (für Aggregation z.B. Loki/Grafana)</span>
-</span><span id="__span-5-2"><a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a>python<span class="w"> </span>main.py<span class="w"> </span>live<span class="w"> </span>--config<span class="w"> </span>configs/orb_live.yaml<span class="w"> </span>--log-json<span class="w"> </span><span class="m">2</span>&gt;<span class="p">&amp;</span><span class="m">1</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>tee<span class="w"> </span>bot.log
-</span><span id="__span-5-3"><a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a>
-</span><span id="__span-5-4"><a id="__codelineno-5-4" name="__codelineno-5-4" href="#__codelineno-5-4"></a><span class="c1"># Nur Errors anzeigen</span>
-</span><span id="__span-5-5"><a id="__codelineno-5-5" name="__codelineno-5-5" href="#__codelineno-5-5"></a>python<span class="w"> </span>main.py<span class="w"> </span>live<span class="w"> </span>--config<span class="w"> </span>configs/orb_live.yaml<span class="w"> </span><span class="p">|</span><span class="w"> </span>grep<span class="w"> </span><span class="s1">&#39;&quot;level&quot;:&quot;error&quot;&#39;</span>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-7-1"><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a><span class="c1"># Strukturierte Logs in Datei + JSON (für Aggregation z.B. Loki/Grafana)</span>
+</span><span id="__span-7-2"><a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a>python<span class="w"> </span>main.py<span class="w"> </span>live<span class="w"> </span>--config<span class="w"> </span>configs/orb_live.yaml<span class="w"> </span>--log-json<span class="w"> </span><span class="m">2</span>&gt;<span class="p">&amp;</span><span class="m">1</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>tee<span class="w"> </span>bot.log
+</span><span id="__span-7-3"><a id="__codelineno-7-3" name="__codelineno-7-3" href="#__codelineno-7-3"></a>
+</span><span id="__span-7-4"><a id="__codelineno-7-4" name="__codelineno-7-4" href="#__codelineno-7-4"></a><span class="c1"># Nur Errors anzeigen</span>
+</span><span id="__span-7-5"><a id="__codelineno-7-5" name="__codelineno-7-5" href="#__codelineno-7-5"></a>python<span class="w"> </span>main.py<span class="w"> </span>live<span class="w"> </span>--config<span class="w"> </span>configs/orb_live.yaml<span class="w"> </span><span class="p">|</span><span class="w"> </span>grep<span class="w"> </span><span class="s1">&#39;&quot;level&quot;:&quot;error&quot;&#39;</span>
 </span></code></pre></div>
+<h2 id="monitoring-dashboard">Monitoring &amp; Dashboard<a class="headerlink" href="#monitoring-dashboard" title="Permanent link">&para;</a></h2>
+<p>Health-Server, Prometheus-Metrics, Web-Dashboard und Anomaly-Detection sind
+eine eigene Subsystem-Ebene – siehe <a href="../monitoring/">monitoring.md</a>.</p>
+<p>Wichtige Dashboard-Funktionen (lesen read-only aus der zentralen DB):
+- <strong>Trade-History:</strong> <code>/api/trades?strategy=orb&amp;since=2026-04-15</code> (mit MIT-Qty + EV)
+- <strong>Live-Positionen:</strong> <code>/api/positions?strategy=orb</code> (Unrealized-PnL live)
+- <strong>Equity-Kurven:</strong> <code>/api/equity?strategy=orb&amp;limit=500</code> (für Charts)
+- <strong>Bot-Status:</strong> <code>/api/strategies/list</code> (aggregierter Status aller Bots)</p>
 <h2 id="mehrere-bot-instanzen">Mehrere Bot-Instanzen<a class="headerlink" href="#mehrere-bot-instanzen" title="Permanent link">&para;</a></h2>
 <p>Jede Instanz braucht eine eigene <code>ibkr_client_id</code>. Alpaca-Konten können
 mehrere Instanzen parallel nutzen (gleiches Key-Pair), solange Position-Limits
 beachtet werden.</p>
-<div class="language-yaml highlight"><pre><span></span><code><span id="__span-6-1"><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a><span class="c1"># Bot-Instanz 1</span>
-</span><span id="__span-6-2"><a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a><span class="nt">broker</span><span class="p">:</span>
-</span><span id="__span-6-3"><a id="__codelineno-6-3" name="__codelineno-6-3" href="#__codelineno-6-3"></a><span class="w">  </span><span class="nt">ibkr_client_id</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">1</span>
-</span><span id="__span-6-4"><a id="__codelineno-6-4" name="__codelineno-6-4" href="#__codelineno-6-4"></a><span class="w">  </span><span class="nt">ibkr_bot_id</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">ORB1</span>
-</span><span id="__span-6-5"><a id="__codelineno-6-5" name="__codelineno-6-5" href="#__codelineno-6-5"></a>
-</span><span id="__span-6-6"><a id="__codelineno-6-6" name="__codelineno-6-6" href="#__codelineno-6-6"></a><span class="c1"># Bot-Instanz 2 (anderer Config-File)</span>
-</span><span id="__span-6-7"><a id="__codelineno-6-7" name="__codelineno-6-7" href="#__codelineno-6-7"></a><span class="nt">broker</span><span class="p">:</span>
-</span><span id="__span-6-8"><a id="__codelineno-6-8" name="__codelineno-6-8" href="#__codelineno-6-8"></a><span class="w">  </span><span class="nt">ibkr_client_id</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">2</span>
-</span><span id="__span-6-9"><a id="__codelineno-6-9" name="__codelineno-6-9" href="#__codelineno-6-9"></a><span class="w">  </span><span class="nt">ibkr_bot_id</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">OBB1</span>
+<div class="language-yaml highlight"><pre><span></span><code><span id="__span-8-1"><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a><span class="c1"># Bot-Instanz 1</span>
+</span><span id="__span-8-2"><a id="__codelineno-8-2" name="__codelineno-8-2" href="#__codelineno-8-2"></a><span class="nt">broker</span><span class="p">:</span>
+</span><span id="__span-8-3"><a id="__codelineno-8-3" name="__codelineno-8-3" href="#__codelineno-8-3"></a><span class="w">  </span><span class="nt">ibkr_client_id</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">1</span>
+</span><span id="__span-8-4"><a id="__codelineno-8-4" name="__codelineno-8-4" href="#__codelineno-8-4"></a><span class="w">  </span><span class="nt">ibkr_bot_id</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">ORB1</span>
+</span><span id="__span-8-5"><a id="__codelineno-8-5" name="__codelineno-8-5" href="#__codelineno-8-5"></a>
+</span><span id="__span-8-6"><a id="__codelineno-8-6" name="__codelineno-8-6" href="#__codelineno-8-6"></a><span class="c1"># Bot-Instanz 2 (anderer Config-File)</span>
+</span><span id="__span-8-7"><a id="__codelineno-8-7" name="__codelineno-8-7" href="#__codelineno-8-7"></a><span class="nt">broker</span><span class="p">:</span>
+</span><span id="__span-8-8"><a id="__codelineno-8-8" name="__codelineno-8-8" href="#__codelineno-8-8"></a><span class="w">  </span><span class="nt">ibkr_client_id</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">2</span>
+</span><span id="__span-8-9"><a id="__codelineno-8-9" name="__codelineno-8-9" href="#__codelineno-8-9"></a><span class="w">  </span><span class="nt">ibkr_bot_id</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">OBB1</span>
 </span></code></pre></div>
 
 
