@@ -1,6 +1,9 @@
 # Botti-Strategie
 
-Trend Following + Mean Reversion auf Daily-Bars. Migriert aus `Trading_Bot/trader_v6.py`.
+Botti ist eine taktische US-Aktien-Strategie auf **Daily-Bars**. In Trendphasen sucht sie nach
+SMA-Crossover- und Pullback-Einstiegen; in Seitwärts- oder Panikphasen ergänzt ein Mean-Reversion-Arm
+Einstiege bei stark überverkauften Titeln. Jede Position wird ATR-basiert gestoppt und per
+Trailing-Stop gemanagt. Migriert aus `Trading_Bot/trader_v6.py`.
 
 ## Überblick
 
@@ -12,6 +15,67 @@ Trend Following + Mean Reversion auf Daily-Bars. Migriert aus `Trading_Bot/trade
 | Stop-Loss | ATR-basiert (`initial_sl_atr_mult × ATR`) |
 | Target | ATR-basiert (`trailing_atr_mult × ATR`) |
 | Registriert als | `"botti"` |
+
+---
+
+## Benötigte Daten
+
+| Quelle | Wozu |
+|---|---|
+| **Daily-Bars** (Symbole) | Primäre Signalberechnung (SMA, EMA, RSI, MACD, BB, ATR, ADX, Volume) |
+| **VIX** (via `MarketContextService.vix`) | VIX-Regime-Filter: Positionsgröße bei VIX > 30 halbiert |
+| **SPY Daily-Bars** (via `spy_df`) | Wird vom MTF-Proxy in Phase 1 nicht direkt genutzt; in Phase 2 als Trendkontext |
+
+Für Backtest: `provider: yfinance`, Datenquelle für VIX = `^VIX`-Symbol im Ticker-Snapshot.
+Für Live: `provider: ibkr`, `timeframe: "1D"`, `lookback_days: 150` (Warmup für SMA30 + Puffer).
+
+---
+
+## Handelszeiten / Tagesablauf
+
+Botti ist eine **täglich laufende Endlos-Schleife** — kein Intraday-Trading.
+Der Bar wird am US-Börsenschluss (16:00 ET) vollständig; der LiveRunner wertet ihn
+kurz danach aus, sobald der Provider ihn liefert.
+
+| Uhrzeit ET | Event |
+|---|---|
+| ~09:00 | Premarket-Scan (optional): Gap-Kandidaten aus Watchlist prüfen |
+| 09:30 | Market-Open — Bot wartet auf Daily-Bar-Completion (kein Intraday-Handel) |
+| ~16:00–16:05 | Daily-Bar vollständig → Signalgenerierung läuft automatisch |
+| ~16:05 | Post-Market: Daily-Summary per Telegram, State persistieren |
+| Über Nacht | Offene Positionen bleiben gehalten (kein EOD-Flatten) |
+
+**Wichtig:**
+- `eod_close_time` ist für Botti **nicht gesetzt** — kein automatisches Flatten.
+- Entries werden als **Market-Orders** nach Signalgenerierung platziert (nächster Open).
+- `lookback_days: 150` stellt sicher, dass SMA30, ADX14 und ATR14 vom ersten Tag an berechnet werden können.
+
+---
+
+## Live-Betrieb
+
+```yaml
+# configs/botti.yaml (Auszug)
+mode: paper
+broker:
+  type: ibkr
+  paper: true
+  ibkr_client_id: 8
+  ibkr_bot_id: Flux_BOTTI
+data:
+  provider: ibkr
+  timeframe: "1D"
+  lookback_days: 150
+```
+
+```bash
+python main.py paper --config configs/botti.yaml
+python main.py live  --config configs/botti.yaml
+```
+
+**MTF-Filter-Status:**
+- **Phase 1 (aktiv):** Daily-Proxy via `_daily_mtf_proxy(df, cfg)` — kein Intraday-Feed nötig.
+- **Phase 2 (geplant):** Echter 15Min-Feed via IBKR als Bestätigung nach Daily-Signal.
 
 ---
 

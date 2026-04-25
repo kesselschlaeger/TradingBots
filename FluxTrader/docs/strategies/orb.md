@@ -3,6 +3,46 @@
 Die ORB-Strategie handelt Ausbrüche aus der Opening Range (9:30–10:00 ET) mit
 einem mehrstufigen Filter-Stack und optionalem MIT Probabilistic Overlay.
 
+Die Kernidee: Die ersten Handelsminuten nach Open etablieren eine Preisspanne (High/Low),
+die Institutionen als Referenz nutzen. Ein starker Ausbruch mit hohem Volumen nach dieser Phase
+signalisiert impulsive Folge-Bewegung — ORB tradet die Continuation mit definiertem R:R aus der Range.
+
+---
+
+## Benötigte Daten
+
+| Quelle | Timeframe | Wozu |
+|---|---|---|
+| **Handelssymbol** (z.B. SPY, NVDA) | 5-Min | Primäre Bar-Quelle für OR-Box, Breakout, Volume |
+| **SPY** (via `MarketContextService.spy_df`) | 5-Min | Trend-Filter: SPY > EMA20 → bullish |
+| **VIX** (via `MarketContextService.vix`) | Snapshot | VIX Term-Structure-Regime-Filter |
+
+Für Live: `provider: ibkr` oder `alpaca`, `timeframe: "5Min"`, `lookback_days: 5–10` (intraday reicht).
+Für Backtest: `provider: yfinance`, `timeframe: "5Min"`.
+
+**Mindest-Warmup:** `min_bars: 20` (Default); OR-Phase benötigt mindestens die ersten 3 Bars (15 Min / 5-Min-Bar).
+
+---
+
+## Handelszeiten / Tagesablauf
+
+ORB ist eine **reine Intraday-Strategie** — alle Positionen werden spätestens um 15:27 ET geschlossen.
+
+| Uhrzeit ET | Event |
+|---|---|
+| 09:30 | Market-Open — OR-Phase beginnt, kein Trade-Entry |
+| 09:30–10:00 | Opening Range wird aufgebaut (15 Min, konfigurierbar) |
+| ab 10:00 | Breakout-Scan läuft auf jedem 5-Min-Bar |
+| bis 10:45 | Entry-Cutoff (konfigurierbar via `entry_cutoff_time`) |
+| ab 10:45 | Kein neuer Entry, offene Positionen laufen weiter |
+| 15:27 | EOD-Flatten — alle Positionen werden geschlossen (`eod_close_time`) |
+| 16:00 | Market-Close — Session-Ende |
+
+**Wichtig:**
+- `avoid_fridays` / `avoid_mondays` deaktivieren optionale Wochentags-Exclusions.
+- Time-Decay reduziert die Signal-Stärke mit jedem Bracket nach der OR (konfigurierbar).
+- Bei aktiviertem Trailing-Stop wird ab `trail_after_r × R` Gewinn getrailed.
+
 ## Funktionsprinzip
 
 ```mermaid

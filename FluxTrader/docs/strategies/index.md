@@ -1,12 +1,15 @@
 # Strategien
 
-FluxTrader bringt drei produktionserprobte Strategien mit.
+FluxTrader bringt fünf produktionserprobte Strategien mit.
 
-| Strategie | Timeframe | Style | Broker-Anforderung |
-|---|---|---|---|
-| [ORB](orb.md) | 5-Min Intraday | Trend-Following Breakout | SL + TP (Bracket-Order) |
-| [OBB](obb.md) | Daily | Momentum Swing | Market-Entry, kein SL |
-| [Botti](botti.md) | Daily (+ MTF-Filter) | Trend Following + Mean Reversion | SL + TP (ATR-basiert) |
+| Strategie | Timeframe | Style | Haltedauer | Broker-Anforderung |
+|---|---|---|---|---|
+| [ORB](orb.md) | 5-Min Intraday | Trend-Following Breakout | Intraday (Stunden) | SL + TP (Bracket-Order) |
+| [Quick Flip](quick_flip.md) | 5-Min Intraday | Reversal nach Liquidity-Sweep | Intraday (Minuten–Stunden) | SL + TP (Market-Order) |
+| [ICT Order Block](ict_ob.md) | 5-Min / 4H / 1H MTF | SMC Order-Block Breakout | Intraday (Stunden) | SL + TP (R-basiert) |
+| [OBB](obb.md) | Daily | Momentum Swing | 1 Handelstag (Overnight) | Market-Entry, kein SL |
+| [Botti](botti.md) | Daily (+ MTF-Filter) | Trend Following + Mean Reversion | Tage–Wochen | SL + TP (ATR-basiert) |
+| [Botti Pair](botti_pair.md) | Daily | Pair-Trading (Kalman Z-Score) | Tage–Wochen | Market-Order (Long + Short Leg) |
 
 ## Eigene Strategie entwickeln
 

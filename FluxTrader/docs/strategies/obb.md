@@ -25,6 +25,22 @@ flowchart TD
 
 ---
 
+## Benötigte Daten
+
+| Quelle | Timeframe | Wozu |
+|---|---|---|
+| **Handelssymbol** | `1Day` | Rolling-High/Low (50 Bars), Breakout-Signal, Sizing |
+
+**Mindest-History:** `lookback_bars + 5` abgeschlossene Handelstage — bei Default 50 Bars also
+**mindestens ~55 tägliche Bars** im Buffer. Config-Default `lookback_days: 90` stellt das sicher.
+
+!!! warning "Kein Filter-Stack"
+    OBB hat bewusst keinen Trend-, Gap- oder VIX-Filter. Die Strategie setzt auf statistische
+    Häufigkeit von Momentum-Followthrough nach neuen 50-Tage-Extremen und filtert durch
+    Positionsgröße statt durch Bedingungen.
+
+---
+
 ## Parameter-Referenz
 
 | Parameter | Default | Beschreibung |
@@ -95,6 +111,21 @@ data:
 !!! warning "Daily-Bars"
     OBB benötigt Daily-Bars (`timeframe: "1Day"`). Mit 5-Min-Bars liefert
     die Strategie keine sinnvollen Signale.
+
+---
+
+## Overnight-Risiko
+
+OBB hält Positionen **über Nacht** und verzichtet bewusst auf Stop-Loss-Orders. Das maximale
+Verlustrisiko pro Position beträgt `position_size_pct × equity` (Default 10%), aber:
+
+- **Gap-Risiko:** Earnings, Makro-Events und Geopolitik können den nächsten Open weit von
+  der Einstiegsposition entfernen. Das tatsächliche Verlustrisiko kann `position_size_pct`
+  deutlich übersteigen.
+- **Geeignete Symbole:** Nur hochliquide Titel (SPY, QQQ, large-cap) verwenden.
+  Penny Stocks oder News-sensitive Einzeltitel erhöhen das Gap-Risiko massiv.
+- **Keine automatische Absicherung:** Kein Hedge, kein Bracket. Der Exit erfolgt
+  ausschließlich als Market-Order am nächsten Open.
 
 ---
 
