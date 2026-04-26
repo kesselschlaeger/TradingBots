@@ -92,6 +92,10 @@ def _build_broker(cfg: AppConfig):
             order_confirm_timeout_s=float(cfg.execution.order_confirm_timeout_s),
         )
 
+    if bt == "bybit":
+        from execution.bybit_adapter import BybitAdapter
+        return BybitAdapter(cfg)
+
     raise ValueError(f"Unknown broker type: {bt}")
 
 
@@ -127,6 +131,16 @@ def _build_data_provider(cfg: AppConfig):
             use_rth=bool(cfg.data.model_extra.get("ibkr_use_rth", True)),
             asset_class=str(strategy_params.get("asset_class", "equity")),
             contract_cfg=dict(strategy_params),
+        )
+
+    if cfg.data.provider == "bybit":
+        from data.providers.bybit_provider import BybitDataProvider
+        params = cfg.broker_params or {}
+        return BybitDataProvider(
+            testnet=bool(params.get("testnet", True)),
+            api_key=str(params.get("api_key", "")),
+            api_secret=str(params.get("api_secret", "")),
+            category=str(params.get("category", "spot")),
         )
 
     raise ValueError(f"Unknown data provider: {cfg.data.provider}")
