@@ -31,6 +31,7 @@ from core.logging import get_logger
 from core.filters import (
     is_after_entry_cutoff,
     is_after_eod_close,
+    is_always_on_market,
     is_before_premarket,
     is_within_trade_window,
     timeframe_to_seconds,
@@ -377,6 +378,8 @@ class HealthState:
         )
 
     def trade_window_phase(self, now: datetime) -> str:
+        if is_always_on_market(self._strategy_cfg):
+            return "in_window"
         now_utc = _ensure_aware(now)
         if is_before_premarket(self._strategy_cfg, now_utc):
             return "before_premarket"
@@ -386,7 +389,7 @@ class HealthState:
             return "after_cutoff"
 
         now_et = to_et(now_utc)
-        open_t = self._cfg_time("market_open_time", default=(9, 30))
+        open_t = self._cfg_time("market_open_time", default=(9, 30), aliases=("market_open",))  # market_open = legacy-Alias älterer Configs
         open_dt = now_et.replace(
             hour=open_t.hour,
             minute=open_t.minute,
@@ -443,7 +446,13 @@ class HealthState:
         return int((expected - now).total_seconds())
 
     def _trade_window_payload(self, phase: str) -> dict[str, str]:
-        open_t = self._cfg_time("market_open_time", default=(9, 30))
+        if is_always_on_market(self._strategy_cfg):
+            return {
+                "start": "00:00",
+                "end": "24:00",
+                "phase": phase,
+            }
+        open_t = self._cfg_time("market_open_time", default=(9, 30), aliases=("market_open",))  # market_open = legacy-Alias älterer Configs
         cutoff_t = self._cfg_time("entry_cutoff_time", default=(15, 0))
         return {
             "start": f"{open_t.hour:02d}:{open_t.minute:02d}",
@@ -479,8 +488,15 @@ class HealthState:
         except Exception:
             return False
 
-    def _cfg_time(self, key: str, default: tuple[int, int]) -> time:
-        raw = self._strategy_cfg.get(key)
+    def _cfg_time(self,
+                  key: str,
+                  default: tuple[int, int],
+                  aliases: tuple[str, ...] = ()) -> time:
+        raw = None
+        for candidate in (key, *aliases):
+            if candidate in self._strategy_cfg:
+                raw = self._strategy_cfg.get(candidate)
+                break
         if raw is None:
             return datetime(2000, 1, 1, default[0], default[1]).time()
         if hasattr(raw, "hour") and hasattr(raw, "minute"):

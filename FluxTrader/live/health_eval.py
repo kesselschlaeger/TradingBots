@@ -7,6 +7,7 @@ from typing import Any, Optional
 from core.filters import (
     is_after_entry_cutoff,
     is_after_eod_close,
+    is_always_on_market,
     is_before_premarket,
     is_within_trade_window,
     timeframe_to_seconds,
@@ -41,6 +42,8 @@ def next_expected_bar_at(*,
 
 
 def trade_window_phase(strategy_cfg: dict[str, Any], now: datetime) -> str:
+    if is_always_on_market(strategy_cfg):
+        return "in_window"
     now_utc = now.astimezone(timezone.utc)
     if is_before_premarket(strategy_cfg, now_utc):
         return "before_premarket"
@@ -50,7 +53,9 @@ def trade_window_phase(strategy_cfg: dict[str, Any], now: datetime) -> str:
         return "after_cutoff"
 
     now_et = to_et(now_utc)
-    open_t = _cfg_time(strategy_cfg, "market_open_time", time(9, 30))
+    open_t = _cfg_time(
+        strategy_cfg, "market_open_time", time(9, 30), aliases=("market_open",),  # market_open = legacy-Alias älterer Configs
+    )
     open_dt = now_et.replace(
         hour=open_t.hour,
         minute=open_t.minute,
@@ -135,8 +140,22 @@ def evaluate_liveness(*,
     else:
         overall = "OK"
 
-    start_t = _cfg_time(strategy_cfg, "market_open_time", time(9, 30))
-    end_t = _cfg_time(strategy_cfg, "entry_cutoff_time", time(15, 0))
+    if is_always_on_market(strategy_cfg):
+        trade_window_payload = {
+            "start": "00:00",
+            "end": "24:00",
+            "phase": phase,
+        }
+    else:
+        start_t = _cfg_time(
+            strategy_cfg, "market_open_time", time(9, 30), aliases=("market_open",),  # market_open = legacy-Alias älterer Configs
+        )
+        end_t = _cfg_time(strategy_cfg, "entry_cutoff_time", time(15, 0))
+        trade_window_payload = {
+            "start": f"{start_t.hour:02d}:{start_t.minute:02d}",
+            "end": f"{end_t.hour:02d}:{end_t.minute:02d}",
+            "phase": phase,
+        }
     seconds_to_next = None
     if expected is not None:
         seconds_to_next = int((expected - now).total_seconds())
@@ -150,16 +169,19 @@ def evaluate_liveness(*,
         "last_bar_ts": last_bar_ts.isoformat() if last_bar_ts else None,
         "next_expected_bar_at": expected.isoformat() if expected else None,
         "seconds_to_next_bar": seconds_to_next,
-        "trade_window": {
-            "start": f"{start_t.hour:02d}:{start_t.minute:02d}",
-            "end": f"{end_t.hour:02d}:{end_t.minute:02d}",
-            "phase": phase,
-        },
+        "trade_window": trade_window_payload,
     }
 
 
-def _cfg_time(cfg: dict[str, Any], key: str, default: time) -> time:
-    raw = cfg.get(key)
+def _cfg_time(cfg: dict[str, Any],
+              key: str,
+              default: time,
+              aliases: tuple[str, ...] = ()) -> time:
+    raw = None
+    for candidate in (key, *aliases):
+        if candidate in cfg:
+            raw = cfg.get(candidate)
+            break
     if raw is None:
         return default
     if isinstance(raw, time):

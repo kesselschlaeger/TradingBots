@@ -22,10 +22,12 @@ strategy:
     allow_shorts: true
     avoid_fridays: false
 
-    market_open: "09:30"
+    market_open: "09:30"         # Alias für market_open_time; Scheduler + Health lesen beide
     market_close: "16:00"
     orb_end_time: "10:00"
-    eod_close_time: "15:27"
+    premarket_time: "09:00"      # Premarket-Gap-Scan via Telegram (09:00 ET)
+    eod_close_time: "15:27"      # Scheduler-Job: alle offenen Positionen zwangsschließen
+    post_market_time: "16:05"    # Scheduler-Job: Tages-Summary via Telegram
 
     use_trend_filter: true
     trend_ema_period: 20

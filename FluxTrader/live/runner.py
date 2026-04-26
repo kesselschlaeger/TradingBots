@@ -35,6 +35,7 @@ from strategy.base import BaseStrategy
 
 log = get_logger(__name__)
 ET_TZ = ZoneInfo("America/New_York")
+_MISSING = object()
 
 
 class LiveRunner:
@@ -151,6 +152,25 @@ class LiveRunner:
         else:
             log.info("runner.no_health_state")
 
+    @staticmethod
+    def _coerce_cfg_time(raw: Any) -> Optional[time]:
+        if raw is None:
+            return None
+        if isinstance(raw, time):
+            return raw
+        if isinstance(raw, str) and ":" in raw:
+            hh, mm = raw.split(":", 1)
+            return time(int(hh), int(mm))
+        return None
+
+    def _schedule_time(self, *keys: str) -> Optional[time]:
+        for key in keys:
+            raw = self.cfg.get(key, _MISSING)
+            if raw is _MISSING:
+                continue
+            return self._coerce_cfg_time(raw)
+        return None
+
     # ── Lifecycle ──────────────────────────────────────────────────────
 
     async def start(self) -> None:
@@ -183,10 +203,10 @@ class LiveRunner:
             )
 
         # Scheduler aufbauen (None-Zeiten → Job wird übersprungen)
-        premarket_t = self.cfg.get("premarket_time", time(9, 0))
-        market_open_t = self.cfg.get("market_open_time", time(9, 30))
-        eod_close_t = self.cfg.get("eod_close_time", time(15, 27))
-        post_market_t = self.cfg.get("post_market_time", time(16, 5))
+        premarket_t = self._schedule_time("premarket_time")
+        market_open_t = self._schedule_time("market_open_time", "market_open")  # market_open = legacy-Alias älterer Configs
+        eod_close_t = self._schedule_time("eod_close_time")
+        post_market_t = self._schedule_time("post_market_time")
 
         self._scheduler = TradingScheduler()
         self._scheduler.schedule_trading_day(
@@ -194,10 +214,10 @@ class LiveRunner:
             on_market_open=self._on_market_open if market_open_t else None,
             on_eod_close=self._on_eod_close if eod_close_t else None,
             on_post_market=self._on_post_market if post_market_t else None,
-            premarket_time=premarket_t or time(9, 0),
-            market_open_time=market_open_t or time(9, 30),
-            eod_close_time=eod_close_t or time(15, 27),
-            post_market_time=post_market_t or time(16, 5),
+            premarket_time=premarket_t or time(0, 0),
+            market_open_time=market_open_t or time(0, 0),
+            eod_close_time=eod_close_t or time(0, 0),
+            post_market_time=post_market_t or time(0, 0),
         )
         self._scheduler.start()
 

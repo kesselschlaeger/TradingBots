@@ -47,6 +47,12 @@ strategy:
     allow_shorts: true               # Short-Seite erlauben
     entry_cutoff_time: "15:45"       # fallback (wird durch futures_entry_cutoff überschrieben)
 
+    # Scheduler-Zeiten (CME Globex 23/5; equity Scheduler-Jobs nicht sinnvoll)
+    premarket_time: null             # kein Gap-Scan für Futures
+    market_open_time: null           # CME Session via _is_trading_session gesteuert, nicht Scheduler
+    eod_close_time: null             # Strategie schließt selbst bei futures_session_close (17:00 ET)
+    post_market_time: null           # kein Tages-Summary (24/5-Session passt nicht zu 16:05 ET)
+
     # MIT Independence Guard (optional)
     use_mit_independence_guard: false
     mit_correlation_groups: {}

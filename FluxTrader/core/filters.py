@@ -331,6 +331,15 @@ def is_after_eod_close(cfg: dict | object, now: datetime) -> bool:
     return now_et >= close_t
 
 
+def is_always_on_market(cfg: dict | object) -> bool:
+    """True für asset_class=crypto (24/7-Handel, keine Session-Grenzen)."""
+    if isinstance(cfg, dict):
+        val = cfg.get("asset_class", "equity")
+    else:
+        val = getattr(cfg, "asset_class", "equity")
+    return str(val).lower() == "crypto"
+
+
 def timeframe_to_seconds(timeframe: str) -> int:
     """Wandle einen Alpaca/IBKR-Timeframe-String in Sekunden um.
 

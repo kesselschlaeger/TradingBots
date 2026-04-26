@@ -64,6 +64,30 @@ async def test_overall_state_idle_outside_window():
 
 
 @pytest.mark.asyncio
+async def test_crypto_overall_state_stays_in_window_24_7():
+    hs = HealthState(
+        strategy_config={
+            "asset_class": "crypto",
+            "crypto_entry_cutoff": None,
+            "bar_timeframe_seconds": 300,
+            "provider_poll_interval_s": 30,
+            "stale_tolerance_s": 60,
+        },
+        monitoring_config={
+            "watchdog_interval_s": 15,
+            "grace_period_s": 90,
+        },
+    )
+    now = datetime(2026, 4, 24, 20, 0, tzinfo=timezone.utc)  # 16:00 ET
+    await hs.set_broker_status(True, "bybit")
+    await hs.set_watchdog("ict_ob_mtf", now - timedelta(seconds=5))
+    await hs.set_last_bar("ict_ob_mtf", now - timedelta(minutes=1), lag_ms=500.0)
+
+    assert hs.trade_window_phase(now) == "in_window"
+    assert hs.overall_state("ict_ob_mtf", now=now) == "OK"
+
+
+@pytest.mark.asyncio
 async def test_overall_state_data_stale_in_window():
     hs = HealthState(
         strategy_config={

@@ -95,6 +95,12 @@ strategy:
     mtf_pullback_proximity: 0.015
     mtf_breakout_lookback: 5
 
+    # Scheduler-Zeiten (Daily-Strategie hält overnight; kein EOD-Flatten, kein Gap-Scan)
+    premarket_time: null         # kein Premarket-Scan (Daily-Strategie braucht keinen Gap-Scan)
+    market_open_time: null       # kein market-open-Callback benötigt
+    eod_close_time: null         # Positionen über Nacht halten (Daily-Strategie)
+    post_market_time: "16:05"    # Scheduler-Job: Tages-Summary via Telegram
+
     # Misc
     initial_capital: 10000.0
 

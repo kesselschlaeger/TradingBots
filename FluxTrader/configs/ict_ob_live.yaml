@@ -34,7 +34,13 @@ strategy:
     vix_threshold: 30.0
 
     allow_shorts: true
-    entry_cutoff_time: "15:00"
+    entry_cutoff_time: "15:00"   # kein neuer Entry nach 15:00 ET
+
+    # Scheduler-Zeiten
+    premarket_time: null         # kein Premarket-Gap-Scan (ICT nutzt keinen Scanner)
+    market_open_time: "09:30"    # market-open-Callback (09:30 ET)
+    eod_close_time: "15:27"      # Scheduler-Job: alle offenen ICT-Positionen zwangsschließen
+    post_market_time: "16:05"    # Scheduler-Job: Tages-Summary via Telegram
 
     # MIT Independence Guard (optional)
     use_mit_independence_guard: false
