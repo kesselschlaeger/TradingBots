@@ -51,6 +51,32 @@ Diese Regeln dürfen NIEMALS verletzt werden:
      ist das `orderRef`-Prefix (`bot_id` + optionaler `order_prefix`).
      `get_recent_closes` akzeptiert nur Fills mit passendem Prefix.
 
+7. **Hard Prerequisites: Fail-Fast statt Silent No-Trade**
+   - **Optionale Filter** (Trend, VIX, Gap, ML-Konfidenz) degradieren graceful:
+     fehlt der Wert, wird der Filter übersprungen oder neutral gesetzt, Log auf
+     `info`/`warning`. Strategie kann weiter traden.
+   - **Hard Prerequisites** sind Werte, ohne die der Kern-Check der Strategie
+     gar nicht ausgeführt werden kann (Beispiele: Daily-ATR(14) für den
+     QuickFlip-Manipulations-Check; MTF-Daily-Proxy für `botti_trend`;
+     Kalman-Spread-Estimator für `botti_pair`). Diese werden **am Boundary
+     validiert** – Config-Load und Warmup, nicht zur Laufzeit. Verstoß →
+     `RuntimeError` beim Start, **niemals** stilles Returnen leerer Signal-
+     Listen.
+   - Strategien deklarieren ihren Bedarf explizit über
+     `BaseStrategy.required_warmup_days() -> int | None` (Default `None` =
+     keine Validierung). LiveRunner und BarByBarEngine prüfen den Wert
+     vor dem Bar-Loop und brechen mit strukturiertem Log
+     (`runner.warmup_too_short`, `engine.warmup_too_short`) ab.
+   - Pro-Symbol-Datendefizit (einzelnes Symbol unter Soll, andere ok) →
+     `WARNING` + AnomalyEvent, **kein** Bot-Abort. Symbol bleibt im Bot,
+     Strategie meldet für dieses Symbol weiter den passenden Status-Code.
+   - Status-Codes wie `NO_DAILY_ATR`, `NO_MTF_DATA`, ... sind für echte
+     Laufzeit-Edge-Cases gedacht (Provider-Lücke, einzelner Bar-Drop) und
+     dürfen **niemals** der Fallback für Fehlkonfigurationen sein. Eine
+     Strategie, die wegen Config-Fehler dauerhaft `NO_*` meldet, ist der
+     Live-Worst-Case („läuft, tradet aber nicht") – genau das soll
+     `required_warmup_days()` verhindern.
+
 ## Verzeichnis-Verantwortlichkeiten
 
 ```
