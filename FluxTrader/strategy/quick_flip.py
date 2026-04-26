@@ -109,38 +109,8 @@ class QuickFlipStrategy(BaseStrategy):
       armed       → Alle Filter ok. Warte auf Sweep + Reversal-Candle.
       done        → Signal emittiert ODER Fenster abgelaufen (terminal).
 
-    Die OR-Eröffnungskerze ist gleichzeitig die Manipulationskerze.
-    Es gibt keine separate Liquidity-Candle-Erkennung.
-
-    --- Wahrscheinlichkeits- und EV-Überlegungen ---
-
-    Kern-These: Institutionelle Stop-Hunts in den ersten 15 Minuten erzeugen
-    eine systematische Preisverzerrung. Die Strategie wettet darauf, dass
-    der Preis nach dem Sweep zur OR-Gegenseite zurückläuft (Mean Reversion
-    innerhalb der Morning-Session-Range).
-
-    Erwartungswert (EV):
-        EV = P(win) * R_win - P(loss) * R_loss
-        Mit min_rr_ratio=1.5 und angenommener Win-Rate >= 0.40:
-        EV = 0.40 * 1.5R - 0.60 * 1R = +0.0R (Break-even bei 40 %)
-        Ab Win-Rate > 0.40 ist die Strategie EV-positiv.
-        Empirische Backtests auf QQQ/SPY 2023–2024 zeigen Win-Rates
-        von 42–48 % nach ATR-Filter und Trend-Filter.
-
-    Kelly-Kriterium (zur Orientierung, nicht zur harten Sizing-Steuerung):
-        f* = (p * b - q) / b
-        Mit p=0.45, b=1.5 (R:R), q=0.55:
-        f* = (0.45 * 1.5 - 0.55) / 1.5 = 0.082 → ~8 % Equity-Risiko
-        Da Kelly zur Überschätzung neigt, wird Half-Kelly genutzt: ~4 %.
-        `risk_per_trade=0.005` (0.5 %) ist bewusst konservativ (1/8-Kelly),
-        um Drawdown-Risiko bei Cluster-Verlusten zu begrenzen.
-
-    Trade-Unabhängigkeit:
-        MIT-Independence-Guard verhindert gleichzeitige Trades in korrelierten
-        Gruppen (z.B. NVDA + AMD). Jede Gruppe zählt als ein unabhängiges
-        Experiment. Ohne diesen Guard würden korrelierte Verlust-Tage die
-        Kelly-Annahme unabhängiger Trades verletzen und den realen Drawdown
-        gegenüber der theoretischen Kelly-Kurve signifikant erhöhen.
+    Die OR-Eröffnungskerze ist gleichzeitig die Manipulationskerze (Schritt 2).
+    Es gibt keine separate Liquidity-Candle-Erkennung mehr.
     """
 
     def __init__(self, config: dict, context=None):

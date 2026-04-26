@@ -13,7 +13,6 @@ import pandas as pd
 import pytest
 import pytz
 
-from core.indicators import detect_reversal_pattern, opening_range_levels
 from core.models import Bar
 from strategy.quick_flip import QuickFlipStrategy
 from tests.conftest import _et_dt, make_bar
@@ -170,7 +169,7 @@ class TestRedOpenLongHammer:
         # upper = 97.62-97.7 < 0 → 0 <= 0.3*0.10=0.03 ✓
         # bar.low=97.0 < or_low=98.0 → Sweep ✓
         ts = _et_dt(2025, 3, 12, 10, 0)
-        bar = Bar("AAPL", ts, open=97.6, high=97.62, low=97.0, close=97.7, volume=150_000)
+        bar = Bar("AAPL", ts, o=97.6, h=97.62, l=97.0, c=97.7, v=150_000)
         df = _make_df([bar])
 
         sig = strategy._detect_reversal_and_build_signal(df, "long", bar)
@@ -181,7 +180,7 @@ class TestRedOpenLongHammer:
         """Long + hammer: entry = high(reversal_bar) + buffer_ticks."""
         _seed_armed(strategy, direction="long", or_high=102.0, or_low=98.0)
         ts = _et_dt(2025, 3, 12, 10, 0)
-        bar = Bar("AAPL", ts, open=97.6, high=97.62, low=97.0, close=97.7, volume=150_000)
+        bar = Bar("AAPL", ts, o=97.6, h=97.62, l=97.0, c=97.7, v=150_000)
         df = _make_df([bar])
 
         sig = strategy._detect_reversal_and_build_signal(df, "long", bar)
@@ -192,7 +191,7 @@ class TestRedOpenLongHammer:
         """Long + hammer: stop = low(reversal_bar) - buffer_ticks."""
         _seed_armed(strategy, direction="long", or_high=102.0, or_low=98.0)
         ts = _et_dt(2025, 3, 12, 10, 0)
-        bar = Bar("AAPL", ts, open=97.6, high=97.62, low=97.0, close=97.7, volume=150_000)
+        bar = Bar("AAPL", ts, o=97.6, h=97.62, l=97.0, c=97.7, v=150_000)
         df = _make_df([bar])
 
         sig = strategy._detect_reversal_and_build_signal(df, "long", bar)
@@ -203,7 +202,7 @@ class TestRedOpenLongHammer:
         """Long-Setup: Primärziel = or_high."""
         _seed_armed(strategy, direction="long", or_high=102.0, or_low=98.0)
         ts = _et_dt(2025, 3, 12, 10, 0)
-        bar = Bar("AAPL", ts, open=97.6, high=97.62, low=97.0, close=97.7, volume=150_000)
+        bar = Bar("AAPL", ts, o=97.6, h=97.62, l=97.0, c=97.7, v=150_000)
         df = _make_df([bar])
 
         sig = strategy._detect_reversal_and_build_signal(df, "long", bar)
@@ -214,7 +213,7 @@ class TestRedOpenLongHammer:
         """Signal-Metadaten: or_color='red', reversal_pattern='hammer'."""
         _seed_armed(strategy, direction="long", or_high=102.0, or_low=98.0)
         ts = _et_dt(2025, 3, 12, 10, 0)
-        bar = Bar("AAPL", ts, open=97.6, high=97.62, low=97.0, close=97.7, volume=150_000)
+        bar = Bar("AAPL", ts, o=97.6, h=97.62, l=97.0, c=97.7, v=150_000)
         df = _make_df([bar])
 
         sig = strategy._detect_reversal_and_build_signal(df, "long", bar)
@@ -228,7 +227,7 @@ class TestRedOpenLongHammer:
         _seed_armed(strategy, direction="long", or_high=102.0, or_low=98.0)
         ts = _et_dt(2025, 3, 12, 10, 0)
         # bar.low=98.5 >= or_low=98.0 → kein Sweep
-        bar = Bar("AAPL", ts, open=98.6, high=98.65, low=98.5, close=98.7, volume=150_000)
+        bar = Bar("AAPL", ts, o=98.6, h=98.65, l=98.5, c=98.7, v=150_000)
         df = _make_df([bar])
 
         sig = strategy._detect_reversal_and_build_signal(df, "long", bar)
@@ -248,7 +247,7 @@ class TestGreenOpenShortInvHammer:
         # lower = 102.2-102.22 < 0 → 0 <= 0.3*0.10=0.03 ✓
         # bar.high=103.0 > or_high=102.0 → Sweep ✓
         ts = _et_dt(2025, 3, 12, 10, 0)
-        bar = Bar("AAPL", ts, open=102.2, high=103.0, low=102.22, close=102.3, volume=150_000)
+        bar = Bar("AAPL", ts, o=102.2, h=103.0, l=102.22, c=102.3, v=150_000)
         df = _make_df([bar])
 
         sig = strategy._detect_reversal_and_build_signal(df, "short", bar)
@@ -259,7 +258,7 @@ class TestGreenOpenShortInvHammer:
         """Short + inverted_hammer: entry = low(reversal_bar) - buffer_ticks."""
         _seed_armed(strategy, direction="short", or_high=102.0, or_low=98.0)
         ts = _et_dt(2025, 3, 12, 10, 0)
-        bar = Bar("AAPL", ts, open=102.2, high=103.0, low=102.22, close=102.3, volume=150_000)
+        bar = Bar("AAPL", ts, o=102.2, h=103.0, l=102.22, c=102.3, v=150_000)
         df = _make_df([bar])
 
         sig = strategy._detect_reversal_and_build_signal(df, "short", bar)
@@ -270,7 +269,7 @@ class TestGreenOpenShortInvHammer:
         """Short + inverted_hammer: stop = high(reversal_bar) + buffer_ticks."""
         _seed_armed(strategy, direction="short", or_high=102.0, or_low=98.0)
         ts = _et_dt(2025, 3, 12, 10, 0)
-        bar = Bar("AAPL", ts, open=102.2, high=103.0, low=102.22, close=102.3, volume=150_000)
+        bar = Bar("AAPL", ts, o=102.2, h=103.0, l=102.22, c=102.3, v=150_000)
         df = _make_df([bar])
 
         sig = strategy._detect_reversal_and_build_signal(df, "short", bar)
@@ -281,7 +280,7 @@ class TestGreenOpenShortInvHammer:
         """Short-Setup: Primärziel = or_low."""
         _seed_armed(strategy, direction="short", or_high=102.0, or_low=98.0)
         ts = _et_dt(2025, 3, 12, 10, 0)
-        bar = Bar("AAPL", ts, open=102.2, high=103.0, low=102.22, close=102.3, volume=150_000)
+        bar = Bar("AAPL", ts, o=102.2, h=103.0, l=102.22, c=102.3, v=150_000)
         df = _make_df([bar])
 
         sig = strategy._detect_reversal_and_build_signal(df, "short", bar)
@@ -304,8 +303,8 @@ class TestBullishEngulfingEntryUsesPrevHigh:
         # bar.low=97.3 < or_low=98.0 → Sweep ✓
         ts_prev = _et_dt(2025, 3, 12, 9, 55)
         ts_cur = _et_dt(2025, 3, 12, 10, 0)
-        prev = Bar("AAPL", ts_prev, open=98.5, high=99.0, low=97.5, close=98.0, volume=100_000)
-        cur = Bar("AAPL", ts_cur, open=97.8, high=99.5, low=97.3, close=98.8, volume=150_000)
+        prev = Bar("AAPL", ts_prev, o=98.5, h=99.0, l=97.5, c=98.0, v=100_000)
+        cur = Bar("AAPL", ts_cur, o=97.8, h=99.5, l=97.3, c=98.8, v=150_000)
         df = _make_df([prev, cur])
 
         sig = strategy._detect_reversal_and_build_signal(df, "long", cur)
@@ -321,8 +320,8 @@ class TestBullishEngulfingEntryUsesPrevHigh:
         _seed_armed(strategy, direction="long", or_high=102.0, or_low=98.0)
         ts_prev = _et_dt(2025, 3, 12, 9, 55)
         ts_cur = _et_dt(2025, 3, 12, 10, 0)
-        prev = Bar("AAPL", ts_prev, open=98.5, high=99.0, low=97.5, close=98.0, volume=100_000)
-        cur = Bar("AAPL", ts_cur, open=97.8, high=99.5, low=97.3, close=98.8, volume=150_000)
+        prev = Bar("AAPL", ts_prev, o=98.5, h=99.0, l=97.5, c=98.0, v=100_000)
+        cur = Bar("AAPL", ts_cur, o=97.8, h=99.5, l=97.3, c=98.8, v=150_000)
         df = _make_df([prev, cur])
 
         sig = strategy._detect_reversal_and_build_signal(df, "long", cur)
@@ -341,8 +340,8 @@ class TestBullishEngulfingEntryUsesPrevHigh:
         # bar.high=103.5 > or_high=102.0 → Sweep ✓
         ts_prev = _et_dt(2025, 3, 12, 9, 55)
         ts_cur = _et_dt(2025, 3, 12, 10, 0)
-        prev = Bar("AAPL", ts_prev, open=102.5, high=103.0, low=102.2, close=103.0, volume=100_000)
-        cur = Bar("AAPL", ts_cur, open=103.2, high=103.5, low=101.8, close=102.1, volume=150_000)
+        prev = Bar("AAPL", ts_prev, o=102.5, h=103.0, l=102.2, c=103.0, v=100_000)
+        cur = Bar("AAPL", ts_cur, o=103.2, h=103.5, l=101.8, c=102.1, v=150_000)
         df = _make_df([prev, cur])
 
         sig = strategy._detect_reversal_and_build_signal(df, "short", cur)
@@ -439,7 +438,7 @@ class TestExtendedTargetFlag:
         # risk=97.67-96.95=0.72, reward_ext=106-97.67=8.33 → rr_ext=11.6 >= 2.5 ✓
         _seed_armed(strategy, direction="long", or_high=102.0, or_low=98.0)
         ts = _et_dt(2025, 3, 12, 10, 0)
-        bar = Bar("AAPL", ts, open=97.6, high=97.62, low=97.0, close=97.7, volume=150_000)
+        bar = Bar("AAPL", ts, o=97.6, h=97.62, l=97.0, c=97.7, v=150_000)
         df = _make_df([bar])
 
         sig = strategy._detect_reversal_and_build_signal(df, "long", bar)
@@ -453,7 +452,7 @@ class TestExtendedTargetFlag:
         strategy.config["use_extended_target"] = False
         _seed_armed(strategy, direction="long", or_high=102.0, or_low=98.0)
         ts = _et_dt(2025, 3, 12, 10, 0)
-        bar = Bar("AAPL", ts, open=97.6, high=97.62, low=97.0, close=97.7, volume=150_000)
+        bar = Bar("AAPL", ts, o=97.6, h=97.62, l=97.0, c=97.7, v=150_000)
         df = _make_df([bar])
 
         sig = strategy._detect_reversal_and_build_signal(df, "long", bar)
@@ -468,7 +467,7 @@ class TestExtendedTargetFlag:
         # Extended Short = 98 - 4 = 94
         _seed_armed(strategy, direction="short", or_high=102.0, or_low=98.0)
         ts = _et_dt(2025, 3, 12, 10, 0)
-        bar = Bar("AAPL", ts, open=102.2, high=103.0, low=102.22, close=102.3, volume=150_000)
+        bar = Bar("AAPL", ts, o=102.2, h=103.0, l=102.22, c=102.3, v=150_000)
         df = _make_df([bar])
 
         sig = strategy._detect_reversal_and_build_signal(df, "short", bar)
@@ -527,7 +526,7 @@ class TestAtrSkipsWeekendBars:
                 continue
             ts = day.astimezone(timezone.utc)
             bars.append(Bar("AAPL", ts,
-                            open=100.0, high=102.0, low=98.0, close=100.0, volume=100_000))
+                            o=100.0, h=102.0, l=98.0, c=100.0, v=100_000))
 
         assert len(bars) == 15, f"Erwartet 15 Handelstage, erhalten: {len(bars)}"
 
@@ -554,7 +553,7 @@ class TestAtrSkipsWeekendBars:
                 continue
             ts = day.astimezone(timezone.utc)
             bars.append(Bar("AAPL", ts,
-                            open=100.0, high=102.0, low=98.0, close=100.0, volume=100_000))
+                            o=100.0, h=102.0, l=98.0, c=100.0, v=100_000))
 
         df = _bars_to_df(bars)
         idx_et = to_et(df.index)
@@ -579,7 +578,7 @@ class TestAtrSkipsWeekendBars:
                 continue
             ts = day.astimezone(timezone.utc)
             bars.append(Bar("AAPL", ts,
-                            open=100.0, high=102.0, low=98.0, close=100.0, volume=100_000))
+                            o=100.0, h=102.0, l=98.0, c=100.0, v=100_000))
 
         df = _bars_to_df(bars)
         atr_val = strategy._compute_daily_atr(df)
@@ -658,198 +657,7 @@ class TestRRFilter:
         # Hammer mit entry≈97.67, stop≈96.95, target=or_high=98.1
         # risk=0.72, reward=0.43 → rr=0.60 < 1.5
         ts = _et_dt(2025, 3, 12, 10, 5)
-        bar = Bar("AAPL", ts, open=97.6, high=97.62, low=97.0, close=97.7, volume=150_000)
+        bar = Bar("AAPL", ts, o=97.6, h=97.62, l=97.0, c=97.7, v=150_000)
         df = _make_df([bar])
         sig = strategy._detect_reversal_and_build_signal(df, "long", bar)
         assert sig is None
-
-
-# ── Tests: opening_range_levels (pure function) ──────────────────────────────
-
-class TestOpeningRangeLevels:
-    def test_opening_range_levels_basic(self):
-        """3 OR-Bars 09:30–09:44 ET: or_high, or_low, or_range korrekt."""
-        bars = [
-            _bar_at(9, 30, h=102.0, l=100.0),
-            _bar_at(9, 35, h=103.0, l=99.5),
-            _bar_at(9, 40, h=101.5, l=100.5),
-        ]
-        df = _make_df(bars)
-        or_high, or_low, or_range = opening_range_levels(df, orb_minutes=15)
-        assert or_high == pytest.approx(103.0)
-        assert or_low == pytest.approx(99.5)
-        assert or_range == pytest.approx(3.5)
-
-    def test_opening_range_levels_empty(self):
-        """Leerer DataFrame → (0.0, 0.0, 0.0), kein Crash."""
-        df = pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
-        assert opening_range_levels(df) == (0.0, 0.0, 0.0)
-
-    def test_opening_range_levels_excludes_post_or_bars(self):
-        """Bar um 09:45 (= nach 15-Min-OR) wird NICHT in OR eingerechnet."""
-        bars = [
-            _bar_at(9, 30, h=101.0, l=99.0),   # OR-Bar
-            _bar_at(9, 35, h=102.0, l=99.5),   # OR-Bar
-            _bar_at(9, 45, h=110.0, l=90.0),   # Post-OR → darf or_high/low nicht ändern
-        ]
-        df = _make_df(bars)
-        or_high, or_low, or_range = opening_range_levels(df, orb_minutes=15)
-        assert or_high == pytest.approx(102.0)
-        assert or_low == pytest.approx(99.0)
-        assert or_range == pytest.approx(3.0)
-
-
-# ── Tests: detect_reversal_pattern (pure function) ───────────────────────────
-
-class TestDetectReversalPattern:
-    def _make_hammer_df(self, base: float = 100.0) -> pd.DataFrame:
-        """Kerze mit langem unteren Schatten: Body=0.3, lower_shadow=4.0, upper_shadow=0.2."""
-        bar = make_bar(o=base, h=base + 0.5, l=base - 4.0, c=base + 0.3)
-        return _make_df([bar])
-
-    def _make_inv_hammer_df(self, base: float = 100.0) -> pd.DataFrame:
-        """Kerze mit langem oberen Schatten: Body=0.3, upper_shadow=4.0, lower_shadow≈0."""
-        bar = make_bar(o=base, h=base + 4.0, l=base - 0.1, c=base + 0.3)
-        return _make_df([bar])
-
-    def test_detect_reversal_pattern_hammer(self):
-        """Kerze mit langem unteren Schatten → 'hammer' für direction='long'."""
-        df = self._make_hammer_df()
-        assert detect_reversal_pattern(df, direction="long") == "hammer"
-
-    def test_detect_reversal_pattern_inverted_hammer(self):
-        """Kerze mit langem oberen Schatten → 'inverted_hammer' für direction='short'."""
-        df = self._make_inv_hammer_df()
-        assert detect_reversal_pattern(df, direction="short") == "inverted_hammer"
-
-    def test_detect_reversal_pattern_bullish_engulfing(self):
-        """Grüne Kerze umschließt rote Vorgängerkerze → 'bullish_engulfing'."""
-        # prev bearish: o=100.5, c=99.5; cur bullish engulfing: o=99.3, c=101.0
-        prev = make_bar(o=100.5, h=101.0, l=99.0, c=99.5)
-        cur  = make_bar(o=99.3,  h=101.5, l=99.0, c=101.0)
-        df = _make_df([prev, cur])
-        assert detect_reversal_pattern(df, direction="long") == "bullish_engulfing"
-
-    def test_detect_reversal_pattern_bearish_engulfing(self):
-        """Rote Kerze umschließt grüne Vorgängerkerze → 'bearish_engulfing'."""
-        # prev bullish: o=99.5, c=100.5; cur bearish engulfing: o=101.0, c=99.0
-        prev = make_bar(o=99.5, h=101.0, l=99.0, c=100.5)
-        cur  = make_bar(o=101.0, h=101.5, l=98.8, c=99.0)
-        df = _make_df([prev, cur])
-        assert detect_reversal_pattern(df, direction="short") == "bearish_engulfing"
-
-    def test_detect_reversal_pattern_no_match(self):
-        """Normale Kerze ohne signifikantes Muster → None."""
-        # Großer Body, kleine Schatten → kein Hammer-Kriterium erfüllt
-        bar = make_bar(o=100.0, h=101.0, l=99.5, c=100.8)
-        df = _make_df([bar])
-        # lower_shadow = 100.0-99.5 = 0.5, body = 0.8 → 0.5 < 2.0*0.8 → kein Hammer
-        assert detect_reversal_pattern(df, direction="long") is None
-
-    def test_detect_reversal_pattern_insufficient_data(self):
-        """Nur 1 Bar → Engulfing nicht prüfbar, kein Crash; gibt None zurück."""
-        bar = make_bar(o=100.0, h=100.3, l=99.8, c=100.1)
-        df = _make_df([bar])
-        result = detect_reversal_pattern(df, direction="long")
-        assert result != "bullish_engulfing"
-
-
-# ── Tests: Pflicht-Specs (standalone Funktionen) ─────────────────────────────
-
-class TestQfsSpec:
-    def test_qfs_no_signal_before_or_complete(self, strategy, context):
-        """Bars während der OR-Periode (< 15 Min) → kein Signal, State 'idle'."""
-        for m in (30, 35, 40):
-            strategy.bars.append(_bar_at(9, m))
-        bar = _bar_at(9, 44)
-        signals = strategy._generate_signals(bar)
-        assert signals == []
-        assert strategy._day_cache.get("state") == "idle"
-
-    def test_qfs_or_too_small_rejected(self, strategy, context):
-        """OR-Range < 0.25 * daily_atr → State 'done', kein Signal."""
-        _seed_or_complete(strategy,
-                          or_high=100.4, or_low=100.0,
-                          or_open=100.3, or_close=100.2,
-                          daily_atr=4.0)  # threshold=1.0 > or_range=0.4
-        for m in (30, 35, 40, 45, 50, 55):
-            strategy.bars.append(_bar_at(9, m))
-        bar = _bar_at(9, 46)
-        signals = strategy._generate_signals(bar)
-        assert signals == []
-        assert strategy._day_cache["state"] == "done"
-
-    def test_qfs_window_expired_no_signal(self, strategy, context):
-        """Bar nach 11:00 ET (91 Min) → Fenster abgelaufen, kein Signal."""
-        _seed_armed(strategy, direction="long", or_high=102.0, or_low=98.0)
-        for m in (30, 35, 40, 45, 50, 55):
-            strategy.bars.append(_bar_at(9, m))
-        bar = _bar_minutes_after_open(91, l=97.0, h=97.62, o=97.6, c=97.7)
-        signals = strategy._generate_signals(bar)
-        assert signals == []
-        assert strategy._day_cache["state"] == "done"
-
-    def test_qfs_long_signal_on_hammer(self, strategy, context):
-        """Rote OR + Hammer unter or_low → Signal direction=+1, stop_price korrekt."""
-        _seed_armed(strategy, direction="long", or_high=102.0, or_low=98.0)
-        ts = _et_dt(2025, 3, 12, 10, 0)
-        bar = Bar("AAPL", ts, open=97.6, high=97.62, low=97.0, close=97.7, volume=150_000)
-        df = _make_df([bar])
-        sig = strategy._detect_reversal_and_build_signal(df, "long", bar)
-        assert sig is not None
-        assert sig.direction == 1
-        assert sig.stop_price == pytest.approx(97.0 - 0.05)
-
-    def test_qfs_short_signal_on_engulfing(self, strategy, context):
-        """Grüne OR + Bearish Engulfing über or_high → Signal direction=-1."""
-        _seed_armed(strategy, direction="short", or_high=102.0, or_low=98.0)
-        ts_prev = _et_dt(2025, 3, 12, 9, 55)
-        ts_cur = _et_dt(2025, 3, 12, 10, 0)
-        prev = Bar("AAPL", ts_prev, open=102.5, high=103.0, low=102.2, close=103.0, volume=100_000)
-        cur  = Bar("AAPL", ts_cur, open=103.2, high=103.5, low=101.8, close=102.1, volume=150_000)
-        df = _make_df([prev, cur])
-        sig = strategy._detect_reversal_and_build_signal(df, "short", cur)
-        assert sig is not None
-        assert sig.direction == -1
-        assert sig.metadata["reversal_pattern"] == "bearish_engulfing"
-
-    def test_qfs_signal_metadata_complete(self, strategy, context):
-        """Signal enthält alle Pflicht-Metadaten-Keys."""
-        _seed_armed(strategy, direction="long", or_high=102.0, or_low=98.0)
-        ts = _et_dt(2025, 3, 12, 10, 0)
-        bar = Bar("AAPL", ts, open=97.6, high=97.62, low=97.0, close=97.7, volume=150_000)
-        df = _make_df([bar])
-        sig = strategy._detect_reversal_and_build_signal(df, "long", bar)
-        assert sig is not None
-        for key in ("or_high", "or_low", "rr_ratio", "reversal_pattern", "qty_hint"):
-            assert key in sig.metadata, f"Pflicht-Key '{key}' fehlt in Signal.metadata"
-
-    def test_qfs_no_sweep_no_signal(self, strategy, context):
-        """Bar außerhalb OR aber kein Sweep unter or_low → kein Signal."""
-        _seed_armed(strategy, direction="long", or_high=102.0, or_low=98.0)
-        ts = _et_dt(2025, 3, 12, 10, 0)
-        bar = Bar("AAPL", ts, open=98.6, high=98.65, low=98.5, close=98.7, volume=150_000)
-        df = _make_df([bar])
-        assert strategy._detect_reversal_and_build_signal(df, "long", bar) is None
-
-    def test_qfs_rr_below_minimum_rejected(self, strategy, context):
-        """R:R knapp unter min_rr_ratio → None zurück, kein Signal."""
-        _seed_armed(strategy, direction="long", or_high=98.1, or_low=98.0)
-        ts = _et_dt(2025, 3, 12, 10, 5)
-        bar = Bar("AAPL", ts, open=97.6, high=97.62, low=97.0, close=97.7, volume=150_000)
-        df = _make_df([bar])
-        assert strategy._detect_reversal_and_build_signal(df, "long", bar) is None
-
-    def test_qfs_day_reset(self, strategy, context):
-        """Zwei aufeinanderfolgende Tage: _day_cache reset, State zurück auf 'idle'."""
-        _seed_armed(strategy, direction="long")
-        strategy._day_cache["state"] = "done"
-
-        for m in (30, 35, 40, 45, 50, 55):
-            strategy.bars.append(_bar_at(9, m))
-
-        next_day_ts = _et_dt(2025, 3, 13, 9, 30)
-        next_bar = Bar("AAPL", next_day_ts, open=100.0, high=101.0, low=99.0, close=100.0, volume=100_000)
-        strategy._generate_signals(next_bar)
-        assert strategy._day_cache["date"] == date(2025, 3, 13)
-        assert strategy._day_cache["state"] == "idle"

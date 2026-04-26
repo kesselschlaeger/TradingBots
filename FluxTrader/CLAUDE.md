@@ -56,7 +56,6 @@ Diese Regeln dürfen NIEMALS verletzt werden:
 ```
 core/models.py          → Datenklassen (Bar, FeatureVector, BaseSignal, Signal, PairSignal, ...)
 core/indicators.py      → Reine Indikatoren-Funktionen + KalmanSpreadEstimator
-                           + opening_range_levels, detect_reversal_pattern (Quick Flip)
 core/risk.py            → Position Sizing, Kelly, Stops, EV-Berechnung
 core/filters.py         → Marktzeiten, Gap, Trend, MIT-Independence, VIX-Regime
 core/ml_filter.py       → MLFilter (optionaler Konfidenz-Filter, Null-Object-Pattern)
@@ -74,9 +73,6 @@ strategy/botti_pair.py  → BottiPairStrategy (@register("botti_pair"))
 strategy/ict_ob.py      → IctOrderBlockStrategy (@register("ict_ob_mtf"))
                            Multi-Timeframe ICT/SMC Order Block (4H/1H/15M/5M)
                            Unterstützt equity | futures | crypto via asset_class-Config
-strategy/quick_flip.py  → QuickFlipStrategy (@register("quick_flip"))
-                           OR-Sweep + Reversal-Pattern Scalper (5m, Equity)
-                           State Machine: idle → or_complete → armed → done
 
 execution/port.py           → BrokerPort ABC + execute_signal() + execute_pair_signal()
 execution/paper_adapter.py  → In-Memory, kein Netzwerk, für Tests/Backtest
@@ -111,8 +107,6 @@ configs/botti_pair.yaml             → Botti Pair-Trading (SPY/QQQ Kalman Z-Sco
 configs/ict_ob_live.yaml            → ICT OB Equity Live/Paper (NVDA/AMD/AVGO, IBKR)
 configs/ict_ob_futures_live.yaml    → ICT OB Futures Live/Paper (NQ, CME Globex, IBKR)
 configs/ict_ob_crypto_live.yaml     → ICT OB Crypto Live/Paper (BTCUSD/ETHUSD, PAXOS/IBKR)
-configs/quick_flip_live.yaml        → Quick Flip Live/Paper (NVDA/AMD/QQQ, IBKR, 5m)
-configs/quick_flip_backtest.yaml    → Quick Flip Backtest (yfinance, paper, multiple symbols)
 main.py                             → CLI: live | paper | backtest
 ```
 
