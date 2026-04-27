@@ -289,10 +289,9 @@ class TestMAEMFETracking:
         )
         engine = BarByBarEngine(strat, bt_paper, bt_context, cfg)
 
-        data = {
-            "AAPL": make_ohlcv(78, base=150.0, seed=10,
-                               start=_et_dt(2025, 3, 12, 9, 30)),
-        }
+        anchor = make_ohlcv(1, base=150.0, seed=10, start=_et_dt(2025, 3, 6, 9, 30))
+        main = make_ohlcv(78, base=150.0, seed=10, start=_et_dt(2025, 3, 12, 9, 30))
+        data = {"AAPL": pd.concat([anchor, main])}
         result = asyncio.get_event_loop().run_until_complete(
             engine.run(data=data, spy_df=spy_df)
         )
@@ -329,10 +328,9 @@ class TestMAEMFETracking:
         )
         engine = BarByBarEngine(strat, bt_paper, bt_context, cfg)
 
-        data = {
-            "AAPL": make_ohlcv(78, base=150.0, seed=10,
-                               start=_et_dt(2025, 3, 12, 9, 30)),
-        }
+        anchor = make_ohlcv(1, base=150.0, seed=10, start=_et_dt(2025, 3, 6, 9, 30))
+        main = make_ohlcv(78, base=150.0, seed=10, start=_et_dt(2025, 3, 12, 9, 30))
+        data = {"AAPL": pd.concat([anchor, main])}
         result = asyncio.get_event_loop().run_until_complete(
             engine.run(data=data, spy_df=spy_df)
         )

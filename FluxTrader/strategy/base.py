@@ -163,6 +163,15 @@ class PairStrategy(ABC):
         snapshot: MarketContext,
     ) -> PairSignal: ...
 
+    def required_warmup_days(self) -> Optional[int]:
+        """Mindestanzahl Kalendertage Warmup-Daten für diesen Pair-Strategie-Typ.
+
+        None = keine Validierung (Fallback). Subklassen überschreiben mit dem
+        konkret benötigten Wert, damit PairEngine beim Start fail-fast prüfen
+        kann (CLAUDE.md Regel 7: Hard Prerequisites).
+        """
+        return None
+
     def reset(self) -> None:
         """EOD-Reset."""
 

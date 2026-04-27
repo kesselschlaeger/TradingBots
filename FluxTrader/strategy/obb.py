@@ -14,6 +14,7 @@ Backtest-Optimierungen:
 """
 from __future__ import annotations
 
+import math
 from typing import Optional
 
 import numpy as np
@@ -56,6 +57,11 @@ OBB_DEFAULT_PARAMS: dict = {
 }
 
 
+# lookback_bars=50 Handelstage × 7/5 (Wochenendfaktor) + 3 Feiertags-Puffer ≈ 73, auf 75 gerundet.
+# Wert wächst dynamisch wenn lookback_bars in Config erhöht wird (required_warmup_days).
+OBB_REQUIRED_WARMUP_DAYS = 75
+
+
 def _bars_to_df(bars) -> pd.DataFrame:
     if not bars:
         return pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
@@ -83,6 +89,11 @@ class OBBStrategy(BaseStrategy):
     @property
     def name(self) -> str:
         return "obb"
+
+    def required_warmup_days(self) -> int:
+        lookback = int(self.config.get("lookback_bars", 50))
+        # lookback_bars Handelstage × 7/5 (Wochenend-Faktor) + 3 Feiertags-Puffer
+        return max(OBB_REQUIRED_WARMUP_DAYS, math.ceil(lookback * 7 / 5) + 3)
 
     def _is_ready(self) -> bool:
         lookback = int(self.config.get("lookback_bars", 50))

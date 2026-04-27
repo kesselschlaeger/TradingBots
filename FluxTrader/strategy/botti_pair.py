@@ -5,6 +5,7 @@ Broker-agnostisch: kein Alpaca-Import, kein HTTP, kein I/O.
 """
 from __future__ import annotations
 
+import math
 from collections import deque
 
 from core.context import MarketContext
@@ -15,6 +16,10 @@ from strategy.base import PairStrategy
 from strategy.registry import register
 
 log = get_logger(__name__)
+
+# Kalman Burn-In + pair_lookback Daily-Bars als Untergrenze; dynamisch über pair_lookback skaliert.
+# Für pair_lookback=20 Daily-Bars: max(5, ceil(20 × 7/5) + 3) = max(5, 31) = 31 Kal.-Tage.
+BOTTI_PAIR_REQUIRED_WARMUP_DAYS = 5
 
 
 @register("botti_pair")
@@ -46,6 +51,11 @@ class BottiPairStrategy(PairStrategy):
     @property
     def symbol_b(self) -> str:
         return str(self.config.get("symbol_b", "QQQ"))
+
+    def required_warmup_days(self) -> int:
+        pair_lookback = int(self.config.get("pair_lookback", 20))
+        # pair_lookback Daily-Bars ≈ pair_lookback Handelstage → × 7/5 + 3 Feiertags-Puffer
+        return max(BOTTI_PAIR_REQUIRED_WARMUP_DAYS, math.ceil(pair_lookback * 7 / 5) + 3)
 
     def reset(self) -> None:
         self._kalman.reset()

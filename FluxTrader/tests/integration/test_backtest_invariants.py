@@ -73,8 +73,16 @@ def _trading_day_intraday(day: datetime, direction: str,
 
 
 def _make_multi_day_data() -> pd.DataFrame:
-    """Warmup-Tag (flat) + Up-Tag + Down-Tag = 3 x 78 5-Min-Bars."""
+    """3 Warmup-Tage (flat) + 1 Warmup-Tag (flat) + Up-Tag + Down-Tag = 6 x 78 5-Min-Bars.
+
+    Die drei zusätzlichen Flat-Tage (06./07./10. März) sorgen dafür, dass der
+    Datums-Span >= ORB_REQUIRED_WARMUP_DAYS (5 Kal.-Tage) ist und der
+    BarByBarEngine-Pre-Flight-Check nicht abbricht.
+    """
     frames = [
+        _trading_day_intraday(datetime(2025, 3, 6), "flat"),
+        _trading_day_intraday(datetime(2025, 3, 7), "flat"),
+        _trading_day_intraday(datetime(2025, 3, 10), "flat"),
         _trading_day_intraday(datetime(2025, 3, 11), "flat"),
         _trading_day_intraday(datetime(2025, 3, 12), "up"),
         _trading_day_intraday(datetime(2025, 3, 13), "down"),

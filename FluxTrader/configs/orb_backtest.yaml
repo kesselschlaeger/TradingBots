@@ -65,7 +65,7 @@ data:
   provider: ibkr
   ibkr_client_id: 3
   timeframe: "5Min"
-  lookback_days: 1
+  lookback_days: 5              # ORB_REQUIRED_WARMUP_DAYS=5 (SPY-Daily-Trend + ATR-Puffer)
 
 ##backtest:
 log_order_events: false

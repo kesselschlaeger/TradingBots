@@ -118,6 +118,12 @@ ORB_DEFAULT_PARAMS: dict = {
 }
 
 
+# ATR(14) auf 5m ist trivial (< 1 h Live-Bars). Die echte Anforderung ist der
+# SPY-Daily-Trend via context.spy_df_asof(): 5 Kalendertage decken tagesaktuellen
+# EMA(20)-Trend ab. Explizit gesetzt damit der required_warmup_days()-Vertrag greift.
+ORB_REQUIRED_WARMUP_DAYS = 5
+
+
 # ─────────────────────────── Hilfs-Aggregation ──────────────────────────────
 
 def _bars_to_df(bars: list[Bar]) -> pd.DataFrame:
@@ -154,6 +160,9 @@ class ORBStrategy(BaseStrategy):
     @property
     def name(self) -> str:
         return "orb"
+
+    def required_warmup_days(self) -> int:
+        return ORB_REQUIRED_WARMUP_DAYS
 
     def _is_ready(self) -> bool:
         min_bars = int(self.config.get("min_bars",

@@ -13,6 +13,7 @@ TODO: ML-Training (train_ml_model) -> eigenes tools/train_botti_ml.py
 """
 from __future__ import annotations
 
+import math
 from typing import Optional
 
 import numpy as np
@@ -116,6 +117,11 @@ BOTTI_DEFAULT_PARAMS: dict = {
 }
 
 
+# Größtes Indikatorfenster: max(sma_long=30, macd_slow+signal=35, adx*2=28, bb=20)=35
+# Handelstage → × 7/5 + 3 ≈ 52 Kal.-Tage; auf 50 als untere Schranke gesetzt (MTF erhöht den Wert).
+BOTTI_REQUIRED_WARMUP_DAYS = 50
+
+
 # ─────────────────────────── Hilfs-Aggregation ──────────────────────────────
 
 def _bars_to_df(bars: list[Bar]) -> pd.DataFrame:
@@ -200,6 +206,19 @@ class BottiStrategy(BaseStrategy):
     @property
     def name(self) -> str:
         return "botti"
+
+    def required_warmup_days(self) -> int:
+        cfg = self.config
+        sma_long = int(cfg.get("sma_long", 30))
+        macd_slow = int(cfg.get("macd_slow", 26))
+        macd_signal = int(cfg.get("macd_signal_period", 9))
+        adx_period = int(cfg.get("adx_period", 14))
+        bb_period = int(cfg.get("bb_period", 20))
+        # Bei aktivem MTF-Filter: Aufschlag um mtf_breakout_lookback Handelstage
+        mtf_extra = int(cfg.get("mtf_breakout_lookback", 5)) if cfg.get("use_multi_timeframe") else 0
+        trading_days = max(sma_long, macd_slow + macd_signal, adx_period * 2, bb_period) + mtf_extra
+        # Handelstage → Kalendertage (× 7/5 Wochenend-Faktor + 3 Feiertags-Puffer)
+        return max(BOTTI_REQUIRED_WARMUP_DAYS, math.ceil(trading_days * 7 / 5) + 3)
 
     def _is_ready(self) -> bool:
         min_bars = max(

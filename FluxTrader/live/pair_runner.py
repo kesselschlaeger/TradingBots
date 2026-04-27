@@ -74,8 +74,28 @@ class PairEngine:
                     self.health.set_symbol_status(strat_name, key, code, reason)
             )
 
+    async def _check_warmup_preflight(self) -> None:
+        """Fail-Fast: konfiguriertes lookback_days gegen required_warmup_days prüfen.
+
+        Wirft RuntimeError wenn der Provider weniger Kalendertage lädt als die
+        Strategie als Hard Prerequisite deklariert hat (CLAUDE.md Regel 7).
+        """
+        required = getattr(self.strategy, "required_warmup_days", lambda: None)()
+        if required is None:
+            return
+        effective = int(self.cfg.get("lookback_days", 5))
+        if effective < required:
+            raise RuntimeError(
+                f"warmup_days ({effective}) < required for strategy "
+                f"{self.strategy.name!r} ({required}). "
+                f"Erhöhe data.lookback_days in der Config auf mindestens {required}."
+            )
+        log.info("pair_engine.warmup_ok", strategy=self.strategy.name,
+                 required=required, effective=effective)
+
     async def run(self) -> None:
         """Hauptloop: pollt Bars für beide Symbole und verarbeitet PairSignals."""
+        await self._check_warmup_preflight()
         self._running = True
         sym_a = self.strategy.symbol_a
         sym_b = self.strategy.symbol_b

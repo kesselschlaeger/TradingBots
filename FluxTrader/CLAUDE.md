@@ -67,6 +67,12 @@ Diese Regeln dürfen NIEMALS verletzt werden:
      keine Validierung). LiveRunner und BarByBarEngine prüfen den Wert
      vor dem Bar-Loop und brechen mit strukturiertem Log
      (`runner.warmup_too_short`, `engine.warmup_too_short`) ab.
+     **Alle aktuell registrierten Strategien** liefern nach dem Roll-Out
+     (2026-04-27) einen `int`-Wert – `None` ist kein gültiger Zustand mehr:
+     ORB=5, OBB=75 (dynamisch via `lookback_bars`), Botti=50+ (dynamisch,
+     MTF-aware), ICT-OB equity/futures=10 / crypto=7, BottiPair=31+
+     (dynamisch via `pair_lookback`). `PairEngine` prüft analog zu
+     LiveRunner beim Start via `_check_warmup_preflight()`.
    - Pro-Symbol-Datendefizit (einzelnes Symbol unter Soll, andere ok) →
      `WARNING` + AnomalyEvent, **kein** Bot-Abort. Symbol bleibt im Bot,
      Strategie meldet für dieses Symbol weiter den passenden Status-Code.

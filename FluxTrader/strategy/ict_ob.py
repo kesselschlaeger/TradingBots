@@ -125,6 +125,12 @@ ICT_OB_DEFAULT_PARAMS: dict = {
 }
 
 
+# MTF-Aggregation braucht mind. 8 4H-Bars = 32 h Equity-Marktzeit ≈ 5 Handelstage ≈ 10 Kal.-Tage.
+# Crypto: 24/7-Markt, 8×4H = 32 h kontinuierlich = ~2 Kal.-Tage; 7 als Sicherheitspuffer gewählt.
+ICT_OB_REQUIRED_WARMUP_DAYS_EQUITY = 10   # equity + futures: Wochenendfaktor + Puffer
+ICT_OB_REQUIRED_WARMUP_DAYS_CRYPTO = 7    # 24/7-Markt: kein Wochenend-Gap, kleinerer Puffer
+
+
 # ─────────────────────────── Helpers ────────────────────────────────────────
 
 def _coerce_time(val) -> Optional[time]:
@@ -227,6 +233,12 @@ class IctOrderBlockStrategy(BaseStrategy):
     @property
     def name(self) -> str:
         return "ict_ob_mtf"
+
+    def required_warmup_days(self) -> int:
+        # Crypto-Markt läuft 24/7 – weniger Kalendertage für dieselbe Stunden-Geschichte.
+        if str(self.config.get("asset_class", "equity")).lower() == "crypto":
+            return ICT_OB_REQUIRED_WARMUP_DAYS_CRYPTO
+        return ICT_OB_REQUIRED_WARMUP_DAYS_EQUITY
 
     def _is_ready(self) -> bool:
         return len(self.bars) >= int(self.config.get("min_bars", 250))

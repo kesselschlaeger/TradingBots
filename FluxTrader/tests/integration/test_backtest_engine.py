@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 from datetime import time
 
+import pandas as pd
 import pytest
 
 from backtest.engine import BacktestConfig, BarByBarEngine
@@ -63,15 +64,13 @@ class TestBarByBarEngine:
                              eod_close_time=time(15, 55))
         engine = BarByBarEngine(strat, bt_paper, bt_context, cfg)
 
-        # 2 Tage à ~78 Bars
-        data = {
-            "AAPL": make_ohlcv(78, base=150.0, seed=10,
-                               start=_et_dt(2025, 3, 12, 9, 30)),
-        }
+        anchor = make_ohlcv(1, base=150.0, seed=10, start=_et_dt(2025, 3, 6, 9, 30))
+        main = make_ohlcv(78, base=150.0, seed=10, start=_et_dt(2025, 3, 12, 9, 30))
+        data = {"AAPL": pd.concat([anchor, main])}
         result = asyncio.get_event_loop().run_until_complete(
             engine.run(data=data, spy_df=spy_df)
         )
-        assert result.bars_processed == 78
+        assert result.bars_processed == 79
         assert result.final_equity > 0
         assert not result.equity_curve.empty
 
@@ -86,8 +85,9 @@ class TestBarByBarEngine:
         cfg = BacktestConfig(initial_capital=100_000.0)
         engine = BarByBarEngine(strat, bt_paper, bt_context, cfg)
 
-        data = {"AAPL": make_ohlcv(50, base=150.0, seed=20,
-                                    start=_et_dt(2025, 3, 12, 9, 30))}
+        anchor = make_ohlcv(1, base=150.0, seed=20, start=_et_dt(2025, 3, 6, 9, 30))
+        main = make_ohlcv(50, base=150.0, seed=20, start=_et_dt(2025, 3, 12, 9, 30))
+        data = {"AAPL": pd.concat([anchor, main])}
         result = asyncio.get_event_loop().run_until_complete(
             engine.run(data=data, spy_df=spy_df)
         )
