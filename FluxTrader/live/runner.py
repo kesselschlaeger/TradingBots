@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import pandas as pd
 from dataclasses import asdict
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Optional
@@ -58,6 +59,7 @@ class LiveRunner:
         monitoring_cfg: Any = None,
         execution_cfg: Any = None,
         bot_name: str = "",
+        data_cfg: Optional[Any] = None,
     ):
         self.strategy = strategy
         self.broker = broker
@@ -112,6 +114,7 @@ class LiveRunner:
             getattr(execution_cfg, "reconcile_require_healthy_session", True)
             if execution_cfg is not None else True
         )
+        self._data_cfg = data_cfg          # DataConfig-Objekt; Fallback für warmup_days
         self._last_health_status: Optional[str] = None
         self._watchdog_task: Optional[asyncio.Task] = None
         self._watchdog_interval_s: int = int(
@@ -232,6 +235,8 @@ class LiveRunner:
         # neue Bars liefern.
         try:
             await self._warmup()
+        except RuntimeError:
+            raise  # Fail-fast: Konfigurationsfehler (z.B. warmup_days zu kurz)
         except Exception as e:  # noqa: BLE001
             log.warning("runner.warmup_failed", error=str(e))
 
@@ -427,6 +432,13 @@ class LiveRunner:
                                                    date.today()):
             self._context.reserve_group(g)
 
+        # Strategie-Buffer nach Reset neu befüllen – ohne Re-Warmup wäre der Buffer
+        # leer und die Strategie bliebe den Rest des Tages „not ready" (min_bars).
+        try:
+            await self._warmup()
+        except Exception as e:  # noqa: BLE001
+            log.warning("runner.market_open_rewarm_failed", error=str(e))
+
     async def _on_eod_close(self) -> None:
         if self._eod_close_done:
             log.debug("runner.eod_close_skipped", reason="already_done")
@@ -536,10 +548,13 @@ class LiveRunner:
     async def _warmup(self) -> None:
         """Lade historische Bars und SPY-Tageshistorie in den Context.
 
-        Aufruf einmalig vor ``_bar_loop``. Liest die letzten ``warmup_days``
-        per ``DataProvider.get_bars_bulk`` und spielt sie chronologisch in
-        den Strategie-Buffer (über ``strategy.warmup_bar``) – ohne dabei
-        Signale zu erzeugen oder Orders auszulösen.
+        Aufruf einmalig vor ``_bar_loop`` und nach ``_on_market_open``-Reset.
+        Liest die letzten ``effective_warmup_days`` per ``DataProvider.get_bars_bulk``
+        und spielt sie chronologisch in den Strategie-Buffer (über
+        ``strategy.warmup_bar``) – ohne dabei Signale zu erzeugen oder Orders auszulösen.
+
+        Auflösung von effective_warmup_days:
+          params.warmup_days > data_cfg.lookback_days > Default (60 daily / 5 intraday)
 
         SPY (oder ``benchmark``) wird zusätzlich daily-aggregiert in den
         ``MarketContextService`` gelegt, damit der Trend-Filter live
@@ -547,16 +562,37 @@ class LiveRunner:
         """
         tf = str(self.cfg.get("timeframe", "5Min"))
         is_daily = "day" in tf.lower() or "1d" in tf.lower()
-        warmup_days = int(self.cfg.get(
-            "warmup_days", 60 if is_daily else 5,
-        ))
+        default_warmup = 60 if is_daily else 5
+
+        # Auflösungs-Reihenfolge: params.warmup_days > data_cfg.lookback_days > Default
+        if "warmup_days" in self.cfg:
+            effective_warmup_days = int(self.cfg["warmup_days"])
+        elif self._data_cfg is not None and hasattr(self._data_cfg, "lookback_days"):
+            effective_warmup_days = int(self._data_cfg.lookback_days)
+        else:
+            effective_warmup_days = default_warmup
+
+        # Fail-Fast: Konfiguration gegen required_warmup_days der Strategie prüfen
+        required = getattr(self.strategy, "required_warmup_days", lambda: None)()
+        if required is not None and effective_warmup_days < required:
+            log.error(
+                "runner.warmup_too_short",
+                strategy=self.strategy.name,
+                required_days=required,
+                configured_days=effective_warmup_days,
+                reason="daily_atr",
+            )
+            raise RuntimeError(
+                f"warmup_days ({effective_warmup_days}) < required for strategy "
+                f"{self.strategy.name} ({required})"
+            )
 
         end = datetime.now(timezone.utc)
-        start = end - timedelta(days=max(1, warmup_days))
+        start = end - timedelta(days=max(1, effective_warmup_days))
 
         log.info("runner.warmup_start", symbols=self.symbols,
                  start=start.isoformat(), end=end.isoformat(),
-                 timeframe=tf, days=warmup_days)
+                 timeframe=tf, days=effective_warmup_days)
 
         try:
             data = await self.data.get_bars_bulk(
@@ -565,6 +601,55 @@ class LiveRunner:
         except Exception as e:  # noqa: BLE001
             log.warning("runner.warmup_bulk_failed", error=str(e))
             return
+
+        # Per-Symbol-Datenmenge prüfen (WARNING, kein Hard-Abort)
+        if required is not None:
+            needed_completed_days = required - 1
+            for sym, df in data.items():
+                if df is None or (hasattr(df, "empty") and df.empty):
+                    continue
+                try:
+                    idx = pd.DatetimeIndex(df.index)
+                    if idx.tz is None:
+                        idx = idx.tz_localize("UTC")
+                    idx_et = idx.tz_convert(ET_TZ)
+                    all_dates = {d.normalize() for d in idx_et}
+                    today_et = idx_et[-1].normalize()
+                    completed_days = len(all_dates - {today_et})
+                    if completed_days < needed_completed_days:
+                        log.warning(
+                            "runner.symbol_warmup_short",
+                            symbol=sym,
+                            strategy=self.strategy.name,
+                            completed_days=completed_days,
+                            required_days=needed_completed_days,
+                        )
+                        if self.anomaly is not None:
+                            try:
+                                ev = AnomalyEvent(
+                                    timestamp=datetime.now(timezone.utc),
+                                    check_name="symbol_warmup_short",
+                                    severity=AlertLevel.WARNING,
+                                    symbol=sym,
+                                    strategy=self.strategy.name,
+                                    bot_name=self._bot_name,
+                                    message=(
+                                        f"Symbol {sym}: {completed_days} abgeschlossene "
+                                        f"Handelstage < {needed_completed_days} für "
+                                        f"Daily-ATR(14)"
+                                    ),
+                                    context={
+                                        "completed_days": completed_days,
+                                        "required_days": needed_completed_days,
+                                    },
+                                )
+                                await self.anomaly._emit(ev)  # noqa: SLF001
+                            except Exception as ae:  # noqa: BLE001
+                                log.warning("runner.symbol_warmup_short_emit_failed",
+                                            error=str(ae))
+                except Exception as e:  # noqa: BLE001
+                    log.warning("runner.symbol_warmup_check_failed",
+                                symbol=sym, error=str(e))
 
         # Asset-aware Trend-Referenz laden:
         # - equity ohne expliziten Ref-Asset: benchmark/SPY als Daily-DF
@@ -582,7 +667,7 @@ class LiveRunner:
                 # EMA(20) nicht sinnvoll). Daher: immer mit Daily-Timeframe
                 # und eigenem Lookback laden.
                 ema_period = int(self.cfg.get("trend_ema_period", 20))
-                spy_daily_days = max(warmup_days, ema_period + 15)
+                spy_daily_days = max(effective_warmup_days, ema_period + 15)
                 spy_start = end - timedelta(days=spy_daily_days)
 
                 spy_df = None

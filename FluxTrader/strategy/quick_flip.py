@@ -43,6 +43,9 @@ from strategy.registry import register
 
 log = get_logger(__name__)
 
+# Mindest-Warmup in Kalendertagen: 14 Handelstage ATR + Feiertags-/DST-Puffer + heutiger Tag
+QUICK_FLIP_REQUIRED_WARMUP_DAYS = 25
+
 
 # ─────────────────────────── Default-Config ─────────────────────────────────
 
@@ -103,11 +106,15 @@ def _bars_to_df(bars: list[Bar]) -> pd.DataFrame:
 class QuickFlipStrategy(BaseStrategy):
     """Quick Flip Scalper – Reversal nach Sweep an der Opening Range.
 
-    State Machine (`_day_cache["state"]`):
+    State Machine (pro Symbol via `_day_caches[symbol]["state"]`):
       idle        → OR-Periode läuft noch / ATR-Warmup.
       or_complete → OR-Box steht. ATR-Validierung + Richtungs-/Gap-Filter.
       armed       → Alle Filter ok. Warte auf Sweep + Reversal-Candle.
       done        → Signal emittiert ODER Fenster abgelaufen (terminal).
+
+    Jedes Symbol hält seinen eigenen Tag-Cache in `_day_caches[symbol]`.
+    Backtest (N Symbole, chronologisch interleaved) und LiveRunner (N Symbole
+    gleichzeitig) teilen damit keinen State mehr.
 
     Die OR-Eröffnungskerze ist gleichzeitig die Manipulationskerze (Schritt 2).
     Es gibt keine separate Liquidity-Candle-Erkennung mehr.
@@ -117,11 +124,14 @@ class QuickFlipStrategy(BaseStrategy):
         merged = dict(QUICK_FLIP_DEFAULT_PARAMS)
         merged.update(config or {})
         super().__init__(merged, context=context)
-        self._day_cache: dict = self._fresh_day_cache()
+        self._day_caches: dict[str, dict] = {}   # Key: symbol → Tages-State (per Symbol)
 
     @property
     def name(self) -> str:
         return "quick_flip"
+
+    def required_warmup_days(self) -> int:
+        return QUICK_FLIP_REQUIRED_WARMUP_DAYS
 
     def _is_ready(self) -> bool:
         min_bars = int(self.config.get("min_bars", 20))
@@ -133,7 +143,7 @@ class QuickFlipStrategy(BaseStrategy):
 
     def reset(self) -> None:
         super().reset()
-        self._day_cache = self._fresh_day_cache()
+        self._day_caches.clear()
 
     # ── Core Signal-Logic ──────────────────────────────────────────────
 
@@ -164,21 +174,25 @@ class QuickFlipStrategy(BaseStrategy):
             self._record_status(symbol, "OUTSIDE_HOURS", "außerhalb Handelszeiten")
             return []
 
-        # Day-Reset
+        # Per-Symbol-Cache holen/anlegen
+        cache = self._day_caches.setdefault(symbol, self._fresh_day_cache())
+
+        # Day-Reset (nur für dieses Symbol)
         day_et = to_et(current_time)
         today = day_et.date()
-        if self._day_cache.get("date") != today:
-            self._day_cache = self._fresh_day_cache()
-            self._day_cache["date"] = today
-            self._day_cache["open_time_et"] = self._market_open_for(day_et)
+        if cache.get("date") != today:
+            cache = self._fresh_day_cache()
+            cache["date"] = today
+            cache["open_time_et"] = self._market_open_for(day_et)
+            self._day_caches[symbol] = cache
 
         # ── Time-Window-Check (ERSTE Prüfung im State-Machine-Block) ─
-        if self._check_time_window_expired(current_time):
-            self._day_cache["state"] = "done"
+        if self._check_time_window_expired(current_time, cache):
+            cache["state"] = "done"
             self._record_status(symbol, "WINDOW_EXPIRED", "Handelsfenster abgelaufen")
             return []
 
-        state = self._day_cache.get("state", "idle")
+        state = cache.get("state", "idle")
         if state == "done":
             return []
 
@@ -191,36 +205,36 @@ class QuickFlipStrategy(BaseStrategy):
         # ── State: idle ──────────────────────────────────────────────
         if state == "idle":
             # ATR schon während OR-Periode vorausberechnen
-            if self._day_cache.get("daily_atr") is None:
+            if cache.get("daily_atr") is None:
                 daily_atr = self._compute_daily_atr(df_5m)
                 if daily_atr is not None:
-                    self._day_cache["daily_atr"] = daily_atr
+                    cache["daily_atr"] = daily_atr
 
             if cur_minutes < or_end_minutes:
                 self._record_status(symbol, "WAIT_OR", f"OR-Periode, {orb_minutes}m")
                 return []
 
             # OR-Periode abgeschlossen: Box berechnen
-            if self._day_cache.get("daily_atr") is None:
+            if cache.get("daily_atr") is None:
                 self._record_status(symbol, "NO_DAILY_ATR", "Daily ATR nicht berechenbar")
                 return []
 
-            self._lock_opening_range(df_5m)
-            if self._day_cache.get("or_high") is None:
+            self._lock_opening_range(df_5m, cache)
+            if cache.get("or_high") is None:
                 self._record_status(symbol, "NO_OR", "OR-Box nicht berechenbar")
                 return []
 
-            self._day_cache["state"] = "or_complete"
+            cache["state"] = "or_complete"
             state = "or_complete"
 
         # ── State: or_complete → ATR-Validierung + Filter ────────────
         if state == "or_complete":
-            or_range = self._day_cache["or_range"]
-            daily_atr = self._day_cache["daily_atr"]
+            or_range = cache["or_range"]
+            daily_atr = cache["daily_atr"]
             threshold = float(cfg.get("liquidity_atr_threshold", 0.25))
 
             if or_range < threshold * daily_atr:
-                self._day_cache["state"] = "done"
+                cache["state"] = "done"
                 log.debug("quick_flip.or_too_small",
                           symbol=symbol, or_range=or_range,
                           threshold=threshold * daily_atr)
@@ -228,30 +242,30 @@ class QuickFlipStrategy(BaseStrategy):
                                     f"or_range={or_range:.3f} < {threshold*daily_atr:.3f}")
                 return []
 
-            or_color = self._day_cache.get("or_color", "red")
+            or_color = cache.get("or_color", "red")
             direction = "long" if or_color == "red" else "short"
 
             if direction == "short" and not cfg.get("allow_shorts", True):
-                self._day_cache["state"] = "done"
+                cache["state"] = "done"
                 self._record_status(symbol, "SHORTS_DISABLED", "grüne OR, Shorts deaktiviert")
                 return []
 
-            self._day_cache["direction"] = direction
+            cache["direction"] = direction
 
             # Gap-Filter (einmalig)
-            if cfg.get("use_gap_filter", True) and not self._day_cache.get("gap_checked"):
+            if cfg.get("use_gap_filter", True) and not cache.get("gap_checked"):
                 gap_ok, gap_pct = self._gap_check(
                     df_5m, float(cfg.get("max_gap_pct", 0.03)),
                 )
-                self._day_cache["gap_checked"] = True
+                cache["gap_checked"] = True
                 if not gap_ok:
-                    self._day_cache["state"] = "done"
+                    cache["state"] = "done"
                     log.debug("quick_flip.gap_block", symbol=symbol, gap_pct=gap_pct)
                     self._record_status(symbol, "GAP_BLOCK",
                                         f"gap {gap_pct*100:.2f}%")
                     return []
 
-            self._day_cache["state"] = "armed"
+            cache["state"] = "armed"
             state = "armed"
 
         # ── State: armed → Sweep + Reversal + Signal ─────────────────
@@ -261,13 +275,13 @@ class QuickFlipStrategy(BaseStrategy):
                 self._record_status(symbol, "WAIT_REVERSAL", "warte auf Post-OR-Bar")
                 return []
 
-            direction = self._day_cache["direction"]
-            signal = self._detect_reversal_and_build_signal(df_5m, direction, bar)
+            direction = cache["direction"]
+            signal = self._detect_reversal_and_build_signal(df_5m, direction, bar, cache)
             if signal is None:
                 self._record_status(symbol, "WAIT_REVERSAL",
                                     f"warte auf Reversal ({direction})")
                 return []
-            self._day_cache["state"] = "done"
+            cache["state"] = "done"
             self._record_status(symbol, "SIGNAL",
                                 signal.metadata.get("reason", ""))
             return [signal]
@@ -299,13 +313,13 @@ class QuickFlipStrategy(BaseStrategy):
         et_dt = to_et(dt_et)
         return et_dt.replace(hour=9, minute=30, second=0, microsecond=0)
 
-    def _check_time_window_expired(self, now: datetime) -> bool:
+    def _check_time_window_expired(self, now: datetime, cache: dict) -> bool:
         cfg = self.config
         window = int(cfg.get("max_trade_window_minutes", 90))
-        open_time = self._day_cache.get("open_time_et")
+        open_time = cache.get("open_time_et")
         if open_time is None:
             open_time = self._market_open_for(now)
-            self._day_cache["open_time_et"] = open_time
+            cache["open_time_et"] = open_time
         return not is_within_trade_window(now, open_time, window)
 
     # ── Helper: Indikator-Berechnung ──────────────────────────────
@@ -338,11 +352,11 @@ class QuickFlipStrategy(BaseStrategy):
             return None
         return float(series.iloc[-1])
 
-    def _lock_opening_range(self, df_5m: pd.DataFrame) -> None:
+    def _lock_opening_range(self, df_5m: pd.DataFrame, cache: dict) -> None:
         """Berechnet or_high/or_low/or_open/or_close/or_color aus OR-Bars."""
         cfg = self.config
         orb_minutes = int(cfg.get("opening_range_minutes", 15))
-        today = self._day_cache["date"]
+        today = cache["date"]
         df = df_5m.copy()
         df.index = to_et(df.index)
         day_mask = np.asarray([d.date() == today for d in df.index], dtype=bool)
@@ -361,22 +375,23 @@ class QuickFlipStrategy(BaseStrategy):
         or_mask = (hhmm >= orb_start) & (hhmm < orb_end)
         or_bars = day_df[or_mask]
 
-        self._day_cache["or_high"] = hi
-        self._day_cache["or_low"] = lo
-        self._day_cache["or_range"] = rng
+        cache["or_high"] = hi
+        cache["or_low"] = lo
+        cache["or_range"] = rng
 
         if len(or_bars) >= 1:
             or_open = float(or_bars["Open"].iloc[0])
             or_close = float(or_bars["Close"].iloc[-1])
-            self._day_cache["or_open"] = or_open
-            self._day_cache["or_close"] = or_close
-            self._day_cache["or_color"] = "green" if or_close > or_open else "red"
+            cache["or_open"] = or_open
+            cache["or_close"] = or_close
+            cache["or_color"] = "green" if or_close > or_open else "red"
 
     def _detect_reversal_and_build_signal(
         self,
         df_5m: pd.DataFrame,
         direction: str,
         bar: Bar,
+        cache: dict,
     ) -> Optional[Signal]:
         """Prüft aktuellen 5m-Bar auf Sweep + Reversal-Pattern. Gibt Signal oder None zurück.
 
@@ -390,10 +405,10 @@ class QuickFlipStrategy(BaseStrategy):
           bearish_engulfing: entry = prev.low  - buf, stop = high + buf
         """
         cfg = self.config
-        or_high = self._day_cache.get("or_high")
-        or_low = self._day_cache.get("or_low")
-        or_range = self._day_cache.get("or_range", 0.0)
-        daily_atr = self._day_cache.get("daily_atr")
+        or_high = cache.get("or_high")
+        or_low = cache.get("or_low")
+        or_range = cache.get("or_range", 0.0)
+        daily_atr = cache.get("daily_atr")
         if or_high is None or or_low is None:
             return None
 
@@ -552,7 +567,7 @@ class QuickFlipStrategy(BaseStrategy):
             "entry_price": entry,
             "or_high": float(or_high),
             "or_low": float(or_low),
-            "or_color": self._day_cache.get("or_color", ""),
+            "or_color": cache.get("or_color", ""),
             "reversal_pattern": pattern,
             "daily_atr": float(daily_atr) if daily_atr else 0.0,
             "rr_ratio": float(rr_ratio),
@@ -603,5 +618,6 @@ class QuickFlipStrategy(BaseStrategy):
 # Kernfilter: OR-Range >= 25 % Daily ATR + Reversal-Pattern (Hammer / Engulfing).
 #
 # Architektur-Hinweis – State Machine:
-# _day_cache["state"] ist die einzige Quelle der Wahrheit für den Tages-State.
-# Dieses Pattern dient als Vorlage für sequenzielle Strategien im Framework.
+# _day_caches[symbol]["state"] ist die einzige Quelle der Wahrheit für den Symbol-Tages-State.
+# Jedes Symbol hat seinen eigenen Cache (dict[str, dict]). Backtest und LiveRunner mit
+# N Symbolen teilen damit keinen State. Dieses Pattern ist Vorlage für sequenzielle Strategien.

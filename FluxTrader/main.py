@@ -451,6 +451,7 @@ async def cmd_live(cfg: AppConfig) -> None:
                 monitoring_cfg=cfg.monitoring,
                 execution_cfg=cfg.execution,
                 bot_name=effective_bot_name,
+                data_cfg=cfg.data,
             )
             await runner.start()
     finally:

@@ -61,7 +61,7 @@ broker:
 data:
   provider: ibkr
   timeframe: "5Min"
-  lookback_days: 30            # ausreichend Tage für Daily-ATR(14)
+  lookback_days: 30            # ≥ 25 Kalendertage required (Daily-ATR(14) braucht 14 Handelstage + Feiertags-/DST-Puffer)
 
 notifications:
   enabled: true

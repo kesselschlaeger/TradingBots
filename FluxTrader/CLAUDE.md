@@ -279,24 +279,40 @@ besteht, die aufeinander aufbauen und in der falschen Reihenfolge nicht ausgefü
 werden dürfen. Implizites Caching führt dort zu schwer debuggbaren Race Conditions
 (z.B. überschreibt ein zweiter Liquidity-Candle den ersten State).
 
+**Multi-Symbol-Isolation:** Jedes Symbol hält seinen eigenen Tages-Cache in
+`_day_caches[symbol]` (Dict-of-Dicts). Backtest mit N interleaved Symbolen und
+LiveRunner mit N gleichzeitigen Symbolen teilen damit keinen State.
+
 ```python
-# _day_cache["state"] — einzige Quelle der Wahrheit für den Tages-State
-_fresh_day_cache() -> dict:
-    {"date": None, "state": "idle", ...}
+# _day_caches[symbol]["state"] — einzige Quelle der Wahrheit für den Symbol-Tages-State
+self._day_caches: dict[str, dict] = {}   # Key: symbol → Tages-Cache
+
+# Lazy-Init und Day-Reset in _generate_signals():
+cache = self._day_caches.setdefault(symbol, self._fresh_day_cache())
+if cache.get("date") != today:
+    cache = self._fresh_day_cache()
+    cache["date"] = today
+    self._day_caches[symbol] = cache
 
 # State-Übergänge nur in _generate_signals():
-# idle -> or_locked (OR-Box vollständig)
-# or_locked -> liquidity_seen (Liquidity-Candle erkannt)
-# liquidity_seen -> done (Trade ausgeführt)
-# * -> done (Zeitfenster abgelaufen / Entry-Cutoff)
+# idle -> or_complete (OR-Box vollständig + ATR berechnet)
+# or_complete -> armed  (ATR-Validierung + Richtungs-/Gap-Filter ok)
+# armed -> done         (Signal emittiert)
+# * -> done             (Zeitfenster abgelaufen)
+
+# reset() löscht alle Symbol-Caches:
+def reset(self) -> None:
+    super().reset()
+    self._day_caches.clear()
 ```
 
 Pflicht-Konventionen für jede State-Machine-Strategie:
-- `_check_time_window_expired()` ist **immer die erste Prüfung** in `_generate_signals`
-- State `"done"` ist **terminal** für den Tag – kein weiterer Trade
-- Day-Reset via `bar.timestamp.date() != _day_cache.get("date")`
+- `_check_time_window_expired(now, cache)` ist **immer die erste Prüfung** in `_generate_signals`
+- State `"done"` ist **terminal** für den Tag – kein weiterer Trade pro Symbol
+- Day-Reset via `cache.get("date") != today` – nur für das aktuelle Symbol
 - `_fresh_day_cache()` als statische Methode, damit `reset()` und Day-Reset
   dieselbe Initialisierung nutzen
+- Alle Helper-Methoden erhalten `cache: dict` als Parameter (kein `self._day_cache`)
 
 ## ICT Order Block – Asset-Class-Routing
 

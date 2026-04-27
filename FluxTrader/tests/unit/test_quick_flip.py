@@ -76,12 +76,13 @@ def _make_df(bars: list[Bar]) -> pd.DataFrame:
     }, index=idx)
 
 
-def _seed_or_complete(strategy: QuickFlipStrategy,
+def _seed_or_complete(strategy: QuickFlipStrategy, symbol: str = "AAPL",
                       or_high=102.0, or_low=98.0,
                       or_open=100.5, or_close=99.5,
                       daily_atr=4.0) -> None:
-    """Setzt Cache auf 'or_complete' für ATR-Validierungs-Tests."""
-    strategy._day_cache.update({
+    """Setzt den per-Symbol-Cache auf 'or_complete' für ATR-Validierungs-Tests."""
+    cache = strategy._day_caches.setdefault(symbol, QuickFlipStrategy._fresh_day_cache())
+    cache.update({
         "date": TEST_DATE,
         "state": "or_complete",
         "or_high": or_high,
@@ -96,14 +97,15 @@ def _seed_or_complete(strategy: QuickFlipStrategy,
     })
 
 
-def _seed_armed(strategy: QuickFlipStrategy,
+def _seed_armed(strategy: QuickFlipStrategy, symbol: str = "AAPL",
                 direction="long",
                 or_high=102.0, or_low=98.0,
                 daily_atr=4.0) -> None:
-    """Setzt Cache auf 'armed' für Reversal-Tests."""
+    """Setzt den per-Symbol-Cache auf 'armed' für Reversal-Tests."""
     or_open = 100.5 if direction == "long" else 99.5
     or_close = 99.5 if direction == "long" else 100.5
-    strategy._day_cache.update({
+    cache = strategy._day_caches.setdefault(symbol, QuickFlipStrategy._fresh_day_cache())
+    cache.update({
         "date": TEST_DATE,
         "state": "armed",
         "or_high": or_high,
@@ -138,7 +140,7 @@ class TestOrTooSmall:
         bar = _bar_at(9, 45)
         signals = strategy._generate_signals(bar)
         assert signals == []
-        assert strategy._day_cache["state"] == "done"
+        assert strategy._day_caches["AAPL"]["state"] == "done"
 
     def test_or_exactly_at_threshold_passes(self, strategy, context):
         """OR-Range == 0.25 * daily_atr → KEIN Block (>= Bedingung)."""
@@ -153,7 +155,7 @@ class TestOrTooSmall:
         bar = _bar_at(9, 45)
         strategy._generate_signals(bar)
         # Kein done durch OR_TOO_SMALL; state sollte nun 'armed' sein
-        assert strategy._day_cache["state"] == "armed"
+        assert strategy._day_caches["AAPL"]["state"] == "armed"
 
 
 # ── Test 2: Rote OR + Hammer → Long ─────────────────────────────────────────
@@ -169,10 +171,11 @@ class TestRedOpenLongHammer:
         # upper = 97.62-97.7 < 0 → 0 <= 0.3*0.10=0.03 ✓
         # bar.low=97.0 < or_low=98.0 → Sweep ✓
         ts = _et_dt(2025, 3, 12, 10, 0)
-        bar = Bar("AAPL", ts, o=97.6, h=97.62, l=97.0, c=97.7, v=150_000)
+        bar = Bar("AAPL", ts, open=97.6, high=97.62, low=97.0, close=97.7, volume=150_000)
         df = _make_df([bar])
 
-        sig = strategy._detect_reversal_and_build_signal(df, "long", bar)
+        sig = strategy._detect_reversal_and_build_signal(
+            df, "long", bar, strategy._day_caches["AAPL"])
         assert sig is not None
         assert sig.direction == 1
 
@@ -180,10 +183,11 @@ class TestRedOpenLongHammer:
         """Long + hammer: entry = high(reversal_bar) + buffer_ticks."""
         _seed_armed(strategy, direction="long", or_high=102.0, or_low=98.0)
         ts = _et_dt(2025, 3, 12, 10, 0)
-        bar = Bar("AAPL", ts, o=97.6, h=97.62, l=97.0, c=97.7, v=150_000)
+        bar = Bar("AAPL", ts, open=97.6, high=97.62, low=97.0, close=97.7, volume=150_000)
         df = _make_df([bar])
 
-        sig = strategy._detect_reversal_and_build_signal(df, "long", bar)
+        sig = strategy._detect_reversal_and_build_signal(
+            df, "long", bar, strategy._day_caches["AAPL"])
         assert sig is not None
         assert sig.metadata["entry_price"] == pytest.approx(97.62 + 0.05)
 
@@ -191,10 +195,11 @@ class TestRedOpenLongHammer:
         """Long + hammer: stop = low(reversal_bar) - buffer_ticks."""
         _seed_armed(strategy, direction="long", or_high=102.0, or_low=98.0)
         ts = _et_dt(2025, 3, 12, 10, 0)
-        bar = Bar("AAPL", ts, o=97.6, h=97.62, l=97.0, c=97.7, v=150_000)
+        bar = Bar("AAPL", ts, open=97.6, high=97.62, low=97.0, close=97.7, volume=150_000)
         df = _make_df([bar])
 
-        sig = strategy._detect_reversal_and_build_signal(df, "long", bar)
+        sig = strategy._detect_reversal_and_build_signal(
+            df, "long", bar, strategy._day_caches["AAPL"])
         assert sig is not None
         assert sig.stop_price == pytest.approx(97.0 - 0.05)
 
@@ -202,10 +207,11 @@ class TestRedOpenLongHammer:
         """Long-Setup: Primärziel = or_high."""
         _seed_armed(strategy, direction="long", or_high=102.0, or_low=98.0)
         ts = _et_dt(2025, 3, 12, 10, 0)
-        bar = Bar("AAPL", ts, o=97.6, h=97.62, l=97.0, c=97.7, v=150_000)
+        bar = Bar("AAPL", ts, open=97.6, high=97.62, low=97.0, close=97.7, volume=150_000)
         df = _make_df([bar])
 
-        sig = strategy._detect_reversal_and_build_signal(df, "long", bar)
+        sig = strategy._detect_reversal_and_build_signal(
+            df, "long", bar, strategy._day_caches["AAPL"])
         assert sig is not None
         assert sig.target_price == pytest.approx(102.0)
 
@@ -213,10 +219,11 @@ class TestRedOpenLongHammer:
         """Signal-Metadaten: or_color='red', reversal_pattern='hammer'."""
         _seed_armed(strategy, direction="long", or_high=102.0, or_low=98.0)
         ts = _et_dt(2025, 3, 12, 10, 0)
-        bar = Bar("AAPL", ts, o=97.6, h=97.62, l=97.0, c=97.7, v=150_000)
+        bar = Bar("AAPL", ts, open=97.6, high=97.62, low=97.0, close=97.7, volume=150_000)
         df = _make_df([bar])
 
-        sig = strategy._detect_reversal_and_build_signal(df, "long", bar)
+        sig = strategy._detect_reversal_and_build_signal(
+            df, "long", bar, strategy._day_caches["AAPL"])
         assert sig is not None
         assert sig.metadata["or_color"] == "red"
         assert sig.metadata["reversal_pattern"] == "hammer"
@@ -227,10 +234,11 @@ class TestRedOpenLongHammer:
         _seed_armed(strategy, direction="long", or_high=102.0, or_low=98.0)
         ts = _et_dt(2025, 3, 12, 10, 0)
         # bar.low=98.5 >= or_low=98.0 → kein Sweep
-        bar = Bar("AAPL", ts, o=98.6, h=98.65, l=98.5, c=98.7, v=150_000)
+        bar = Bar("AAPL", ts, open=98.6, high=98.65, low=98.5, close=98.7, volume=150_000)
         df = _make_df([bar])
 
-        sig = strategy._detect_reversal_and_build_signal(df, "long", bar)
+        sig = strategy._detect_reversal_and_build_signal(
+            df, "long", bar, strategy._day_caches["AAPL"])
         assert sig is None
 
 
@@ -247,10 +255,11 @@ class TestGreenOpenShortInvHammer:
         # lower = 102.2-102.22 < 0 → 0 <= 0.3*0.10=0.03 ✓
         # bar.high=103.0 > or_high=102.0 → Sweep ✓
         ts = _et_dt(2025, 3, 12, 10, 0)
-        bar = Bar("AAPL", ts, o=102.2, h=103.0, l=102.22, c=102.3, v=150_000)
+        bar = Bar("AAPL", ts, open=102.2, high=103.0, low=102.22, close=102.3, volume=150_000)
         df = _make_df([bar])
 
-        sig = strategy._detect_reversal_and_build_signal(df, "short", bar)
+        sig = strategy._detect_reversal_and_build_signal(
+            df, "short", bar, strategy._day_caches["AAPL"])
         assert sig is not None
         assert sig.direction == -1
 
@@ -258,10 +267,11 @@ class TestGreenOpenShortInvHammer:
         """Short + inverted_hammer: entry = low(reversal_bar) - buffer_ticks."""
         _seed_armed(strategy, direction="short", or_high=102.0, or_low=98.0)
         ts = _et_dt(2025, 3, 12, 10, 0)
-        bar = Bar("AAPL", ts, o=102.2, h=103.0, l=102.22, c=102.3, v=150_000)
+        bar = Bar("AAPL", ts, open=102.2, high=103.0, low=102.22, close=102.3, volume=150_000)
         df = _make_df([bar])
 
-        sig = strategy._detect_reversal_and_build_signal(df, "short", bar)
+        sig = strategy._detect_reversal_and_build_signal(
+            df, "short", bar, strategy._day_caches["AAPL"])
         assert sig is not None
         assert sig.metadata["entry_price"] == pytest.approx(102.22 - 0.05)
 
@@ -269,10 +279,11 @@ class TestGreenOpenShortInvHammer:
         """Short + inverted_hammer: stop = high(reversal_bar) + buffer_ticks."""
         _seed_armed(strategy, direction="short", or_high=102.0, or_low=98.0)
         ts = _et_dt(2025, 3, 12, 10, 0)
-        bar = Bar("AAPL", ts, o=102.2, h=103.0, l=102.22, c=102.3, v=150_000)
+        bar = Bar("AAPL", ts, open=102.2, high=103.0, low=102.22, close=102.3, volume=150_000)
         df = _make_df([bar])
 
-        sig = strategy._detect_reversal_and_build_signal(df, "short", bar)
+        sig = strategy._detect_reversal_and_build_signal(
+            df, "short", bar, strategy._day_caches["AAPL"])
         assert sig is not None
         assert sig.stop_price == pytest.approx(103.0 + 0.05)
 
@@ -280,10 +291,11 @@ class TestGreenOpenShortInvHammer:
         """Short-Setup: Primärziel = or_low."""
         _seed_armed(strategy, direction="short", or_high=102.0, or_low=98.0)
         ts = _et_dt(2025, 3, 12, 10, 0)
-        bar = Bar("AAPL", ts, o=102.2, h=103.0, l=102.22, c=102.3, v=150_000)
+        bar = Bar("AAPL", ts, open=102.2, high=103.0, low=102.22, close=102.3, volume=150_000)
         df = _make_df([bar])
 
-        sig = strategy._detect_reversal_and_build_signal(df, "short", bar)
+        sig = strategy._detect_reversal_and_build_signal(
+            df, "short", bar, strategy._day_caches["AAPL"])
         assert sig is not None
         assert sig.target_price == pytest.approx(98.0)
 
@@ -303,11 +315,12 @@ class TestBullishEngulfingEntryUsesPrevHigh:
         # bar.low=97.3 < or_low=98.0 → Sweep ✓
         ts_prev = _et_dt(2025, 3, 12, 9, 55)
         ts_cur = _et_dt(2025, 3, 12, 10, 0)
-        prev = Bar("AAPL", ts_prev, o=98.5, h=99.0, l=97.5, c=98.0, v=100_000)
-        cur = Bar("AAPL", ts_cur, o=97.8, h=99.5, l=97.3, c=98.8, v=150_000)
+        prev = Bar("AAPL", ts_prev, open=98.5, high=99.0, low=97.5, close=98.0, volume=100_000)
+        cur = Bar("AAPL", ts_cur, open=97.8, high=99.5, low=97.3, close=98.8, volume=150_000)
         df = _make_df([prev, cur])
 
-        sig = strategy._detect_reversal_and_build_signal(df, "long", cur)
+        sig = strategy._detect_reversal_and_build_signal(
+            df, "long", cur, strategy._day_caches["AAPL"])
         assert sig is not None
         assert sig.metadata["reversal_pattern"] == "bullish_engulfing"
         # Entry muss prev_bar.high + buffer = 99.0 + 0.05 sein
@@ -320,11 +333,12 @@ class TestBullishEngulfingEntryUsesPrevHigh:
         _seed_armed(strategy, direction="long", or_high=102.0, or_low=98.0)
         ts_prev = _et_dt(2025, 3, 12, 9, 55)
         ts_cur = _et_dt(2025, 3, 12, 10, 0)
-        prev = Bar("AAPL", ts_prev, o=98.5, h=99.0, l=97.5, c=98.0, v=100_000)
-        cur = Bar("AAPL", ts_cur, o=97.8, h=99.5, l=97.3, c=98.8, v=150_000)
+        prev = Bar("AAPL", ts_prev, open=98.5, high=99.0, low=97.5, close=98.0, volume=100_000)
+        cur = Bar("AAPL", ts_cur, open=97.8, high=99.5, low=97.3, close=98.8, volume=150_000)
         df = _make_df([prev, cur])
 
-        sig = strategy._detect_reversal_and_build_signal(df, "long", cur)
+        sig = strategy._detect_reversal_and_build_signal(
+            df, "long", cur, strategy._day_caches["AAPL"])
         assert sig is not None
         assert sig.stop_price == pytest.approx(97.3 - 0.05)
 
@@ -340,11 +354,12 @@ class TestBullishEngulfingEntryUsesPrevHigh:
         # bar.high=103.5 > or_high=102.0 → Sweep ✓
         ts_prev = _et_dt(2025, 3, 12, 9, 55)
         ts_cur = _et_dt(2025, 3, 12, 10, 0)
-        prev = Bar("AAPL", ts_prev, o=102.5, h=103.0, l=102.2, c=103.0, v=100_000)
-        cur = Bar("AAPL", ts_cur, o=103.2, h=103.5, l=101.8, c=102.1, v=150_000)
+        prev = Bar("AAPL", ts_prev, open=102.5, high=103.0, low=102.2, close=103.0, volume=100_000)
+        cur = Bar("AAPL", ts_cur, open=103.2, high=103.5, low=101.8, close=102.1, volume=150_000)
         df = _make_df([prev, cur])
 
-        sig = strategy._detect_reversal_and_build_signal(df, "short", cur)
+        sig = strategy._detect_reversal_and_build_signal(
+            df, "short", cur, strategy._day_caches["AAPL"])
         assert sig is not None
         assert sig.metadata["reversal_pattern"] == "bearish_engulfing"
         # Entry = prev_bar.low - buffer = 102.2 - 0.05 = 102.15
@@ -363,7 +378,7 @@ class TestWindowExpiredNoSignal:
         bar = _bar_minutes_after_open(91, l=97.0, h=97.62, o=97.6, c=97.7)
         signals = strategy._generate_signals(bar)
         assert signals == []
-        assert strategy._day_cache["state"] == "done"
+        assert strategy._day_caches["AAPL"]["state"] == "done"
 
     def test_reversal_at_91min_produces_no_signal(self, strategy, context):
         """Auch ein perfektes Hammer-Pattern nach 91 Min liefert [] zurück."""
@@ -376,17 +391,19 @@ class TestWindowExpiredNoSignal:
 
     def test_check_time_window_expired_at_91min(self, strategy, context):
         """_check_time_window_expired() gibt True bei 91 Min."""
-        strategy._day_cache["open_time_et"] = ET.localize(
-            datetime(2025, 3, 12, 9, 30))
+        cache = strategy._day_caches.setdefault(
+            "AAPL", QuickFlipStrategy._fresh_day_cache())
+        cache["open_time_et"] = ET.localize(datetime(2025, 3, 12, 9, 30))
         bar = _bar_minutes_after_open(91)
-        assert strategy._check_time_window_expired(bar.timestamp) is True
+        assert strategy._check_time_window_expired(bar.timestamp, cache) is True
 
     def test_check_time_window_not_expired_at_90min(self, strategy, context):
         """_check_time_window_expired() gibt False bei genau 90 Min (inklusiv)."""
-        strategy._day_cache["open_time_et"] = ET.localize(
-            datetime(2025, 3, 12, 9, 30))
+        cache = strategy._day_caches.setdefault(
+            "AAPL", QuickFlipStrategy._fresh_day_cache())
+        cache["open_time_et"] = ET.localize(datetime(2025, 3, 12, 9, 30))
         bar = _bar_minutes_after_open(90)
-        assert strategy._check_time_window_expired(bar.timestamp) is False
+        assert strategy._check_time_window_expired(bar.timestamp, cache) is False
 
 
 # ── Test 6: allow_shorts=False mit grüner OR ─────────────────────────────────
@@ -406,7 +423,7 @@ class TestAllowShortsFalse:
         bar = _bar_at(9, 45)
         signals = strategy._generate_signals(bar)
         assert signals == []
-        assert strategy._day_cache["state"] == "done"
+        assert strategy._day_caches["AAPL"]["state"] == "done"
 
     def test_red_or_long_still_works_with_shorts_disabled(self, strategy, context):
         """Rote OR bei allow_shorts=False → Long-Setup bleibt aktiv."""
@@ -421,8 +438,8 @@ class TestAllowShortsFalse:
 
         bar = _bar_at(9, 45)
         strategy._generate_signals(bar)
-        assert strategy._day_cache["state"] == "armed"
-        assert strategy._day_cache["direction"] == "long"
+        assert strategy._day_caches["AAPL"]["state"] == "armed"
+        assert strategy._day_caches["AAPL"]["direction"] == "long"
 
 
 # ── Test 7: Extended Target Flag ─────────────────────────────────────────────
@@ -438,10 +455,11 @@ class TestExtendedTargetFlag:
         # risk=97.67-96.95=0.72, reward_ext=106-97.67=8.33 → rr_ext=11.6 >= 2.5 ✓
         _seed_armed(strategy, direction="long", or_high=102.0, or_low=98.0)
         ts = _et_dt(2025, 3, 12, 10, 0)
-        bar = Bar("AAPL", ts, o=97.6, h=97.62, l=97.0, c=97.7, v=150_000)
+        bar = Bar("AAPL", ts, open=97.6, high=97.62, low=97.0, close=97.7, volume=150_000)
         df = _make_df([bar])
 
-        sig = strategy._detect_reversal_and_build_signal(df, "long", bar)
+        sig = strategy._detect_reversal_and_build_signal(
+            df, "long", bar, strategy._day_caches["AAPL"])
         assert sig is not None
         # Extended: target = or_high + or_range = 102 + 4 = 106
         assert sig.target_price == pytest.approx(106.0)
@@ -452,10 +470,11 @@ class TestExtendedTargetFlag:
         strategy.config["use_extended_target"] = False
         _seed_armed(strategy, direction="long", or_high=102.0, or_low=98.0)
         ts = _et_dt(2025, 3, 12, 10, 0)
-        bar = Bar("AAPL", ts, o=97.6, h=97.62, l=97.0, c=97.7, v=150_000)
+        bar = Bar("AAPL", ts, open=97.6, high=97.62, low=97.0, close=97.7, volume=150_000)
         df = _make_df([bar])
 
-        sig = strategy._detect_reversal_and_build_signal(df, "long", bar)
+        sig = strategy._detect_reversal_and_build_signal(
+            df, "long", bar, strategy._day_caches["AAPL"])
         assert sig is not None
         assert sig.target_price == pytest.approx(102.0)
 
@@ -467,10 +486,11 @@ class TestExtendedTargetFlag:
         # Extended Short = 98 - 4 = 94
         _seed_armed(strategy, direction="short", or_high=102.0, or_low=98.0)
         ts = _et_dt(2025, 3, 12, 10, 0)
-        bar = Bar("AAPL", ts, o=102.2, h=103.0, l=102.22, c=102.3, v=150_000)
+        bar = Bar("AAPL", ts, open=102.2, high=103.0, low=102.22, close=102.3, volume=150_000)
         df = _make_df([bar])
 
-        sig = strategy._detect_reversal_and_build_signal(df, "short", bar)
+        sig = strategy._detect_reversal_and_build_signal(
+            df, "short", bar, strategy._day_caches["AAPL"])
         assert sig is not None
         assert sig.target_price == pytest.approx(94.0)
 
@@ -480,17 +500,19 @@ class TestExtendedTargetFlag:
 class TestTimeWindowBoundaries:
     def test_signal_at_85min_passes(self, strategy, context):
         """Bar bei 85 Min nach Open → innerhalb Fenster, kein Block."""
-        strategy._day_cache["open_time_et"] = ET.localize(
-            datetime(2025, 3, 12, 9, 30))
+        cache = strategy._day_caches.setdefault(
+            "AAPL", QuickFlipStrategy._fresh_day_cache())
+        cache["open_time_et"] = ET.localize(datetime(2025, 3, 12, 9, 30))
         bar = _bar_minutes_after_open(85)
-        assert strategy._check_time_window_expired(bar.timestamp) is False
+        assert strategy._check_time_window_expired(bar.timestamp, cache) is False
 
     def test_signal_at_91min_blocked(self, strategy, context):
         """Bar bei 91 Min nach Open → außerhalb 90-Min-Fenster, geblockt."""
-        strategy._day_cache["open_time_et"] = ET.localize(
-            datetime(2025, 3, 12, 9, 30))
+        cache = strategy._day_caches.setdefault(
+            "AAPL", QuickFlipStrategy._fresh_day_cache())
+        cache["open_time_et"] = ET.localize(datetime(2025, 3, 12, 9, 30))
         bar = _bar_minutes_after_open(91)
-        assert strategy._check_time_window_expired(bar.timestamp) is True
+        assert strategy._check_time_window_expired(bar.timestamp, cache) is True
 
     def test_signal_at_75min_passes(self, strategy, context):
         """Bar bei 75 Min nach Open (10:45 ET) → kein Block.
@@ -498,11 +520,12 @@ class TestTimeWindowBoundaries:
         Vorher: entry_cutoff_time=10:45 hätte dies geblockt.
         Jetzt: einziger Filter ist max_trade_window_minutes=90 → passiert.
         """
-        strategy._day_cache["open_time_et"] = ET.localize(
-            datetime(2025, 3, 12, 9, 30))
+        cache = strategy._day_caches.setdefault(
+            "AAPL", QuickFlipStrategy._fresh_day_cache())
+        cache["open_time_et"] = ET.localize(datetime(2025, 3, 12, 9, 30))
         bar = _bar_minutes_after_open(75)
         # 9:30 + 75min = 10:45 ET – MUSS passieren (kein entry_cutoff mehr)
-        assert strategy._check_time_window_expired(bar.timestamp) is False
+        assert strategy._check_time_window_expired(bar.timestamp, cache) is False
 
     def test_no_entry_cutoff_param_in_config(self, strategy, context):
         """entry_cutoff_time darf nicht in QUICK_FLIP_DEFAULT_PARAMS stehen."""
@@ -526,7 +549,7 @@ class TestAtrSkipsWeekendBars:
                 continue
             ts = day.astimezone(timezone.utc)
             bars.append(Bar("AAPL", ts,
-                            o=100.0, h=102.0, l=98.0, c=100.0, v=100_000))
+                            open=100.0, high=102.0, low=98.0, close=100.0, volume=100_000))
 
         assert len(bars) == 15, f"Erwartet 15 Handelstage, erhalten: {len(bars)}"
 
@@ -553,7 +576,7 @@ class TestAtrSkipsWeekendBars:
                 continue
             ts = day.astimezone(timezone.utc)
             bars.append(Bar("AAPL", ts,
-                            o=100.0, h=102.0, l=98.0, c=100.0, v=100_000))
+                            open=100.0, high=102.0, low=98.0, close=100.0, volume=100_000))
 
         df = _bars_to_df(bars)
         idx_et = to_et(df.index)
@@ -578,7 +601,7 @@ class TestAtrSkipsWeekendBars:
                 continue
             ts = day.astimezone(timezone.utc)
             bars.append(Bar("AAPL", ts,
-                            o=100.0, h=102.0, l=98.0, c=100.0, v=100_000))
+                            open=100.0, high=102.0, low=98.0, close=100.0, volume=100_000))
 
         df = _bars_to_df(bars)
         atr_val = strategy._compute_daily_atr(df)
@@ -589,18 +612,15 @@ class TestAtrSkipsWeekendBars:
 
 class TestStateMachineReset:
     def test_reset_clears_to_idle(self, strategy, context):
-        """Nach reset(): _day_cache leer, state='idle'."""
+        """Nach reset(): _day_caches ist leer (alle Symbol-Caches entfernt)."""
         _seed_armed(strategy, direction="long")
-        strategy._day_cache["state"] = "done"
         strategy.reset()
-        assert strategy._day_cache.get("state") == "idle"
-        assert strategy._day_cache.get("or_high") is None
-        assert strategy._day_cache.get("direction") is None
+        assert strategy._day_caches == {}
 
     def test_done_state_is_terminal(self, strategy, context):
         """State 'done': jeder weitere Bar gibt [] zurück."""
         _seed_armed(strategy, direction="long")
-        strategy._day_cache["state"] = "done"
+        strategy._day_caches["AAPL"]["state"] = "done"
         for m in (30, 35, 40, 45, 50, 55):
             strategy.bars.append(_bar_at(9, m))
         bar = _bar_at(10, 5, o=97.0, h=97.62, l=97.0, c=97.7)
@@ -620,7 +640,9 @@ class TestStateMachineReset:
 class TestOrLock:
     def test_lock_opening_range_sets_or_color(self, strategy, context):
         """_lock_opening_range setzt or_open, or_close, or_color korrekt."""
-        strategy._day_cache["date"] = TEST_DATE
+        cache = strategy._day_caches.setdefault(
+            "AAPL", QuickFlipStrategy._fresh_day_cache())
+        cache["date"] = TEST_DATE
 
         # Rote OR: erstes Open > letztes Close
         or_bars = [
@@ -629,25 +651,27 @@ class TestOrLock:
             _bar_at(9, 40, o=101.0, h=101.5, l=99.5, c=100.0),   # 9:40
         ]
         df = _make_df(or_bars)
-        strategy._lock_opening_range(df)
+        strategy._lock_opening_range(df, cache)
 
-        assert strategy._day_cache["or_open"] == pytest.approx(101.0)
-        assert strategy._day_cache["or_close"] == pytest.approx(100.0)
-        assert strategy._day_cache["or_color"] == "red"
-        assert strategy._day_cache["or_high"] == pytest.approx(103.0)
-        assert strategy._day_cache["or_low"] == pytest.approx(99.5)
+        assert cache["or_open"] == pytest.approx(101.0)
+        assert cache["or_close"] == pytest.approx(100.0)
+        assert cache["or_color"] == "red"
+        assert cache["or_high"] == pytest.approx(103.0)
+        assert cache["or_low"] == pytest.approx(99.5)
 
     def test_lock_opening_range_green_or(self, strategy, context):
         """Grüne OR erkannt wenn or_close > or_open."""
-        strategy._day_cache["date"] = TEST_DATE
+        cache = strategy._day_caches.setdefault(
+            "AAPL", QuickFlipStrategy._fresh_day_cache())
+        cache["date"] = TEST_DATE
         or_bars = [
             _bar_at(9, 30, o=100.0, h=103.0, l=99.0, c=101.0),
             _bar_at(9, 35, o=101.0, h=103.5, l=100.5, c=102.5),
             _bar_at(9, 40, o=102.5, h=104.0, l=101.5, c=103.0),
         ]
         df = _make_df(or_bars)
-        strategy._lock_opening_range(df)
-        assert strategy._day_cache["or_color"] == "green"
+        strategy._lock_opening_range(df, cache)
+        assert cache["or_color"] == "green"
 
 
 class TestRRFilter:
@@ -657,7 +681,70 @@ class TestRRFilter:
         # Hammer mit entry≈97.67, stop≈96.95, target=or_high=98.1
         # risk=0.72, reward=0.43 → rr=0.60 < 1.5
         ts = _et_dt(2025, 3, 12, 10, 5)
-        bar = Bar("AAPL", ts, o=97.6, h=97.62, l=97.0, c=97.7, v=150_000)
+        bar = Bar("AAPL", ts, open=97.6, high=97.62, low=97.0, close=97.7, volume=150_000)
         df = _make_df([bar])
-        sig = strategy._detect_reversal_and_build_signal(df, "long", bar)
+        sig = strategy._detect_reversal_and_build_signal(
+            df, "long", bar, strategy._day_caches["AAPL"])
         assert sig is None
+
+
+# ── Test 12: Per-Symbol-Cache-Isolation ─────────────────────────────────────
+
+class TestPerSymbolCacheIsolation:
+    def test_per_symbol_day_cache_isolation(self, strategy, context):
+        """AAPL und MSFT bekommen unabhängige Caches – Werte kontaminieren sich nicht."""
+        _seed_or_complete(strategy, symbol="AAPL",
+                          or_high=105.0, or_low=101.0, daily_atr=8.0)
+        _seed_or_complete(strategy, symbol="MSFT",
+                          or_high=310.0, or_low=300.0, daily_atr=20.0)
+
+        assert strategy._day_caches["AAPL"]["or_high"] == pytest.approx(105.0)
+        assert strategy._day_caches["AAPL"]["daily_atr"] == pytest.approx(8.0)
+        assert strategy._day_caches["MSFT"]["or_high"] == pytest.approx(310.0)
+        assert strategy._day_caches["MSFT"]["daily_atr"] == pytest.approx(20.0)
+        # Sicherstellen dass die Cache-Objekte separat sind (kein Alias)
+        assert strategy._day_caches["AAPL"] is not strategy._day_caches["MSFT"]
+        assert strategy._day_caches["AAPL"]["or_high"] != strategy._day_caches["MSFT"]["or_high"]
+
+    def test_two_symbols_independent_directions(self, strategy, context):
+        """AAPL long-armed, MSFT short-armed – keine Richtungs-Kontamination."""
+        _seed_armed(strategy, symbol="AAPL", direction="long",
+                    or_high=102.0, or_low=98.0)
+        _seed_armed(strategy, symbol="MSFT", direction="short",
+                    or_high=312.0, or_low=308.0)
+
+        assert strategy._day_caches["AAPL"]["direction"] == "long"
+        assert strategy._day_caches["MSFT"]["direction"] == "short"
+        assert strategy._day_caches["AAPL"]["or_high"] == pytest.approx(102.0)
+        assert strategy._day_caches["MSFT"]["or_high"] == pytest.approx(312.0)
+        assert strategy._day_caches["AAPL"]["state"] == "armed"
+        assert strategy._day_caches["MSFT"]["state"] == "armed"
+
+    def test_reset_clears_all_symbol_caches(self, strategy, context):
+        """Nach reset(): _day_caches == {} – alle Symbol-Caches gelöscht."""
+        _seed_armed(strategy, symbol="AAPL", direction="long")
+        _seed_armed(strategy, symbol="MSFT", direction="short")
+        _seed_armed(strategy, symbol="NVDA", direction="long")
+        assert len(strategy._day_caches) == 3
+        strategy.reset()
+        assert strategy._day_caches == {}
+
+    def test_window_expired_only_affects_one_symbol(self, strategy, context):
+        """Window-Expired für AAPL setzt nur AAPL-Cache auf 'done'; MSFT bleibt 'armed'."""
+        _seed_armed(strategy, symbol="AAPL", direction="long",
+                    or_high=102.0, or_low=98.0)
+        _seed_armed(strategy, symbol="MSFT", direction="short",
+                    or_high=312.0, or_low=308.0)
+
+        # AAPL-Bars für den sym_bars-Fallback-Pfad
+        for m in (30, 35, 40, 45, 50, 55):
+            strategy.bars.append(_bar_at(9, m, symbol="AAPL"))
+
+        # AAPL-Bar 91 Minuten nach Open → Fenster abgelaufen
+        bar_aapl = _bar_minutes_after_open(91, symbol="AAPL",
+                                           l=97.0, h=97.62, o=97.6, c=97.7)
+        signals = strategy._generate_signals(bar_aapl)
+        assert signals == []
+        assert strategy._day_caches["AAPL"]["state"] == "done"
+        # MSFT-Cache wurde durch AAPL-Bar nicht berührt
+        assert strategy._day_caches["MSFT"]["state"] == "armed"

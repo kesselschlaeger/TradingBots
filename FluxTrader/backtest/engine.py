@@ -190,6 +190,30 @@ class BarByBarEngine:
             precomputed[sym] = compute_indicator_frame(df)
         self.context.set_indicator_frames(precomputed)
 
+        # ── Warmup-Prerequisit-Check: Fail-Fast vor dem Bar-Loop ─────
+        req_warmup = getattr(self.strategy, "required_warmup_days", lambda: None)()
+        if req_warmup is not None and precomputed:
+            available_days = 0
+            for df in precomputed.values():
+                if df is not None and not df.empty:
+                    span = max(0, (df.index.max() - df.index.min()).days)
+                    available_days = max(available_days, span)
+            if available_days < req_warmup:
+                strat_name = getattr(
+                    self.strategy, "name", type(self.strategy).__name__
+                )
+                log.error(
+                    "engine.warmup_too_short",
+                    strategy=strat_name,
+                    required_days=req_warmup,
+                    available_days=available_days,
+                    reason="daily_atr",
+                )
+                raise RuntimeError(
+                    f"lookback insufficient: {available_days} days < "
+                    f"{req_warmup} required for strategy {strat_name}"
+                )
+
         # ── Variante C: Effiziente Timeline aus numpy-Arrays ─────────
         timeline, sym_arrays = _build_timeline(precomputed)
 

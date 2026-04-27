@@ -88,6 +88,15 @@ class BaseStrategy(ABC):
     def _is_ready(self) -> bool:
         return len(self.bars) >= int(self.config.get("min_bars", 5))
 
+    def required_warmup_days(self) -> Optional[int]:
+        """Mindestanzahl Kalendertage Warmup-Daten für diesen Strategie-Typ.
+
+        None = keine Validierung (Fallback). Subklassen überschreiben mit dem
+        konkret benötigten Wert, damit LiveRunner und BarByBarEngine beim Start
+        fail-fast prüfen können (CLAUDE.md Regel 7: Hard Prerequisites).
+        """
+        return None
+
     def reset(self) -> None:
         """EOD-Reset und Backtest-Re-Run."""
         self.bars.clear()
