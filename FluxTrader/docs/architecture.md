@@ -162,7 +162,7 @@ spy = ctx.spy_df
 
 ## PersistentState (Single-Source-of-Truth)
 
-Die zentrale SQLite-Datenbank (`fluxtrader_data/state.db`) ist **nicht Teil von Tests**
+Die zentrale SQLite-Datenbank (`fluxtrader_data/fluxtrader.db`) ist **nicht Teil von Tests**
 und wird nicht geleert zwischen Test-Runs – sie lebt daher unabhängig und kann
 beliebig lange Historien halten.
 

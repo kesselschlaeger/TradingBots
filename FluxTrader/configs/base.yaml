@@ -26,8 +26,8 @@ notifications:
   enabled: false
 
 persistence:
-  data_dir: fluxtrader_data
-  state_db: state.db
+  data_dir: /data      # Docker-Volume; lokal via FT_DATA_DIR in .env überschreiben
+  state_db: fluxtrader.db
 
 monitoring:
   watchdog_interval_s: 15          # Heartbeat-Takt des LiveRunners in die DB

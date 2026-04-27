@@ -2,7 +2,7 @@
 import asyncio, pathlib
 import aiosqlite
 
-DB = pathlib.Path(__file__).parent.parent / "fluxtrader_data" / "state.db"
+DB = pathlib.Path(__file__).parent.parent / "fluxtrader_data" / "fluxtrader.db"
 
 async def main():
     async with aiosqlite.connect(DB) as conn:

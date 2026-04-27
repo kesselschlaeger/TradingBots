@@ -82,7 +82,7 @@ mit den Top-Gap-Kandidaten.
 
 ## State-Persistenz (zentrale Multi-Bot-DB)
 
-`PersistentState` speichert in `fluxtrader_data/state.db` (SQLite) – **eine DB für alle Bots**:
+`PersistentState` speichert in `fluxtrader_data/fluxtrader.db` (SQLite) – **eine DB für alle Bots**:
 
 | Tabelle | Diskriminator | Zweck |
 |---------|---|---|

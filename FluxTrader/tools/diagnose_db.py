@@ -1,4 +1,4 @@
-"""Schnell-Diagnose der state.db – zeigt Tabelleninhalte und Bot-Aktivität."""
+"""Schnell-Diagnose der fluxtrader.db – zeigt Tabelleninhalte und Bot-Aktivität."""
 import asyncio
 import pathlib
 import sys
@@ -8,7 +8,7 @@ try:
 except ImportError:
     sys.exit("aiosqlite fehlt")
 
-DB = pathlib.Path(__file__).parent.parent / "fluxtrader_data" / "state.db"
+DB = pathlib.Path(__file__).parent.parent / "fluxtrader_data" / "fluxtrader.db"
 
 
 async def main() -> None:

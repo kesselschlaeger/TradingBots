@@ -259,6 +259,7 @@ class PersistentState:
                 return
             async with self._conn() as conn:
                 await conn.execute("PRAGMA journal_mode=WAL")
+                await conn.execute("PRAGMA busy_timeout=5000")   # 5s warten bei gleichzeitigen Writes mehrerer Bot-Container
                 await conn.execute("PRAGMA synchronous=NORMAL")
                 await conn.execute("PRAGMA foreign_keys=ON")
 

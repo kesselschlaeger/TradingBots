@@ -107,8 +107,8 @@ def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Beispiele:
-  python tools/train_ml.py --history fluxtrader_data/state.db --output tools/models/
-  python tools/train_ml.py --history fluxtrader_data/state.db --output tools/models/ --model lgbm
+  python tools/train_ml.py --history fluxtrader_data/fluxtrader.db --output tools/models/
+  python tools/train_ml.py --history fluxtrader_data/fluxtrader.db --output tools/models/ --model lgbm
         """,
     )
     parser.add_argument("--history", "-H", required=True,

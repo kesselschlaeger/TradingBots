@@ -169,5 +169,5 @@ python main.py paper --config configs/orb_paper.yaml --log-json
 python main.py paper --config configs/orb_paper.yaml --log-level DEBUG
 ```
 
-State-Datenbank (SQLite) liegt in `fluxtrader_data/state.db` – einsehbar mit
+State-Datenbank (SQLite) liegt in `fluxtrader_data/fluxtrader.db` – einsehbar mit
 jedem SQLite-Viewer (z.B. DB Browser for SQLite).

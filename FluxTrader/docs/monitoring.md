@@ -15,7 +15,7 @@ Das Monitoring-Subsystem besteht aus fünf Komponenten mit klarer Trennung:
 
 ## Zentrale SQLite-Datenbank (Single-Source-of-Truth)
 
-Eine `state.db` für **alle gleichzeitig laufenden Strategien** (ORB, OBB, Botti, BottiPair, ...).
+Eine `fluxtrader.db` für **alle gleichzeitig laufenden Strategien** (ORB, OBB, Botti, BottiPair, ...).
 
 ### Schema
 
@@ -86,7 +86,7 @@ python main.py dashboard --config configs/orb_paper.yaml --port 8080
 
 ### 4. Mehrere Bots gleichzeitig
 
-Alle schreiben in **eine** `fluxtrader_data/state.db`, getrennt über `strategy`-Feld:
+Alle schreiben in **eine** `fluxtrader_data/fluxtrader.db`, getrennt über `strategy`-Feld:
 
 ```bash
 # Terminal 1
@@ -391,7 +391,7 @@ scrape_configs:
    import asyncio
    from pathlib import Path
    from live.state import PersistentState
-   asyncio.run(PersistentState(Path('fluxtrader_data/state.db')).ensure_schema())
+   asyncio.run(PersistentState(Path('fluxtrader_data/fluxtrader.db')).ensure_schema())
    "
    ```
 
@@ -410,9 +410,9 @@ WAL-Modus ist aktiv (optimal für Concurrency). Falls trotzdem Timeout:
 
 ### Tests schlagen fehl
 
-`state.ensure_schema()` wird automatisch beim `init()` (oder explizit `ensure_schema()`) aufgerufen. Falls Tests `state.db` mit altem Schema haben:
+`state.ensure_schema()` wird automatisch beim `init()` (oder explizit `ensure_schema()`) aufgerufen. Falls Tests `fluxtrader.db` mit altem Schema haben:
 ```bash
-rm fluxtrader_data/state.db
+rm fluxtrader_data/fluxtrader.db
 python -m pytest tests/unit/
 ```
 

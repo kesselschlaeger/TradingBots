@@ -75,7 +75,7 @@ class PersistenceConfig(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     data_dir: str = "fluxtrader_data"
-    state_db: str = "state.db"
+    state_db: str = "fluxtrader.db"
 
 
 class TradeWindowPhaseConfig(BaseModel):
@@ -222,6 +222,8 @@ class EnvSettings(BaseSettings):
     BYBIT_API_KEY: Optional[str] = None          # Bybit API-Schlüssel (überschreibt broker_params.api_key aus YAML)
     BYBIT_API_SECRET: Optional[str] = None       # Bybit API-Secret (überschreibt broker_params.api_secret aus YAML)
 
+    FT_DATA_DIR: Optional[str] = None            # Überschreibt persistence.data_dir (lokal/CI); Docker nutzt /data
+
     TELEGRAM_TOKEN: Optional[str] = Field(
         default=None,
         validation_alias=AliasChoices("TELEGRAM_TOKEN", "TELEGRAM_BOT_TOKEN"),
@@ -324,6 +326,9 @@ def _apply_env_overrides(raw: dict, env: EnvSettings) -> dict:
         bp["api_secret"] = env.BYBIT_API_SECRET
     if bp:
         out["broker_params"] = bp
+
+    if env.FT_DATA_DIR:
+        out.setdefault("persistence", {})["data_dir"] = env.FT_DATA_DIR
 
     return out
 

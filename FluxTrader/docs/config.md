@@ -91,7 +91,7 @@ python main.py paper --config configs/orb_paper.yaml
 | Key | Typ | Default | Beschreibung |
 |---|---|---|---|
 | `data_dir` | str | `fluxtrader_data` | Verzeichnis für SQLite-DB |
-| `state_db` | str | `state.db` | Dateiname der State-Datenbank |
+| `state_db` | str | `fluxtrader.db` | Dateiname der State-Datenbank |
 
 ---
 
